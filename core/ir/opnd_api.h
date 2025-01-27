@@ -572,6 +572,8 @@ enum {
     DR_REG_BND2, /**< The "bnd2" register. */
     DR_REG_BND3, /**< The "bnd3" register. */
 
+    DR_REG_AFTER_LAST_VALID_ENUM,
+
 /****************************************************************************/
 #elif defined(AARCHXX)
     DR_REG_INVALID, /**< Sentinel value indicating an invalid register. */
@@ -1026,10 +1028,11 @@ enum {
     DR_REG_SPSR_ABT,        /**< The "spsr_abt" register. */
     DR_REG_SPSR_UND,        /**< The "spsr_und" register. */
     DR_REG_SPSR_FIQ,        /**< The "spsr_fiq" register. */
+/* Be sure to update reg_get_size() in opnd_shared.c if you add a register. */
 #    else
-    DR_REG_CPSR,                              /**< The "cpsr" register. */
-    DR_REG_SPSR,                              /**< The "spsr" register. */
-    DR_REG_FPSCR,                             /**< The "fpscr" register. */
+    DR_REG_CPSR,                  /**< The "cpsr" register. */
+    DR_REG_SPSR,                  /**< The "spsr" register. */
+    DR_REG_FPSCR,                 /**< The "fpscr" register. */
 #    endif
 
     /* AArch32 Thread Registers */
@@ -1078,7 +1081,10 @@ enum {
     DR_REG_ELR_EL1,          /**< The "elr_el1" register. */
     DR_REG_SPSR_EL1,         /**< The "spsr_el1" register. */
     DR_REG_TPIDR_EL1,        /**< The "tpidr_el1" register. */
+/* Be sure to update reg_get_size() in opnd_shared.c if you add a register. */
 #    endif
+
+    DR_REG_AFTER_LAST_VALID_ENUM,
 
 /* Aliases below here: */
 #    ifdef AARCH64
@@ -1116,9 +1122,9 @@ enum {
     DR_REG_SP = DR_REG_XSP,  /**< The stack pointer register. */
     DR_REG_LR = DR_REG_X30,  /**< The link register. */
 #    else
-    DR_REG_SP = DR_REG_R13,                   /**< The stack pointer register. */
-    DR_REG_LR = DR_REG_R14,                   /**< The link register. */
-    DR_REG_PC = DR_REG_R15,                   /**< The program counter register. */
+    DR_REG_SP = DR_REG_R13,       /**< The stack pointer register. */
+    DR_REG_LR = DR_REG_R14,       /**< The link register. */
+    DR_REG_PC = DR_REG_R15,       /**< The program counter register. */
 #    endif
     DR_REG_SL = DR_REG_R10,  /**< Alias for the r10 register. */
     DR_REG_FP = DR_REG_R11,  /**< Alias for the r11 register. */
@@ -1134,16 +1140,8 @@ enum {
     /** Thread Pointer/ID Register, Read-Only, EL0. */
     DR_REG_TPIDRRO_EL0 = DR_REG_TPIDRURO,
     /* ARMv7 Thread Registers */
-    DR_REG_CP15_C13_2 = DR_REG_TPIDRURW,       /**< User Read/Write Thread ID Register */
-    DR_REG_CP15_C13_3 = DR_REG_TPIDRURO,       /**< User Read-Only Thread ID Register */
-
-#    ifdef AARCH64
-    DR_REG_LAST_VALID_ENUM = DR_REG_TPIDR_EL1, /**< Last valid register enum */
-    DR_REG_LAST_ENUM = DR_REG_TPIDR_EL1,       /**< Last value of register enums */
-#    else
-    DR_REG_LAST_VALID_ENUM = DR_REG_TPIDRURO, /**< Last valid register enum */
-    DR_REG_LAST_ENUM = DR_REG_TPIDRURO,       /**< Last value of register enums */
-#    endif
+    DR_REG_CP15_C13_2 = DR_REG_TPIDRURW, /**< User Read/Write Thread ID Register */
+    DR_REG_CP15_C13_3 = DR_REG_TPIDRURO, /**< User Read-Only Thread ID Register */
 
 #    ifdef AARCH64
     DR_REG_START_64 = DR_REG_X0,  /**< Start of 64-bit general register enum values */
@@ -1318,6 +1316,8 @@ enum {
     DR_REG_VR30, /**< The v30 vector register. */
     DR_REG_VR31, /**< The v31 vector register. */
 
+    DR_REG_AFTER_LAST_VALID_ENUM,
+
     /* FPR aliases */
     DR_REG_FT0 = DR_REG_F0, /**< The 1st temporary floating-point (f0) register. */
     DR_REG_FT1 = DR_REG_F1, /**< The 2nd temporary floating-point (f1) register. */
@@ -1355,9 +1355,6 @@ enum {
     DR_REG_FT11 = DR_REG_F31, /**< The 12th temporary floating-point (f31) register. */
 
     /* FIXME i#3544: CCSRs */
-
-    DR_REG_LAST_VALID_ENUM = DR_REG_VR31, /**< Last valid register enum. */
-    DR_REG_LAST_ENUM = DR_REG_VR31,       /**< Last value of register enums. */
 
     DR_REG_START_64 = DR_REG_X1,  /**< Start of 64-bit register enum values. */
     DR_REG_STOP_64 = DR_REG_F31,  /**< End of 64-bit register enum values. */
@@ -1779,13 +1776,15 @@ typedef enum {
 #    define DR_REG_STOP_DR DR_REG_DR15    /**< End of debug register enum values */
 #    define DR_REG_START_CR DR_REG_CR0    /**< Start of control register enum values */
 #    define DR_REG_STOP_CR DR_REG_CR15    /**< End of control register enum values */
+
+#endif /* X86 */
+
 /**
- * Last valid register enum value.  Note: DR_REG_INVALID is now smaller
+ * Last valid register enum value.  Note: #DR_REG_INVALID is now smaller
  * than this value.
  */
-#    define DR_REG_LAST_VALID_ENUM DR_REG_K7
-#    define DR_REG_LAST_ENUM DR_REG_BND3 /**< Last value of register enums */
-#endif                                   /* X86 */
+#define DR_REG_LAST_VALID_ENUM (DR_REG_AFTER_LAST_VALID_ENUM - 1)
+#define DR_REG_LAST_ENUM (DR_REG_AFTER_LAST_VALID_ENUM - 1)
 
 #define REG_NULL DR_REG_NULL
 #define REG_INVALID DR_REG_INVALID
@@ -1795,8 +1794,6 @@ typedef enum {
 #endif
 #define REG_START_32 DR_REG_START_32
 #define REG_STOP_32 DR_REG_STOP_32
-#define REG_LAST_VALID_ENUM DR_REG_LAST_VALID_ENUM
-#define REG_LAST_ENUM DR_REG_LAST_ENUM
 #define REG_XSP DR_REG_XSP
 /* Backward compatibility with REG_ constants (we now use DR_REG_ to avoid
  * conflicts with the REG_ enum in <sys/ucontext.h>: i#34).
