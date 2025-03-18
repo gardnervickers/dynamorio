@@ -2216,6 +2216,9 @@ elseif (RISCV64)
 endif ()
 tobuild(common.${control_flags} common/${control_flags}.c)
 
+# Binary used for sample.callstack, which uses libcallstack to track malloc() calls.
+tobuild(common.alloc common/alloc.c)
+
 if (X86) # FIXME i#1551, i#1569: port asm to ARM and AArch64
   tobuild(common.floatpc common/floatpc.c)
   torunonly(common.floatpc_xl8all common.floatpc common/floatpc.c "-translate_fpu_pc" "")
@@ -3700,6 +3703,7 @@ if (BUILD_SAMPLES)
     foreach (sample ${sample_list})
       # FIXME i#4392: Remove sanity checks and replace with functioning tests like
       # that done for the opcode_count and memtrace_simple samples.
+      # This function call to torunonly_ci() is overwritten by the special cases below.
       torunonly_ci(sample.${sample} common.${control_flags}
         ${sample} common/${control_flags}.c "" "" "")
       if (sample STREQUAL "inscount")
@@ -3771,6 +3775,7 @@ if (BUILD_SAMPLES)
         endif ()
       elseif (sample STREQUAL "callstack")
         set(sample.${sample}_expectbase "sample.callstack")
+        torunonly_ci(sample.${sample} common.alloc ${sample} common/alloc.c "" "" "")
       endif()
     endforeach ()
   endif (NOT ANDROID)
