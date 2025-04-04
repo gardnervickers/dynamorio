@@ -202,6 +202,9 @@ proc_init_arch(void)
         LOG_FEATURE(FEATURE_DPB2);
         LOG_FEATURE(FEATURE_JSCVT);
         LOG_FEATURE(FEATURE_PAUTH);
+        LOG_FEATURE(FEATURE_LS64);
+        LOG_FEATURE(FEATURE_LS64V);
+        LOG_FEATURE(FEATURE_LS64ACCDATA);
 
         LOG(GLOBAL, LOG_TOP, 1, "ID_AA64PFR0_EL1 = 0x%016lx\n",
             cpu_info.features.isa_features[AA64PFR0]);
@@ -304,6 +307,8 @@ enable_all_test_cpu_features()
         FEATURE_FPAC,   FEATURE_FPACCOMBINE,
         FEATURE_SB,
         FEATURE_XS,
+        FEATURE_LS64, FEATURE_LS64V, FEATURE_LS64ACCDATA,
+
     };
     /* clang-format on */
     for (int i = 0; i < BUFFER_SIZE_ELEMENTS(features); ++i) {
