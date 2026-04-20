@@ -126,6 +126,7 @@ clients.
 
 The changes between version \DR_VERSION and 11.3.0 include the following compatibility
 changes:
+ - Added AArch64 instr_get_isa_feature() and instr_get_isa_feature_name() APIs.
  - No compatibility changes yet.
 
 Further non-compatibility-affecting changes include:
