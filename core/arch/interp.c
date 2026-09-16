@@ -3894,9 +3894,21 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                 break;
         }
 #ifdef AARCH64
-        /* OP_isb, when mangled, has a potential side exit. */
-        else if (instr_get_opcode(bb->instr) == OP_isb)
+        /* Cut off sandboxed fragments after an ISB instruction when -sandbox_writes is
+         * off. Even on hardware with icache coherency, AArch64 requires an ISB
+         * instruction to guarantee that the processor fetches the new version of modified
+         * instructions. We truncate the fragment after the ISB so that any instructions
+         * after the ISB will be in a different fragment and modifications will be caught
+         * by the top-of-fragment modification check.
+         *
+         * When -sandbox_writes is on, the write mangling code takes care of detecting
+         * modifications instead.
+         */
+        else if (TEST(FRAG_SELFMOD_SANDBOXED, bb->flags) &&
+                 !INTERNAL_OPTION(sandbox_writes) &&
+                 instr_get_opcode(bb->instr) == OP_isb) {
             break;
+        }
 #endif
 #if 0 /*i#1313, i#1314*/
         else if (instr_get_opcode(bb->instr) == OP_getsec) {
@@ -4208,7 +4220,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
          * don't set at_syscall and so are incompatible w/ -syscalls_synch_flush.
          */
         if (!TEST(FRAG_HAS_SYSCALL, bb->flags) ||
-            TESTANY(LINK_NI_SYSCALL_ALL, bb->exit_type) ||
+            TEST(LINK_NI_SYSCALL_ALL, bb->exit_type) ||
             TEST(LINK_SPECIAL_EXIT, bb->exit_type))
             bb->flags |= FRAG_SHARED;
 #ifdef WINDOWS
@@ -4250,7 +4262,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
 #ifdef WINDOWS
          TEST(LINK_CALLBACK_RETURN, bb->exit_type) ||
 #endif
-         TESTANY(LINK_NI_SYSCALL_ALL, bb->exit_type))) {
+         TEST(LINK_NI_SYSCALL_ALL, bb->exit_type))) {
         /* Currently not supported in a coarse unit */
         STATS_INC(num_fine_in_coarse);
         DOSTATS({
@@ -4268,7 +4280,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                 STATS_INC(coarse_prevent_translation);
             else if (IF_WINDOWS_ELSE_0(TEST(LINK_CALLBACK_RETURN, bb->exit_type)))
                 STATS_INC(coarse_prevent_cbret);
-            else if (TESTANY(LINK_NI_SYSCALL_ALL, bb->exit_type))
+            else if (TEST(LINK_NI_SYSCALL_ALL, bb->exit_type))
                 STATS_INC(coarse_prevent_syscall);
             else
                 ASSERT_NOT_REACHED();
@@ -7072,7 +7084,7 @@ mangle_trace(dcontext_t *dcontext, instrlist_t *ilist, monitor_data_t *md)
                 instr_set_our_mangling(jmp, true); /* undone by target set */
             }
             /* FIXME: test for linux too, but allowing ignorable syscalls */
-            if (!TESTANY(LINK_NI_SYSCALL_ALL IF_WINDOWS(| LINK_CALLBACK_RETURN),
+            if (!TEST(LINK_NI_SYSCALL_ALL IF_WINDOWS(| LINK_CALLBACK_RETURN),
                          md->final_exit_flags) &&
                 !TEST(INSTR_SHARED_SYSCALL, instrlist_last(ilist)->flags)) {
                 CLIENT_ASSERT(false,

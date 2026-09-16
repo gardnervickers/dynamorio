@@ -420,7 +420,11 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
                (opnd_get_pc(instr_get_target(inst)) >= walk->start_cache &&
                 opnd_get_pc(instr_get_target(inst)) < walk->end_cache))))
 #elif defined(AARCHXX)
-            /* Do not reset for cbnz/bne in ldstex mangling, nor for the b after strex. */
+            /* Do not reset for:
+             *     cbnz/bne in ldstex mangling,
+             *     the b after strex,
+             *     tbz/tbnz in selfmod sandbox mangling.
+             */
             !(instr_get_opcode(inst) == OP_cbnz ||
               (instr_get_opcode(inst) == OP_b &&
                (instr_get_prev(inst) != NULL &&
@@ -430,7 +434,9 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
                 (instr_is_exclusive_store(instr_get_prev(inst)) ||
                  (instr_get_opcode(instr_get_prev(inst)) == OP_cbnz &&
                   instr_get_prev(instr_get_prev(inst)) != NULL &&
-                  instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst))))))))
+                  instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst)))))))
+                  IF_AARCH64(|| instr_get_opcode(inst) == OP_tbz ||
+                             instr_get_opcode(inst) == OP_tbnz))
 #elif defined(RISCV64)
             /* Do not reset for bne in LR/SC mangling, nor for the jal after SC.
              * This should be kept in sync with mangle_exclusive_monitor_op().
@@ -1095,10 +1101,14 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
                         "walk=%p\n",
                         walk.unsupported_mangle, walk.in_mangle_region, answer,
                         walk.translation);
-#ifdef X86
+#ifdef ARCH_SUPPORTS_HW_CACHE_CONSISTENCY
+#    ifdef X86
                     int op = instr_get_opcode(inst);
-                    if (TEST(FRAG_SELFMOD_SANDBOXED, flags) &&
-                        (op == OP_rep_ins || op == OP_rep_movs || op == OP_rep_stos)) {
+#    endif
+                    if (TEST(FRAG_SELFMOD_SANDBOXED, flags)
+                            IF_X86(&&(op == OP_rep_ins || op == OP_rep_movs ||
+                                      op == OP_rep_stos))) {
+#    ifdef X86
                         /* i#398: xl8 selfmod: rep string instrs have xbx spilled in
                          * thread-private slot.  We assume no other selfmod mangling
                          * has a reg spilled at time of app instr execution.
@@ -1109,10 +1119,15 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
                                 "\trestoring spilled xbx to " PFX "\n", walk.mc->xbx);
                             STATS_INC(recreate_spill_restores);
                         }
+#    elif defined(AARCH64)
+                        /* Nothing to do. All spilled state will be restored by
+                         * translate_walk_restore() below.
+                         */
+#    endif
                         LOG(THREAD_GET, LOG_INTERP, 2,
                             "recreate_app -- found valid state pc " PFX "\n", answer);
                     } else
-#endif /* X86 */
+#endif /* ARCH_SUPPORTS_HW_CACHE_CONSISTENCY */
                     {
                         res = RECREATE_SUCCESS_PC; /* failed on full state, but pc good */
                         /* should only happen for thread synch, not a fault */
@@ -1559,7 +1574,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
             client_info.fragment_info.cache_start_pc = FCACHE_ENTRY_PC(f);
             client_info.fragment_info.is_trace = TEST(FRAG_IS_TRACE, f->flags);
             client_info.fragment_info.app_code_consistent =
-                !TESTANY(FRAG_WAS_DELETED | FRAG_SELFMOD_SANDBOXED, f->flags);
+                !TEST(FRAG_WAS_DELETED | FRAG_SELFMOD_SANDBOXED, f->flags);
             client_info.fragment_info.ilist = ilist;
             /* i#220/PR 480565: client has option of failing the translation */
             if (!instrument_restore_state(tdcontext, restore_memory, &client_info))

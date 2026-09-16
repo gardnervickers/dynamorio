@@ -2650,7 +2650,7 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
                         ASSERT(sf->tag == NULL);
                     }
                 });
-                ASSERT(!TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
+                ASSERT(!TEST(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
                 return f;
             }
         }
@@ -2672,7 +2672,7 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
                         ASSERT(sf->tag == NULL || TEST(FRAG_TEMP_PRIVATE, f->flags));
                     }
                 });
-                ASSERT(!TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
+                ASSERT(!TEST(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
                 return f;
             }
         }
@@ -2688,7 +2688,7 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
             d_r_read_unlock(&shared_trace->rwlock);
             if (f->tag != NULL) {
                 ASSERT(f->tag == tag);
-                ASSERT(!TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
+                ASSERT(!TEST(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
                 return f;
             }
         }
@@ -2702,7 +2702,7 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
             d_r_read_unlock(&shared_bb->rwlock);
             if (f->tag != NULL) {
                 ASSERT(f->tag == tag);
-                ASSERT(!TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
+                ASSERT(!TEST(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags));
                 return f;
             }
         }
@@ -2911,7 +2911,7 @@ fragment_add(dcontext_t *dcontext, fragment_t *f)
                TEST(FRAG_IS_TRACE_HEAD, f->flags) ||
                TEST(FRAG_IS_TRACE_HEAD, existing->flags) ||
                /* private trace or temp can shadow shared bb */
-               (TESTANY(FRAG_IS_TRACE | FRAG_TEMP_PRIVATE, f->flags) &&
+               (TEST(FRAG_IS_TRACE | FRAG_TEMP_PRIVATE, f->flags) &&
                 TEST(FRAG_SHARED, f->flags) != TEST(FRAG_SHARED, existing->flags)) ||
                /* shared trace can shadow shared trace head, even with
                 * -remove_shared_trace_heads */
@@ -3905,9 +3905,14 @@ fragment_shift_fcache_pointers(dcontext_t *dcontext, fragment_t *f, ssize_t shif
 
 #ifdef X86
     if (TEST(FRAG_SELFMOD_SANDBOXED, f->flags)) {
-        /* just re-finalize to update */
-        finalize_selfmod_sandbox(dcontext, f);
+        /* Just re-finalize to update. */
+        finalize_selfmod_sandbox(dcontext, /*ilist=*/NULL, f);
     }
+#elif defined(AARCH64)
+    /* Nothing to do.
+     * AArch64 uses PC-relative addressing to get the app code copy pointer so it can be
+     * relocated without needing to re-finalize it.
+     */
 #endif
 
     /* inter-cache links must be redone, but all fragment entry pcs must be
