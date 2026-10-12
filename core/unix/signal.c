@@ -301,6 +301,9 @@ static void
 intercept_signal(dcontext_t *dcontext, thread_sig_info_t *info, int sig);
 
 static void
+set_our_handler_sigact(kernel_sigaction_t *act, int sig);
+
+static void
 signal_info_init_sigaction(dcontext_t *dcontext, thread_sig_info_t *info);
 
 static void
@@ -1431,10 +1434,11 @@ count_pending_signals(thread_sig_info_t *info, byte counts[SIGARRAY_SIZE])
 
 /* Called in the forking thread just before its fork syscall. */
 void
-signal_fork_pre(dcontext_t *dcontext)
+signal_fork_pre(dcontext_t *dcontext, bool clear_sighand)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     count_pending_signals(info, info->pending_at_fork);
+    info->fork_clear_sighand = clear_sighand;
 }
 
 /* A signal that arrives while this thread waits in handle_suspend_signal()
@@ -1546,6 +1550,25 @@ signal_fork_init(dcontext_t *dcontext)
     }
     if (info->num_pending > 0)
         check_signals_pending(dcontext, info);
+    if (info->fork_clear_sighand) {
+        /* CLONE_CLEAR_SIGHAND: the kernel reset every handler, ours included, to
+         * SIG_DFL (ignored signals stay ignored). Do the same to the app's
+         * handlers and re-arm ours for the signals we intercept.
+         */
+        info->fork_clear_sighand = false;
+        for (i = 1; i <= MAX_SIGNUM; i++) {
+            kernel_sigaction_t *app = info->sighand->action[i];
+            if (app != NULL && app->handler != (handler_t)SIG_IGN) {
+                handler_free(dcontext, app, sizeof(kernel_sigaction_t));
+                info->sighand->action[i] = NULL;
+            }
+            if (info->sighand->we_intercept[i]) {
+                kernel_sigaction_t act;
+                set_our_handler_sigact(&act, i);
+                sigaction_syscall(i, &act, NULL);
+            }
+        }
+    }
     if (INTERNAL_OPTION(profile_pcs)) {
         pcprofile_fork_init(dcontext);
     }

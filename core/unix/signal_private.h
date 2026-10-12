@@ -471,6 +471,8 @@ typedef struct _thread_sig_info_t {
      * discards these inherited entries but keeps signals that arrived later.
      */
     byte pending_at_fork[SIGARRAY_SIZE];
+    /* The next fork is a clone3 with CLONE_CLEAR_SIGHAND. */
+    bool fork_clear_sighand;
     /* are the pending still on one special heap unit? */
     bool multiple_pending_units;
     /* "lock" to prevent interrupting signal from messing up sigpending array */

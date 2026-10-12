@@ -195,6 +195,11 @@ char **our_environ;
 #endif
 #include "../module_shared.h"
 #include "os_private.h"
+
+#ifndef CLONE_CLEAR_SIGHAND_FLAG
+/* clone3 only: reset the child's signal handlers to SIG_DFL (SIG_IGN stays). */
+#    define CLONE_CLEAR_SIGHAND_FLAG 0x100000000ULL
+#endif
 #include "../synch.h"
 #include "memquery.h"
 #include "ksynch.h"
@@ -2738,7 +2743,7 @@ os_fork_pre(dcontext_t *dcontext)
      */
     d_r_mutex_unlock(&thread_initexit_lock);
     d_r_mutex_unlock(&all_threads_synch_lock);
-    signal_fork_pre(dcontext);
+    signal_fork_pre(dcontext, false);
 }
 
 /* Happens after the fork in both the parent and child. */
@@ -7177,6 +7182,8 @@ handle_clone_pre(dcontext_t *dcontext)
             os_vfork_pre(dcontext);
     } else {
         /* This is really a fork. */
+        bool clear_sighand = dcontext->sys_num == SYS_clone3 &&
+            TESTANY(CLONE_CLEAR_SIGHAND_FLAG, (uint64)flags);
         if (dcontext->sys_num == SYS_clone3) {
             /* We free this memory before the actual fork, to avoid having to free
              * it in the parent *and* the child later.
@@ -7189,6 +7196,8 @@ handle_clone_pre(dcontext_t *dcontext)
             dcontext->sys_param2 = 0;
         }
         os_fork_pre(dcontext);
+        if (clear_sighand)
+            signal_fork_pre(dcontext, true);
     }
     return true;
 }

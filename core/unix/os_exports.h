@@ -570,7 +570,7 @@ os_clone_post(dcontext_t *dcontext);
 void
 signal_fork_init(dcontext_t *dcontext);
 void
-signal_fork_pre(dcontext_t *dcontext);
+signal_fork_pre(dcontext_t *dcontext, bool clear_sighand);
 
 void
 signal_remove_alarm_handlers(dcontext_t *dcontext);
