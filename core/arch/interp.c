@@ -3418,6 +3418,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                         if (bb->vmlist != NULL) {
                             vm_area_destroy_list(dcontext, bb->vmlist);
                             bb->vmlist = NULL;
+                            bb->checked_start_vmarea = false;
                         }
                         bb->full_decode = true;
                         build_bb_ilist(dcontext, bb);
@@ -4066,6 +4067,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         if (bb->vmlist != NULL) {
             vm_area_destroy_list(dcontext, bb->vmlist);
             bb->vmlist = NULL;
+            bb->checked_start_vmarea = false;
         }
         /* Remove FRAG_HAS_DIRECT_CTI, since we're turning off follow_direct.
          * Try to keep the known flags.  We stopped the bb before merging in any
@@ -4501,6 +4503,7 @@ mangle_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             if (bb->vmlist != NULL) {
                 vm_area_destroy_list(dcontext, bb->vmlist);
                 bb->vmlist = NULL;
+                bb->checked_start_vmarea = false;
             }
             bb->flags = FRAG_SELFMOD_SANDBOXED; /* lose all other flags */
             bb->full_decode = true;             /* full decode this time! */
