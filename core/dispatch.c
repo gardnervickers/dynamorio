@@ -67,6 +67,27 @@
 #endif
 
 /* forward declarations */
+#ifdef AARCH64
+/* Flushes the IC IVAU lines that dcontext's thread has invalidated so far.  While
+ * it waits for another thread's flush, this thread must not be redirected to its
+ * next app pc: that abandoned this flush, and when the thread entered DR for a
+ * syscall it skipped the syscall.
+ */
+static void
+flush_pending_icache_lines(dcontext_t *dcontext)
+{
+    app_pc start = dcontext->icache_pending_start;
+    app_pc end = dcontext->icache_pending_end;
+    if (end == NULL)
+        return;
+    dcontext->icache_pending_start = NULL;
+    dcontext->icache_pending_end = NULL;
+    flush_fragments_from_region(dcontext, start, end - start, true,
+                                THREAD_SYNCH_NO_LOCKS_NO_XFER,
+                                NULL /*flush_completion_callback*/, NULL /*user_data*/);
+}
+#endif
+
 static void
 dispatch_enter_dynamorio(dcontext_t *dcontext);
 
@@ -911,6 +932,44 @@ dispatch_enter_dynamorio(dcontext_t *dcontext)
         }
 #endif
 
+#ifdef AARCH64
+        if (!INTERNAL_OPTION(hw_cache_consistency) &&
+            dcontext->last_exit == get_selfmod_linkstub()) {
+            /* Software cache consistency: we are handling an IC IVAU or DSB. */
+            app_pc begin = (app_pc)dcontext->local_state->spill_space.r2;
+            app_pc end = (app_pc)dcontext->local_state->spill_space.r3;
+            dcontext->next_tag = (app_pc)dcontext->local_state->spill_space.r4;
+
+            /* XXX: This could probably be moved to the outer scope. */
+            priv_mcontext_t *mcontext = get_mcontext(dcontext);
+            mcontext->pc = get_fcache_target(dcontext);
+
+            /* Each flush stops every thread, and JITs invalidate a range one line
+             * at a time, so lines that continue the pending range join it.  A DSB
+             * (a zero begin) or a separate range flushes the pending range.
+             */
+            if (begin != NULL && dcontext->icache_pending_end != NULL &&
+                begin <= dcontext->icache_pending_end &&
+                end >= dcontext->icache_pending_start) {
+                if (begin < dcontext->icache_pending_start)
+                    dcontext->icache_pending_start = begin;
+                if (end > dcontext->icache_pending_end)
+                    dcontext->icache_pending_end = end;
+            } else {
+                flush_pending_icache_lines(dcontext);
+                if (begin != NULL) {
+                    dcontext->icache_pending_start = begin;
+                    dcontext->icache_pending_end = end;
+                }
+            }
+        } else if (dcontext->icache_pending_end != NULL) {
+            /* The app may rely on the invalidation once it enters DR for any other
+             * reason, such as a syscall or a signal, so complete it now.
+             */
+            flush_pending_icache_lines(dcontext);
+        }
+#endif
+
         /* A non-ignorable syscall or cb return ending a bb must be acted on
          * We do it here to avoid becoming couldbelinking twice.
          *
@@ -936,25 +995,7 @@ dispatch_enter_dynamorio(dcontext_t *dcontext)
         }
 #endif
 
-#ifdef AARCH64
-        if (!INTERNAL_OPTION(hw_cache_consistency) &&
-            dcontext->last_exit == get_selfmod_linkstub()) {
-            /* Software cache consistency: we are handling an IC IVAU instruction. */
-            app_pc begin = (app_pc)dcontext->local_state->spill_space.r2;
-            app_pc end = (app_pc)dcontext->local_state->spill_space.r3;
-            dcontext->next_tag = (app_pc)dcontext->local_state->spill_space.r4;
-
-            /* XXX: This could probably be moved to the outer scope. */
-            priv_mcontext_t *mcontext = get_mcontext(dcontext);
-            mcontext->pc = get_fcache_target(dcontext);
-
-            flush_fragments_from_region(
-                dcontext, begin, end - begin, true, THREAD_SYNCH_VALID_MCONTEXT,
-                NULL /*flush_completion_callback*/, NULL /*user_data*/);
-        }
-#endif
-
-        if (TEST(LINK_SPECIAL_EXIT, dcontext->last_exit->flags)) {
+        if (TESTANY(LINK_SPECIAL_EXIT, dcontext->last_exit->flags)) {
             if (dcontext->upcontext.upcontext.exit_reason == EXIT_REASON_SELFMOD) {
                 /* Case 8177: If we have a flushed fragment hit a self-write, we
                  * cannot delete it in our self-write handler (b/c of case 3559's

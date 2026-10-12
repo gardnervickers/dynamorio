@@ -1061,6 +1061,14 @@ struct _dcontext_t {
     /* State for handling restartable sequences ("rseq"). */
     rseq_entry_state_t rseq_entry_state;
 #endif
+#ifdef AARCH64
+    /* With -no_hw_cache_consistency, the app's IC IVAU lines that are not yet
+     * flushed, joined into one range.  They are flushed together at the app's next
+     * DSB, which architecturally completes them, or at its next other entry to DR.
+     */
+    app_pc icache_pending_start;
+    app_pc icache_pending_end;
+#endif
 };
 
 /* sentinel value for dcontext_t* used to indicate
