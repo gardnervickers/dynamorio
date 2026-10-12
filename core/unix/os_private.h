@@ -153,6 +153,14 @@ typedef struct _os_thread_data_t {
      */
     mutex_t suspend_lock;
     int suspend_count;
+    /* Set, under suspend_lock, while this thread waits in a vfork-style clone
+     * (CLONE_VFORK). The kernel holds it until the child execs or exits and it
+     * cannot take a suspend signal there, so synch-all counts it as synched
+     * without suspending it; vfork_skips counts those synchs for
+     * os_thread_resume(). See os_vfork_pre() and os_vfork_post().
+     */
+    bool vfork_waiting;
+    int vfork_skips;
 
     /* Thread synchronization data held across a fork. */
     thread_record_t **fork_threads;

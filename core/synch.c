@@ -1003,8 +1003,31 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
                 adjust_wait_at_safe_spot(trec->dcontext, 1);
                 first_loop = false;
             }
+#ifdef UNIX
+            /* A vfork parent cannot be suspended until its child execs or exits,
+             * which may wait on this very synch: count it as synched unless it
+             * is to be cleaned up or terminated.
+             */
+            bool vfork_skipped = false;
+            if (!THREAD_SYNCH_IS_CLEANED(desired_state) &&
+                !THREAD_SYNCH_IS_TERMINATED(desired_state)) {
+                bool suspended = os_thread_suspend_unless_vfork(trec, &vfork_skipped);
+                if (suspended && vfork_skipped) {
+                    LOG(THREAD, LOG_SYNCH, 2,
+                        "Thread " TIDFMT " waits in vfork: counted as synched\n", id);
+                    res = THREAD_SYNCH_RESULT_SUCCESS;
+                    actually_suspended = false;
+                    break;
+                }
+                if (!suspended)
+                    goto synch_suspend_failed;
+            } else
+#endif
             if (!os_thread_suspend(trec)) {
-                /* FIXME : eventually should be a real assert once we figure out
+#ifdef UNIX
+            synch_suspend_failed:
+#endif
+                /* XXX : eventually should be a real assert once we figure out
                  * how to handle threads with low privilege handles */
                 /* For dr_api_exit, we may have missed a thread exit. */
                 ASSERT_CURIOSITY_ONCE(

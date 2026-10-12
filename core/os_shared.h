@@ -191,6 +191,10 @@ void
 os_thread_sleep(uint64 milliseconds);
 bool
 os_thread_suspend(thread_record_t *tr);
+#ifdef UNIX
+bool
+os_thread_suspend_unless_vfork(thread_record_t *tr, bool *skipped);
+#endif
 bool
 os_thread_resume(thread_record_t *tr);
 bool
