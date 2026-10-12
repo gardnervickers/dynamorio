@@ -1429,6 +1429,14 @@ count_pending_signals(thread_sig_info_t *info, byte counts[SIGARRAY_SIZE])
     }
 }
 
+/* Called in the forking thread just before its fork syscall. */
+void
+signal_fork_pre(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    count_pending_signals(info, info->pending_at_fork);
+}
+
 /* A signal that arrives while this thread waits in handle_suspend_signal()
  * interrupts DR, so record_pending_signal() queues it for when the thread next
  * enters DR. The suspend handler then returns straight to the interrupted
@@ -1513,14 +1521,31 @@ signal_fork_init(dcontext_t *dcontext)
         init_itimer(dcontext, true /*first*/);
     }
     info->num_unstarted_children = 0;
+    /* "A child created via fork(2) initially has an empty pending signal set":
+     * drop the entries inherited from the parent (the oldest ones, as new entries
+     * go at the head), but keep signals sent to the child after the fork returned
+     * and before we got here, or they would be lost.
+     */
+    dcontext->signals_pending = 0;
+    info->num_pending = 0;
     for (i = 1; i <= MAX_SIGNUM; i++) {
-        /* "A child created via fork(2) initially has an empty pending signal set" */
-        dcontext->signals_pending = 0;
-        while (info->sigpending[i] != NULL) {
-            free_pending_signal(info, i);
+        uint n = 0;
+        for (sigpending_t *p = info->sigpending[i]; p != NULL; p = p->next)
+            n++;
+        uint keep = n > info->pending_at_fork[i] ? n - info->pending_at_fork[i] : 0;
+        sigpending_t **link = &info->sigpending[i];
+        for (uint k = 0; k < keep; k++)
+            link = &(*link)->next;
+        while (*link != NULL) {
+            sigpending_t *temp = *link;
+            *link = temp->next;
+            special_heap_free(info->sigheap, temp);
         }
-        info->num_pending = 0;
+        info->num_pending += keep;
+        info->pending_at_fork[i] = 0;
     }
+    if (info->num_pending > 0)
+        check_signals_pending(dcontext, info);
     if (INTERNAL_OPTION(profile_pcs)) {
         pcprofile_fork_init(dcontext);
     }

@@ -2738,6 +2738,7 @@ os_fork_pre(dcontext_t *dcontext)
      */
     d_r_mutex_unlock(&thread_initexit_lock);
     d_r_mutex_unlock(&all_threads_synch_lock);
+    signal_fork_pre(dcontext);
 }
 
 /* Happens after the fork in both the parent and child. */

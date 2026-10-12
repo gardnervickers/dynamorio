@@ -467,6 +467,10 @@ typedef struct _thread_sig_info_t {
     sigpending_t *sigpending[SIGARRAY_SIZE];
     /* count of pending signals */
     int num_pending;
+    /* Per-signal pending counts just before this thread's fork: the child
+     * discards these inherited entries but keeps signals that arrived later.
+     */
+    byte pending_at_fork[SIGARRAY_SIZE];
     /* are the pending still on one special heap unit? */
     bool multiple_pending_units;
     /* "lock" to prevent interrupting signal from messing up sigpending array */
