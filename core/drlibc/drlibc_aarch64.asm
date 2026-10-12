@@ -67,6 +67,10 @@ GLOBAL_LABEL(dynamorio_syscall:)
         b.cc     1f
         ldr      x6,[sp]
 1:
+        /* Seedbox: mark the translator's own syscall in x7, which arm64 syscalls
+         * leave unused, so the guest kernel charges it as translator work. */
+        movz     x7, #0x5eed, lsl #48
+        movk     x7, #0xd1a9, lsl #32
         svc      #0
         ret
 #elif defined(MACOS)

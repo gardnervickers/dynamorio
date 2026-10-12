@@ -105,6 +105,10 @@ GLOBAL_LABEL(dynamorio_condvar_wake_and_jmp:)
         /* arg1 = &futex, already in r0 */
 #ifdef AARCH64
         mov      w8, #98 /* SYS_futex */
+        /* Seedbox: mark the translator's own syscall in x7, which arm64 syscalls
+         * leave unused, so the guest kernel charges it as translator work. */
+        movz     x7, #0x5eed, lsl #48
+        movk     x7, #0xd1a9, lsl #32
 #else
         mov      r7, #240 /* SYS_futex */
 #endif

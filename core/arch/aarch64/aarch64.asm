@@ -550,6 +550,10 @@ GLOBAL_LABEL(_dynamorio_runtime_resolve:)
         DECLARE_FUNC(dynamorio_sigreturn)
 GLOBAL_LABEL(dynamorio_sigreturn:)
         mov      SYSNUM_REG, #SYS_rt_sigreturn
+        /* Seedbox: mark the translator's own syscall in x7, which arm64 syscalls
+         * leave unused, so the guest kernel charges it as translator work. */
+        movz     x7, #0x5eed, lsl #48
+        movk     x7, #0xd1a9, lsl #32
         svc      #0
         bl       GLOBAL_REF(unexpected_return)
         END_FUNC(dynamorio_sigreturn)
