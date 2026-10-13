@@ -3151,7 +3151,11 @@ os_thread_not_under_dynamo(dcontext_t *dcontext, bool restore_sigblocked)
      * it can restore the mask atomically with going native by setting it on the
      * signal frame, which avoids races.
      */
-    if (restore_sigblocked) {
+    /* An exiting thread keeps the signals blocked that block_cleanup_and_terminate()
+     * blocked (i#2921): restoring the app's mask would let the kernel keep
+     * delivering process-directed signals to it, which we could only drop.
+     */
+    if (restore_sigblocked && !dcontext->is_exiting) {
         signal_swap_mask(dcontext, true /*to app*/);
     }
     os_swap_context(dcontext, true /*to app*/, DR_STATE_GO_NATIVE);

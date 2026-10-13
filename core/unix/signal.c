@@ -389,6 +389,12 @@ dump_unmasked(dcontext_t *dcontext, const char *where)
 static bool
 is_sys_kill(dcontext_t *dcontext, byte *pc, byte *xsp, kernel_siginfo_t *info);
 
+static bool
+sig_kernel_blockable(int sig);
+
+static bool
+requeue_signal_to_process(int sig, kernel_siginfo_t *siginfo);
+
 int
 sigaction_syscall(int sig, kernel_sigaction_t *act, kernel_sigaction_t *oact)
 {
@@ -1743,6 +1749,20 @@ signal_thread_exit(dcontext_t *dcontext, bool other_thread)
         while (info->sigpending[i] != NULL) {
             sigpending_t *temp = info->sigpending[i];
             info->sigpending[i] = temp->next;
+            /* A process-directed signal we hold for an exiting thread belongs to
+             * the process: natively another thread takes it.  This thread has the
+             * signals blocked (block_cleanup_and_terminate()).
+             */
+            if (!other_thread && !doing_detach && sig_kernel_blockable(i)) {
+                sigcontext_t *sc = get_sigcontext_from_rt_frame(&temp->rt_frame);
+                if (signal_is_process_wide(dcontext, &temp->rt_frame.info,
+                                           (byte *)sc->SC_XIP, (byte *)sc->SC_XSP) &&
+                    requeue_signal_to_process(i, &temp->rt_frame.info)) {
+                    LOG(THREAD, LOG_ASYNCH, 2,
+                        "exiting thread: sent pending signal %d back to the process\n",
+                        i);
+                }
+            }
             special_heap_free(info->sigheap, temp);
         }
         info->num_pending = 0;
@@ -2807,6 +2827,26 @@ requeue_signal_in_kernel(int sig, kernel_siginfo_t *siginfo)
 #ifdef LINUX
     return dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
                              get_sys_thread_id(), sig, siginfo) == 0;
+#else
+    return false;
+#endif
+}
+
+/* Sends a process-directed signal that reached this exiting thread back to the
+ * process, as the kernel retargets an exiting thread's shared pending signals to
+ * other threads.  The kernel accepts the original siginfo for a negative si_code
+ * other than SI_TKILL, or from the thread group leader; otherwise the sender
+ * information is lost.  The caller must have the signal blocked in this thread.
+ */
+static bool
+requeue_signal_to_process(int sig, kernel_siginfo_t *siginfo)
+{
+#ifdef LINUX
+    if (((siginfo->si_code < 0 && siginfo->si_code != SI_TKILL) ||
+         get_sys_thread_id() == get_process_id()) &&
+        dynamorio_syscall(SYS_rt_sigqueueinfo, 3, get_process_id(), sig, siginfo) == 0)
+        return true;
+    return dynamorio_syscall(SYS_kill, 2, get_process_id(), sig) == 0;
 #else
     return false;
 #endif
@@ -5491,6 +5531,18 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
         ASSERT(ostd->processing_signal == 0 || sig == SUSPEND_SIGNAL || sig == SIGSEGV);
         ASSERT(can_always_delay[sig] ||
                is_sys_kill(dcontext, pc, (byte *)sc->SC_XSP, &frame->info));
+        if (dcontext->is_exiting && sig_kernel_blockable(sig) &&
+            signal_is_process_wide(dcontext, &frame->info, pc, (byte *)sc->SC_XSP)) {
+            /* Natively the kernel retargets a process-directed signal away from
+             * an exiting thread.  Block it here and hand it back to the process.
+             */
+            kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
+            if (requeue_signal_to_process(sig, &frame->info)) {
+                LOG(THREAD, LOG_ASYNCH, 2, "exit-time signal %d sent to the process\n",
+                    sig);
+                return;
+            }
+        }
         if (!dcontext->is_exiting && sig_kernel_blockable(sig) &&
             requeue_signal_in_kernel(sig, &frame->info)) {
             /* Leave it pending in the kernel, blocked until whoever is using the
