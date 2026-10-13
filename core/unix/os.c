@@ -3980,14 +3980,15 @@ os_thread_sleep(uint64 milliseconds)
                                 */
                                req.tv_nsec - remain.tv_nsec < 100000 ||
                                req.tv_nsec - remain.tv_nsec > -100000));
-        /* not unusual for client threads to use itimers and have their run
-         * routine sleep forever
+        /* Not unusual: client threads use itimers and have their run routine
+         * sleep forever, and app signals interrupt a thread waiting at a safe
+         * spot (synch_thread_yield()) as often as the app sends them.  We do not
+         * report it: a thread at a safe spot can be suspended while reporting,
+         * holding the report and memory query locks that other threads need to
+         * reach their own safe spots.
          */
-        if (count++ > 3 && !IS_CLIENT_THREAD(get_thread_private_dcontext())) {
-            ASSERT_CURIOSITY_ONCE(
-                false && "os_thread_sleep interrupted by signal more than 3 times.");
+        if (count++ > 3 && !IS_CLIENT_THREAD(get_thread_private_dcontext()))
             break; /* paranoid */
-        }
         req = remain;
     }
 #endif
