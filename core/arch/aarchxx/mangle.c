@@ -4198,17 +4198,23 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
          * stxr.
          *
          * First we need to combine the values of the 2 32-bit source registers into a
-         * single 64-bit source register:
+         * single 64-bit source register.  The stxp only stores the bottom 32 bits of
+         * src0, so it must be zero-extended rather than used as a 64-bit register:
          *
-         * orr  scratch, src0, src1 lsl 32  ; scratch = src0 | (src1 << 32);
+         * mov  wscratch, wsrc0                  ; scratch = zext(src0)
+         * orr  scratch, scratch, src1 lsl 32    ; scratch |= src1 << 32
          */
         opnd_t src0 = opnd_create_reg(
-            reg_resize_to_opsz(opnd_get_reg(instr_get_src(instr, 0)), OPSZ_8));
+            reg_resize_to_opsz(opnd_get_reg(instr_get_src(instr, 0)), OPSZ_4));
         opnd_t src1 = opnd_create_reg(
             reg_resize_to_opsz(opnd_get_reg(instr_get_src(instr, 1)), OPSZ_8));
         PRE(ilist, instr,
-            INSTR_CREATE_orr_shift(dcontext, opnd_create_reg(scratch), src0, src1,
-                                   OPND_CREATE_LSL(), OPND_CREATE_INT(32)));
+            XINST_CREATE_move(
+                dcontext, opnd_create_reg(reg_resize_to_opsz(scratch, OPSZ_4)), src0));
+        PRE(ilist, instr,
+            INSTR_CREATE_orr_shift(dcontext, opnd_create_reg(scratch),
+                                   opnd_create_reg(scratch), src1, OPND_CREATE_LSL(),
+                                   OPND_CREATE_INT(32)));
 
         /* Now we can can create a replacement instruction that uses the same destination
          * operands but the single combined source register.
