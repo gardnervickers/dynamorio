@@ -153,6 +153,11 @@ typedef struct _os_thread_data_t {
      */
     mutex_t suspend_lock;
     int suspend_count;
+    /* Set, under suspend_lock, by os_thread_resume() once it has woken this thread
+     * from its suspend signal handler, until the next suspend or resume sees the
+     * handler's "resumed" acknowledgement: see os_thread_finish_resume().
+     */
+    bool resume_pending;
     /* Set, under suspend_lock, while this thread waits in a vfork-style clone
      * (CLONE_VFORK). The kernel holds it until the child execs or exits and it
      * cannot take a suspend signal there, so synch-all counts it as synched

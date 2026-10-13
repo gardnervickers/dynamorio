@@ -3870,6 +3870,34 @@ send_suspend_signal(thread_record_t *tr, pid_t pid, thread_id_t tid)
 static bool
 os_thread_suspend_internal(thread_record_t *tr, bool *vfork_skipped);
 
+/* Completes the previous os_thread_resume() of this thread, if any: waits until its
+ * suspend signal handler has acknowledged the wakeup, so that a new suspend signal
+ * cannot reach it while it is still in that handler.  os_thread_resume() leaves this
+ * wait to the next suspend or resume so that the resuming thread, usually resuming
+ * every thread after a synch-all, does not wait for each one to be scheduled.
+ * Caller must hold suspend_lock.
+ */
+static void
+os_thread_finish_resume(os_thread_data_t *ostd)
+{
+    ASSERT_OWN_MUTEX(true, &ostd->suspend_lock);
+    if (!ostd->resume_pending)
+        return;
+    while (ksynch_get_value(&ostd->resumed) == 0) {
+        /* For Linux, waits only if the resumed flag is not set as 1.  Return value
+         * doesn't matter because the flag will be re-checked.
+         */
+        ksynch_wait(&ostd->resumed, 0, 0);
+        if (ksynch_get_value(&ostd->resumed) == 0) {
+            /* If it still has to wait, give up the cpu. */
+            os_thread_yield();
+        }
+    }
+    ksynch_set_value(&ostd->wakeup, 0);
+    ksynch_set_value(&ostd->resumed, 0);
+    ostd->resume_pending = false;
+}
+
 bool
 os_thread_suspend(thread_record_t *tr)
 {
@@ -3898,6 +3926,7 @@ os_thread_suspend_internal(thread_record_t *tr, bool *vfork_skipped)
      * prevents prematurely sending a re-suspend signal.
      */
     d_r_mutex_lock(&ostd->suspend_lock);
+    os_thread_finish_resume(ostd);
     if (vfork_skipped != NULL && ostd->vfork_waiting) {
         ostd->vfork_skips++;
         *vfork_skipped = true;
@@ -3961,6 +3990,7 @@ os_thread_resume(thread_record_t *tr)
      * atomic_dec_becomes_zero on suspend_count.
      */
     d_r_mutex_lock(&ostd->suspend_lock);
+    os_thread_finish_resume(ostd);
     if (ostd->suspend_count == 0 && ostd->vfork_skips > 0) {
         /* os_thread_suspend_unless_vfork() left this thread running. */
         ostd->vfork_skips--;
@@ -3982,18 +4012,8 @@ os_thread_resume(thread_record_t *tr)
     }
     ksynch_set_value(&ostd->wakeup, 1);
     ksynch_wake(&ostd->wakeup);
-    while (ksynch_get_value(&ostd->resumed) == 0) {
-        /* For Linux, waits only if the resumed flag is not set as 1.  Return value
-         * doesn't matter because the flag will be re-checked.
-         */
-        ksynch_wait(&ostd->resumed, 0, 0);
-        if (ksynch_get_value(&ostd->resumed) == 0) {
-            /* If it still has to wait, give up the cpu. */
-            os_thread_yield();
-        }
-    }
-    ksynch_set_value(&ostd->wakeup, 0);
-    ksynch_set_value(&ostd->resumed, 0);
+    /* The next suspend or resume waits for the acknowledgement. */
+    ostd->resume_pending = true;
     d_r_mutex_unlock(&ostd->suspend_lock);
     return true;
 }
