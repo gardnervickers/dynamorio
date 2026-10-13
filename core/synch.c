@@ -985,6 +985,49 @@ synch_thread_wait(volatile int *var, int mustbe)
     synch_thread_yield();
 }
 
+/* Waits, like synch_thread_wait(), for synch_events to change from events, as a
+ * thread waiting to start a synch-all.  With a no-transfer cur_state, the thread
+ * waits at a safe spot, as in check_wait_at_safe_spot(): it holds no locks, and a
+ * synch suspending it in the wait does not move it.  Otherwise such a synch has to
+ * resume it and retry until it has woken up and gone to check_wait_at_safe_spot(),
+ * which it may not get to run long enough to do for many tries in a row: the
+ * synch-all's wait ends at once if any other event happened meanwhile.
+ */
+static void
+synch_all_entry_wait(dcontext_t *dcontext, thread_synch_permission_t cur_state,
+                     int events)
+{
+    thread_synch_data_t *tsd =
+        dcontext != NULL ? (thread_synch_data_t *)dcontext->synch_field : NULL;
+    bool safe = tsd != NULL &&
+        (cur_state == THREAD_SYNCH_NO_LOCKS_NO_XFER ||
+         cur_state == THREAD_SYNCH_VALID_MCONTEXT_NO_XFER);
+    if (safe) {
+        /* As in check_wait_at_safe_spot(), we may be killed here (case 5552). */
+        if (dcontext->is_exiting) {
+            ASSERT(exiting_thread_count >= 1);
+            ATOMIC_DEC(int, exiting_thread_count);
+        }
+        spinmutex_lock(tsd->synch_lock);
+        tsd->synch_perm = cur_state;
+        spinmutex_unlock(tsd->synch_lock);
+    }
+#ifdef LINUX
+    synch_thread_wait(&synch_events, events);
+#else
+    os_thread_yield();
+#endif
+    if (safe) {
+        spinmutex_lock_no_yield(tsd->synch_lock);
+        tsd->synch_perm = THREAD_SYNCH_NONE;
+        /* No synch transfers a thread with a no-transfer permission. */
+        ASSERT(tsd->set_mcontext == NULL && tsd->set_context == NULL);
+        spinmutex_unlock(tsd->synch_lock);
+        if (dcontext->is_exiting)
+            ATOMIC_INC(int, exiting_thread_count);
+    }
+}
+
 /* returns a thread_synch_result_t value
  * id - the thread you want to synch with
  * block - whether or not should spin until synch is successful
@@ -1397,11 +1440,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                 ATOMIC_INC(int, exiting_thread_count);
             }
         }
-#ifdef LINUX
-        synch_thread_wait(&synch_events, events);
-#else
-        os_thread_yield();
-#endif
+        synch_all_entry_wait(dcontext, cur_state, IF_LINUX_ELSE(events, 0));
     }
 
     /* grab all_threads_synch_lock */
@@ -1447,11 +1486,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
          * synch with make progress towards a safe synch point). */
         if (INTERNAL_OPTION(single_thread_in_DR))
             EXITING_DR(); /* give up DR exclusion lock */
-#ifdef LINUX
-        synch_thread_wait(&synch_events, events);
-#else
-        os_thread_yield();
-#endif
+        synch_all_entry_wait(dcontext, cur_state, IF_LINUX_ELSE(events, 0));
         if (INTERNAL_OPTION(single_thread_in_DR))
             ENTERING_DR(); /* re-gain DR exclusion lock */
     }
