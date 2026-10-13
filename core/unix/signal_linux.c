@@ -368,6 +368,7 @@ handle_pre_extended_syscall_sigmasks(dcontext_t *dcontext, kernel_sigset_t *sigm
     ASSERT(!info->pre_syscall_app_sigprocmask_valid);
     info->pre_syscall_app_sigprocmask_valid = true;
     info->pre_syscall_app_sigprocmask = info->app_sigblocked;
+    signal_block_in_kernel_ahead(dcontext, sigmask);
     signal_set_mask(dcontext, sigmask);
     /* Make sure we deliver pending signals that are now unblocked. */
     check_signals_pending(dcontext, info);

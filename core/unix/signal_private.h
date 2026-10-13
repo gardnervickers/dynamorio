@@ -467,10 +467,12 @@ typedef struct _thread_sig_info_t {
     sigpending_t *sigpending[SIGARRAY_SIZE];
     /* count of pending signals */
     int num_pending;
+    /* How many entries our special heap holds without a new unit. */
+    int pending_capacity;
     /* Per-signal pending counts just before this thread's fork: the child
      * discards these inherited entries but keeps signals that arrived later.
      */
-    byte pending_at_fork[SIGARRAY_SIZE];
+    uint pending_at_fork[SIGARRAY_SIZE];
     /* The next fork is a clone3 with CLONE_CLEAR_SIGHAND. */
     bool fork_clear_sighand;
     /* are the pending still on one special heap unit? */
@@ -521,6 +523,8 @@ typedef struct _thread_sig_info_t {
     /* to handle sigsuspend we have to save blocked set */
     bool in_sigsuspend;
     kernel_sigset_t app_sigblocked_save;
+    /* The kernel's temporary mask for sigsuspend, ppoll, pselect6 and epoll_pwait. */
+    kernel_sigset_t syscall_kernel_sigmask;
 
     /* to inherit in children must not modify until they're scheduled */
     volatile int num_unstarted_children;
@@ -699,6 +703,9 @@ notify_signalfd(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
 
 void
 check_signals_pending(dcontext_t *dcontext, thread_sig_info_t *info);
+
+void
+signal_block_in_kernel_ahead(dcontext_t *dcontext, const kernel_sigset_t *set);
 #endif
 
 #endif /* _SIGNAL_PRIVATE_H_ */

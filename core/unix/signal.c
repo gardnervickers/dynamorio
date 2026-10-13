@@ -140,6 +140,12 @@ sig_is_alarm_signal(int sig)
     return (sig == SIGALRM || sig == SIGVTALRM || sig == SIGPROF);
 }
 
+static inline bool
+sig_is_real_time(int sig)
+{
+    return sig >= OFFS_RT;
+}
+
 /* We do not use SIGSTKSZ b/c for things like code modification
  * we end up calling many core routines and so want more space.
  * Also, SIGSTKSZ is now defined as sysconf(_SC_SIGSTKSZ) and we
@@ -738,6 +744,7 @@ signal_thread_init(dcontext_t *dcontext, void *os_data)
         pend_unit_size, IF_X86_ELSE(AVX_ALIGNMENT, 0),
         false /* cannot have any locking */, false /* -x */, true /* persistent */,
         pend_unit_size * DYNAMO_OPTION(max_pending_signals));
+    info->pending_capacity = DYNAMO_OPTION(max_pending_signals);
 
 #ifdef HAVE_SIGALTSTACK
     /* set up alternate stack
@@ -1412,13 +1419,13 @@ free_pending_signal(thread_sig_info_t *info, int sig)
 }
 
 static void
-count_pending_signals(thread_sig_info_t *info, byte counts[SIGARRAY_SIZE])
+count_pending_signals(thread_sig_info_t *info, uint counts[SIGARRAY_SIZE])
 {
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
         uint n = 0;
         for (sigpending_t *p = info->sigpending[sig]; p != NULL; p = p->next)
             n++;
-        counts[sig] = (byte)(n > 255 ? 255 : n);
+        counts[sig] = n;
     }
 }
 
@@ -1440,27 +1447,31 @@ signal_fork_pre(dcontext_t *dcontext, bool clear_sighand)
  * thread with their original siginfo: they arrive at the interrupted context
  * once the suspend handler returns and are delivered from there as usual.
  * Signals the app blocks stay queued here, as DR emulates the app's mask.
+ * Signals the kernel can hold for the app (sig_kernel_blockable()) stay blocked
+ * in the kernel during the wait, so only the others come here.
  */
 static void
 requeue_signals_pending_since(dcontext_t *dcontext, thread_sig_info_t *info,
-                              const byte before[SIGARRAY_SIZE])
+                              const uint before[SIGARRAY_SIZE])
 {
     bool requeued = false;
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        uint n = 0;
-        for (sigpending_t *p = info->sigpending[sig]; p != NULL; p = p->next)
-            n++;
-        if (n <= before[sig] || kernel_sigismember(&info->app_sigblocked, sig))
+        if (kernel_sigismember(&info->app_sigblocked, sig))
             continue;
-        /* New entries are pushed at the head of the list. */
-        for (uint k = n - before[sig]; k > 0; k--) {
-            kernel_siginfo_t siginfo = info->sigpending[sig]->rt_frame.info;
-            free_pending_signal(info, sig);
+        /* New entries are appended to the list. */
+        sigpending_t **link = &info->sigpending[sig];
+        for (uint k = 0; k < before[sig] && *link != NULL; k++)
+            link = &(*link)->next;
+        while (*link != NULL) {
+            sigpending_t *p = *link;
             LOG(THREAD, LOG_ASYNCH, 2,
                 "handle_suspend_signal: re-sending signal %d received while suspended\n",
                 sig);
             dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
-                              get_sys_thread_id(), sig, &siginfo);
+                              get_sys_thread_id(), sig, &p->rt_frame.info);
+            *link = p->next;
+            special_heap_free(info->sigheap, p);
+            info->num_pending--;
             requeued = true;
         }
     }
@@ -1517,25 +1528,20 @@ signal_fork_init(dcontext_t *dcontext)
     info->num_unstarted_children = 0;
     /* "A child created via fork(2) initially has an empty pending signal set":
      * drop the entries inherited from the parent (the oldest ones, as new entries
-     * go at the head), but keep signals sent to the child after the fork returned
+     * are appended), but keep signals sent to the child after the fork returned
      * and before we got here, or they would be lost.
      */
     dcontext->signals_pending = 0;
     info->num_pending = 0;
     for (i = 1; i <= MAX_SIGNUM; i++) {
-        uint n = 0;
-        for (sigpending_t *p = info->sigpending[i]; p != NULL; p = p->next)
-            n++;
-        uint keep = n > info->pending_at_fork[i] ? n - info->pending_at_fork[i] : 0;
-        sigpending_t **link = &info->sigpending[i];
-        for (uint k = 0; k < keep; k++)
-            link = &(*link)->next;
-        while (*link != NULL) {
-            sigpending_t *temp = *link;
-            *link = temp->next;
+        for (uint k = 0; k < info->pending_at_fork[i] && info->sigpending[i] != NULL;
+             k++) {
+            sigpending_t *temp = info->sigpending[i];
+            info->sigpending[i] = temp->next;
             special_heap_free(info->sigheap, temp);
         }
-        info->num_pending += keep;
+        for (sigpending_t *p = info->sigpending[i]; p != NULL; p = p->next)
+            info->num_pending++;
         info->pending_at_fork[i] = 0;
     }
     if (info->num_pending > 0)
@@ -1567,6 +1573,10 @@ signal_fork_init(dcontext_t *dcontext)
 
     /* Assumed to be async safe. */
     info->fully_initialized = true;
+    /* The fork inherited our kernel mask, which also blocked the parent's queued
+     * signals.
+     */
+    signal_sync_kernel_mask(dcontext);
 }
 
 #ifdef DEBUG
@@ -2582,6 +2592,8 @@ signal_swap_mask(dcontext_t *dcontext, bool to_app)
                 d_r_get_thread_id());
             dump_sigset(dcontext, &info->app_sigblocked);
         });
+        /* Keep the app's blocked asynchronous signals blocked in the kernel. */
+        signal_sync_kernel_mask(dcontext);
     }
     DOLOG(4, LOG_ASYNCH, dump_unmasked(dcontext, __FUNCTION__););
 }
@@ -2610,6 +2622,143 @@ check_signals_pending(dcontext_t *dcontext, thread_sig_info_t *info)
             break;
         }
     }
+}
+
+/* Kernel-held pending signals.
+ *
+ * We intercept every signal and emulate the app's mask, but we used to leave all
+ * signals unblocked in the kernel and keep the ones the app blocked in our own
+ * per-thread queue.  That queue could not match the kernel's semantics: it lost
+ * process-directed routing (a signal the kernel chose this thread for stayed here
+ * even when another thread unblocked it, and a blocked signal interrupted this
+ * thread's timed waits with EINTR), realtime queueing and ordering, the
+ * RLIMIT_SIGPENDING depth (more than -max_pending_signals crashed), fork's empty
+ * pending set, and every interface that reads the kernel's pending sets:
+ * sigpending, sigtimedwait and signalfd.
+ *
+ * Instead, while the app blocks an asynchronous signal we block it in the kernel
+ * too, so the kernel keeps its pending instances with all of those semantics.
+ * The kernel mask of a thread running app code (and our code on its behalf) is
+ * thus the app's mask restricted to the signals of sig_kernel_blockable(), plus
+ * any of those signals we have queued for delivery: further instances of a queued
+ * signal wait in the kernel until we deliver the first, so our queue holds at most
+ * a few entries.  A signal we queued stays with us if the app blocks it before we
+ * deliver it (handing it back would put it behind later instances);
+ * handle_post_sigpending() and handle_pre_sigtimedwait() account for it.
+ *
+ * Synchronous signals (which we raise ourselves, and which the kernel forcibly
+ * unblocks), our suspend and nudge signals and alarm signals we use for our own
+ * itimers keep the emulated mask and queue.
+ */
+static bool dr_uses_alarm_itimers;
+
+static bool
+sig_kernel_blockable(int sig)
+{
+#ifdef LINUX
+    if (!DYNAMO_OPTION(intercept_all_signals))
+        return false;
+    if (sig <= 0 || sig > MAX_SIGNUM || sig == SIGKILL || sig == SIGSTOP ||
+        sig == SUSPEND_SIGNAL || sig == NUDGESIG_SIGNUM)
+        return false;
+    switch (sig) {
+    case SIGSEGV:
+    case SIGBUS:
+    case SIGILL:
+    case SIGFPE:
+    case SIGTRAP:
+    case SIGSYS: return false;
+    default: break;
+    }
+    /* XXX: a client itimer set after this thread synced its mask takes effect for
+     * its blocked alarm signal at the thread's next sync.
+     */
+    if (sig_is_alarm_signal(sig) && (dr_uses_alarm_itimers || INTERNAL_OPTION(profile_pcs)))
+        return false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+/* Computes the kernel mask for a thread whose app mask is app_mask. */
+static void
+compute_kernel_sigmask(thread_sig_info_t *info, const kernel_sigset_t *app_mask,
+                       kernel_sigset_t *kmask)
+{
+    kernel_sigemptyset(kmask);
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (sig_kernel_blockable(sig) &&
+            (kernel_sigismember((kernel_sigset_t *)app_mask, sig) ||
+             info->sigpending[sig] != NULL))
+            kernel_sigaddset(kmask, sig);
+    }
+}
+
+/* Raises sig again for this thread with the given siginfo, so the kernel keeps it
+ * pending.  Sending to ourselves, the kernel accepts any si_code.
+ */
+static bool
+requeue_signal_in_kernel(int sig, kernel_siginfo_t *siginfo)
+{
+#ifdef LINUX
+    return dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
+                             get_sys_thread_id(), sig, siginfo) == 0;
+#else
+    return false;
+#endif
+}
+
+/* Blocks in the kernel, ahead of a change to the app's mask or our queue, the
+ * blockable signals of set (all of them for NULL), so none arrives in between to
+ * find the app blocking it while the kernel did not (which would reorder it
+ * behind later instances).  Not for use in a signal handler.
+ */
+static void
+block_in_kernel_ahead(dcontext_t *dcontext, const kernel_sigset_t *set)
+{
+    if (!DYNAMO_OPTION(intercept_all_signals) || IS_CLIENT_THREAD(dcontext))
+        return;
+    kernel_sigset_t kset;
+    kernel_sigemptyset(&kset);
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (sig_kernel_blockable(sig) &&
+            (set == NULL || kernel_sigismember((kernel_sigset_t *)set, sig)))
+            kernel_sigaddset(&kset, sig);
+    }
+    sigprocmask_syscall(SIG_BLOCK, &kset, NULL, sizeof(kset));
+}
+
+void
+signal_block_in_kernel_ahead(dcontext_t *dcontext, const kernel_sigset_t *set)
+{
+    block_in_kernel_ahead(dcontext, set);
+}
+
+/* Brings this thread's kernel mask and our queue in line with its app mask (see
+ * above).  Call after changing app_sigblocked or our queue outside a signal handler.
+ */
+void
+signal_sync_kernel_mask(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!DYNAMO_OPTION(intercept_all_signals) || info == NULL || info->sighand == NULL ||
+        IS_CLIENT_THREAD(dcontext))
+        return;
+    kernel_sigset_t kmask;
+    compute_kernel_sigmask(info, &info->app_sigblocked, &kmask);
+    sigprocmask_syscall(SIG_SETMASK, &kmask, NULL, sizeof(kmask));
+}
+
+/* In a signal handler: sets the mask that the handler's sigreturn restores. */
+static void
+set_frame_kernel_sigmask(thread_sig_info_t *info, kernel_ucontext_t *ucxt)
+{
+    if (!DYNAMO_OPTION(intercept_all_signals))
+        return;
+    kernel_sigset_t kmask;
+    compute_kernel_sigmask(info, &info->app_sigblocked, &kmask);
+    *SIGMASK_FROM_UCXT(ucxt) = kmask;
 }
 
 /* Returns whether to execute the syscall */
@@ -2659,6 +2808,8 @@ handle_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *app_set,
     /* If we're intercepting all, we emulate the whole thing */
     bool execute_syscall = !DYNAMO_OPTION(intercept_all_signals);
     LOG(THREAD, LOG_ASYNCH, 2, "handle_sigprocmask how=%d\n", how);
+    if (app_set != NULL && how != SIG_UNBLOCK)
+        block_in_kernel_ahead(dcontext, &safe_set);
     d_r_mutex_lock(&info->sigblocked_lock);
     if (oset != NULL)
         info->pre_syscall_app_sigblocked = info->app_sigblocked;
@@ -2739,6 +2890,8 @@ handle_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *app_set,
     }
     d_r_mutex_unlock(&info->sigblocked_lock);
     DOLOG(4, LOG_ASYNCH, dump_unmasked(dcontext, __FUNCTION__););
+    if (app_set != NULL)
+        signal_sync_kernel_mask(dcontext);
     if (!execute_syscall) {
         int status = handle_post_sigprocmask(dcontext, how, app_set, oset, sigsetsize);
         if (status != 0 && error_code != NULL) {
@@ -2813,22 +2966,31 @@ handle_post_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *app_set,
     return 0;
 }
 
-void
+/* Returns false if the arguments are invalid, in which case the caller should let
+ * the kernel fail the syscall and not emulate anything.  For -intercept_all_signals
+ * the caller passes signal_syscall_kernel_sigmask() to the kernel instead of set.
+ */
+bool
 handle_sigsuspend(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    kernel_sigset_t safe_set;
     int i;
-    ASSERT(set != NULL);
     LOG(THREAD, LOG_ASYNCH, 2, "handle_sigsuspend\n");
+    if (sigsetsize != sizeof(kernel_sigset_t) || set == NULL ||
+        !d_r_safe_read(set, sizeof(safe_set), &safe_set))
+        return false;
+    block_in_kernel_ahead(dcontext, &safe_set);
     info->in_sigsuspend = true;
     info->app_sigblocked_save = info->app_sigblocked;
     d_r_mutex_lock(&info->sigblocked_lock);
     clear_blocked(dcontext, info);
     for (i = 1; i <= MAX_SIGNUM; i++) {
-        if (EMULATE_SIGMASK(info, i) && kernel_sigismember(set, i)) {
+        if (EMULATE_SIGMASK(info, i) && kernel_sigismember(&safe_set, i)) {
             ATOMIC_DEC(int, info->sighand->threads_unmasked[i]);
             kernel_sigaddset(&info->app_sigblocked, i);
-            kernel_sigdelset(set, i);
+            if (!DYNAMO_OPTION(intercept_all_signals))
+                kernel_sigdelset(set, i);
         }
     }
 #ifdef DEBUG
@@ -2843,6 +3005,146 @@ handle_sigsuspend(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize)
     check_signals_pending(dcontext, info);
     d_r_mutex_unlock(&info->sigblocked_lock);
     DOLOG(4, LOG_ASYNCH, dump_unmasked(dcontext, __FUNCTION__););
+    return true;
+}
+
+/* The kernel mask for a syscall that atomically installs the app mask we have just
+ * set (sigsuspend, ppoll, pselect6, epoll_pwait, epoll_pwait2): signals that this
+ * mask unblocks and the kernel holds pending end the syscall as they would
+ * natively.  Returns NULL without -intercept_all_signals.
+ */
+kernel_sigset_t *
+signal_syscall_kernel_sigmask(dcontext_t *dcontext)
+{
+#ifdef LINUX
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!DYNAMO_OPTION(intercept_all_signals))
+        return NULL;
+    compute_kernel_sigmask(info, &info->app_sigblocked, &info->syscall_kernel_sigmask);
+    return &info->syscall_kernel_sigmask;
+#else
+    return NULL;
+#endif
+}
+
+/* The mask for a real signalfd: the signals the kernel keeps pending for the app.
+ * Returns NULL to pass the app's arguments through unchanged (the kernel fails
+ * invalid ones).
+ */
+kernel_sigset_t *
+signal_signalfd_kernel_set(dcontext_t *dcontext, kernel_sigset_t *mask, size_t sizemask)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (sizemask != sizeof(kernel_sigset_t) || mask == NULL ||
+        !d_r_safe_read(mask, sizeof(kernel_sigset_t), &info->syscall_kernel_sigmask))
+        return NULL;
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (!sig_kernel_blockable(sig))
+            kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
+    }
+    return &info->syscall_kernel_sigmask;
+}
+
+/* After a sigsuspend syscall returns: if no signal ended it through
+ * terminate_sigsuspend() (one we queued is delivered after this), restore the
+ * app's mask now.  The queued signal is still delivered, as it was unblocked when
+ * it arrived (sigpending_t.unblocked_at_receipt), and its frame restores this mask.
+ */
+void
+handle_post_sigsuspend(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!info->in_sigsuspend)
+        return;
+    d_r_mutex_lock(&info->sigblocked_lock);
+    clear_blocked(dcontext, info);
+    info->app_sigblocked = info->app_sigblocked_save;
+    for (int i = 1; i <= MAX_SIGNUM; i++) {
+        if (EMULATE_SIGMASK(info, i) && kernel_sigismember(&info->app_sigblocked, i))
+            ATOMIC_DEC(int, info->sighand->threads_unmasked[i]);
+    }
+    info->in_sigsuspend = false;
+    d_r_mutex_unlock(&info->sigblocked_lock);
+    signal_sync_kernel_mask(dcontext);
+}
+
+/* rt_sigtimedwait: returns a signal of set that we hold for the app (one that
+ * arrived before its block reached the kernel mask, or one whose mask we emulate)
+ * without waiting, as the kernel does for its pending ones.  Our suspend signal is
+ * removed from the set the kernel waits for, as the kernel would otherwise hand it to
+ * the app.  Returns true with *result set if the syscall should be skipped.
+ */
+bool
+handle_pre_sigtimedwait(dcontext_t *dcontext, kernel_sigset_t *set,
+                        kernel_siginfo_t *siginfo, size_t sigsetsize, reg_t *result)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    kernel_sigset_t safe_set;
+    if (sigsetsize != sizeof(kernel_sigset_t) || set == NULL ||
+        !d_r_safe_read(set, sizeof(safe_set), &safe_set))
+        return false; /* Let the kernel fail it. */
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (!kernel_sigismember(&safe_set, sig) || info->sigpending[sig] == NULL ||
+            !kernel_sigismember(&info->app_sigblocked, sig))
+            continue;
+        sigpending_t *p = info->sigpending[sig];
+        if (siginfo != NULL &&
+            !safe_write_ex(siginfo, sizeof(*siginfo), &p->rt_frame.info, NULL)) {
+            *result = (reg_t)-EFAULT;
+            return true;
+        }
+        LOG(THREAD, LOG_ASYNCH, 2, "sigtimedwait: returning held signal %d\n", sig);
+        block_in_kernel_ahead(dcontext, NULL);
+        info->accessing_sigpending = true;
+        __asm__ __volatile__("" : : : "memory");
+        info->sigpending[sig] = p->next;
+        special_heap_free(info->sigheap, p);
+        info->num_pending--;
+        __asm__ __volatile__("" : : : "memory");
+        info->accessing_sigpending = false;
+        signal_sync_kernel_mask(dcontext);
+        *result = (reg_t)sig;
+        return true;
+    }
+    return false;
+}
+
+/* Returns the set the kernel should wait for in rt_sigtimedwait, or NULL for the
+ * app's own.
+ */
+kernel_sigset_t *
+signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
+                               size_t sigsetsize)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    kernel_sigset_t safe_set;
+    if (sigsetsize != sizeof(kernel_sigset_t) || set == NULL ||
+        !d_r_safe_read(set, sizeof(safe_set), &safe_set) ||
+        !kernel_sigismember(&safe_set, SUSPEND_SIGNAL))
+        return NULL;
+    info->syscall_kernel_sigmask = safe_set;
+    kernel_sigdelset(&info->syscall_kernel_sigmask, SUSPEND_SIGNAL);
+    return &info->syscall_kernel_sigmask;
+}
+
+/* rt_sigpending: the kernel reports what it holds against its own mask; report
+ * against the app's, and add the blocked signals we hold.
+ */
+void
+handle_post_sigpending(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    kernel_sigset_t pending;
+    if (!DYNAMO_OPTION(intercept_all_signals) || sigsetsize != sizeof(pending) ||
+        set == NULL || !d_r_safe_read(set, sizeof(pending), &pending))
+        return;
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (!kernel_sigismember(&info->app_sigblocked, sig))
+            kernel_sigdelset(&pending, sig);
+        else if (info->sigpending[sig] != NULL)
+            kernel_sigaddset(&pending, sig);
+    }
+    safe_write_ex(set, sizeof(pending), &pending, NULL);
 }
 
 static void
@@ -4220,11 +4522,10 @@ copy_frame_to_stack(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
  * in rt form.
  */
 static void
-copy_frame_to_pending(dcontext_t *dcontext, int sig, sigframe_rt_t *frame,
+copy_frame_to_pending(dcontext_t *dcontext, sigpending_t *pend, sigframe_rt_t *frame,
                       byte *access_address)
 {
-    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    sigframe_rt_t *dst = &(info->sigpending[sig]->rt_frame);
+    sigframe_rt_t *dst = &pend->rt_frame;
     memcpy_rt_frame(frame, (byte *)dst, false /*!already pending*/);
 
 #if defined(LINUX) && defined(X86)
@@ -4240,18 +4541,19 @@ copy_frame_to_pending(dcontext_t *dcontext, int sig, sigframe_rt_t *frame,
     if (frame->uc.uc_mcontext.fpstate != NULL) {
         size_t extra_size = signal_frame_extra_size(false);
         ASSERT(extra_size == frame->uc.uc_mcontext.fpstate->sw_reserved.extended_size);
-        memcpy(&info->sigpending[sig]->xstate, frame->uc.uc_mcontext.fpstate, extra_size);
+        memcpy(&pend->xstate, frame->uc.uc_mcontext.fpstate, extra_size);
     }
     /* we must set the pointer now so that later save_fpstate, etc. work */
-    dst->uc.uc_mcontext.fpstate = (kernel_fpstate_t *)&info->sigpending[sig]->xstate;
+    dst->uc.uc_mcontext.fpstate = (kernel_fpstate_t *)&pend->xstate;
 #endif /* LINUX && X86 */
 
-    info->sigpending[sig]->access_address = access_address;
-    info->sigpending[sig]->use_sigcontext = false;
+    pend->access_address = access_address;
+    pend->use_sigcontext = false;
 
 #ifdef MACOS
     /* We rely on puc to find sc to we have to fix it up */
-    fixup_rtframe_pointers(dcontext, info, sig, frame, dst, false /*!for app*/,
+    fixup_rtframe_pointers(dcontext, (thread_sig_info_t *)dcontext->signal_field,
+                           frame->info.si_signo, frame, dst, false /*!for app*/,
                            sizeof(*dst));
 #endif
 
@@ -5071,6 +5373,17 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
         ASSERT(ostd->processing_signal == 0 || sig == SUSPEND_SIGNAL || sig == SIGSEGV);
         ASSERT(can_always_delay[sig] ||
                is_sys_kill(dcontext, pc, (byte *)sc->SC_XSP, &frame->info));
+        if (!dcontext->is_exiting && sig_kernel_blockable(sig) &&
+            requeue_signal_in_kernel(sig, &frame->info)) {
+            /* Leave it pending in the kernel, blocked until whoever is using the
+             * queue syncs the kernel mask (receive_pending_signal(),
+             * handle_pre_sigtimedwait()).
+             */
+            LOG(THREAD, LOG_ASYNCH, 2, "nested signal %d left pending in the kernel\n",
+                sig);
+            kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
+            return;
+        }
         /* To avoid re-entrant execution of special_heap_alloc() and of
          * prepending to the pending list we just drop this signal.
          * FIXME i#194/PR 453996: do better.
@@ -5453,21 +5766,68 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
         /* Happened in DR, do not translate context.  Record for later processing
          * at a safe point with a clean app state.
          */
-        if (!blocked || sig >= OFFS_RT || (blocked && info->sigpending[sig] == NULL)) {
-            /* only have 1 pending for blocked non-rt signals */
-
-            /* to avoid accumulating signals if we're slow in presence of
-             * a high-rate itimer we only keep 2 alarm signals (PR 596768)
+        bool kernel_blockable = sig_kernel_blockable(sig);
+        if (blocked && kernel_blockable &&
+            requeue_signal_in_kernel(sig, &frame->info)) {
+            /* The app blocks it but the kernel mask we are returning to does not
+             * (the app's mask changed since it was set, or we unblocked
+             * everything): leave it pending in the kernel, where the app can see
+             * it, and block it there (see sig_kernel_blockable()).
              */
-            if (sig_is_alarm_signal(sig)) {
+            LOG(THREAD, LOG_ASYNCH, 2, "blocked signal %d left pending in the kernel\n",
+                sig);
+            kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
+        } else if (!sig_is_real_time(sig) && info->sigpending[sig] != NULL &&
+                   (blocked || kernel_blockable)) {
+            /* Like the kernel, keep one pending instance of a standard signal.
+             * (Further instances of a kernel-blockable signal normally wait in
+             * the kernel, blocked while we hold this one.)
+             * For clients, we document that we do not pass to them
+             * unless we're prepared to deliver to app.  We would have
+             * to change our model to pass them non-final-translated
+             * contexts for delayable signals in order to give them
+             * signals as soon as they come in.  Xref i#182/PR 449996.
+             */
+            LOG(THREAD, LOG_ASYNCH, 3,
+                "\tnon-rt signal already in queue, ignoring this one!\n");
+        } else if (info->num_pending >= info->pending_capacity) {
+            /* Our special heap is full and getting a new unit takes locks, which
+             * is unsafe here: receive_pending_signal() grows it ahead of time but
+             * a burst can still fill it.  The kernel can keep a blockable signal
+             * for us until we have delivered some of the queued ones.
+             */
+            if (kernel_blockable && requeue_signal_in_kernel(sig, &frame->info)) {
+                LOG(THREAD, LOG_ASYNCH, 2,
+                    "pending queue full: signal %d left pending in the kernel\n", sig);
+                kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
+            } else {
+                LOG(THREAD, LOG_ASYNCH, 1, "pending queue full: dropping signal %d\n",
+                    sig);
+                STATS_INC(num_signals_dropped);
+                DO_ONCE({
+                    char max_string[32];
+                    snprintf(max_string, BUFFER_SIZE_ELEMENTS(max_string), "%d",
+                             DYNAMO_OPTION(max_pending_signals));
+                    NULL_TERMINATE_BUFFER(max_string);
+                    SYSLOG(SYSLOG_WARNING, MAX_PENDING_SIGNALS, 3, get_application_name(),
+                           get_application_pid(), max_string);
+                });
+            }
+        } else {
+            /* To avoid accumulating signals if we're slow in presence of
+             * a high-rate itimer we only keep 2 alarm signals (PR 596768).
+             * We extend this to any non-real-time signal (where POSIX says only
+             * one has to be queued) to avoid lock issues.
+             */
+            if (!sig_is_real_time(sig)) {
                 if (info->sigpending[sig] != NULL &&
                     info->sigpending[sig]->next != NULL) {
                     ASSERT(info->sigpending[sig]->next->next == NULL);
                     /* keep the oldest, replace newer w/ brand-new one, for
                      * more spread-out alarms
                      */
-                    sigpending_t *temp = info->sigpending[sig];
-                    info->sigpending[sig] = temp->next;
+                    sigpending_t *temp = info->sigpending[sig]->next;
+                    info->sigpending[sig]->next = NULL;
                     special_heap_free(info->sigheap, temp);
                     info->num_pending--;
                     LOG(THREAD, LOG_ASYNCH, 2, "3rd pending alarm %d => dropping 2nd\n",
@@ -5480,28 +5840,9 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             pend = special_heap_alloc(info->sigheap);
             ASSERT(sig > 0 && sig <= MAX_SIGNUM);
             info->num_pending++;
-            if (info->num_pending > DYNAMO_OPTION(max_pending_signals) &&
-                !info->multiple_pending_units)
-                info->multiple_pending_units = true;
-            if (info->num_pending >= DYNAMO_OPTION(max_pending_signals)) {
-                /* We're at the limit of our special heap: one more and it will try to
-                 * allocate a new unit, which is unsafe as it acquires locks.  We take
-                 * several steps: we notify the user; we check for this on delivery as
-                 * well and proactively allocate a new unit in a safer context.
-                 * XXX: Perhaps we should drop some signals here?
-                 */
-                DO_ONCE({
-                    char max_string[32];
-                    snprintf(max_string, BUFFER_SIZE_ELEMENTS(max_string), "%d",
-                             DYNAMO_OPTION(max_pending_signals));
-                    NULL_TERMINATE_BUFFER(max_string);
-                    SYSLOG(SYSLOG_WARNING, MAX_PENDING_SIGNALS, 3, get_application_name(),
-                           get_application_pid(), max_string);
-                });
-            }
 
-            pend->next = info->sigpending[sig];
-            info->sigpending[sig] = pend;
+            /* Signals of one number are delivered in the order they arrived. */
+            pend->next = NULL;
             pend->unblocked_at_receipt = !blocked && !reroute;
 
             /* FIXME: note that for asynchronous signals we don't need to
@@ -5511,12 +5852,12 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
              *  happen while in cache?  but for asynch, we would have to
              *  construct our own frame...kind of a pain.
              */
-            copy_frame_to_pending(dcontext, sig, frame, access_address);
+            copy_frame_to_pending(dcontext, pend, frame, access_address);
 
             /* i#1145: check whether we should auto-restart an interrupted syscall */
             if (at_auto_restart_syscall) {
                 /* Adjust the pending frame to restart the syscall, if applicable */
-                sigframe_rt_t *frame = &(info->sigpending[sig]->rt_frame);
+                sigframe_rt_t *frame = &pend->rt_frame;
                 sigcontext_t *sc_pend = get_sigcontext_from_rt_frame(frame);
                 if (adjust_syscall_for_restart(dcontext, info, sig, sc_pend, f,
                                                orig_retval_reg)) {
@@ -5530,19 +5871,18 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                      * the restart, which seems reasonable, given the signal in
                      * between.
                      */
-                    info->sigpending[sig]->use_sigcontext = true;
+                    pend->use_sigcontext = true;
                 }
             }
 
-        } else {
-            /* For clients, we document that we do not pass to them
-             * unless we're prepared to deliver to app.  We would have
-             * to change our model to pass them non-final-translated
-             * contexts for delayable signals in order to give them
-             * signals as soon as they come in.  Xref i#182/PR 449996.
-             */
-            LOG(THREAD, LOG_ASYNCH, 3,
-                "\tnon-rt signal already in queue, ignoring this one!\n");
+            sigpending_t **tail = &info->sigpending[sig];
+            while (*tail != NULL)
+                tail = &(*tail)->next;
+            *tail = pend;
+
+            /* Further instances wait in the kernel until we deliver this one. */
+            if (kernel_blockable)
+                kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
         }
 
         if (!blocked && dcontext->signals_pending == 0)
@@ -6469,6 +6809,9 @@ execute_handler_from_cache(dcontext_t *dcontext, int sig, sigframe_rt_t *our_fra
     if ((info->sighand->action[sig]->flags & SA_NOMASK) == 0)
         kernel_sigaddset(&blocked, sig);
     set_blocked(dcontext, &blocked, false /*relative: OR these in*/);
+    /* The handler runs with its mask blocked in the kernel as well. */
+    if (!IS_CLIENT_THREAD(dcontext))
+        set_frame_kernel_sigmask(info, uc);
 
     /* Doesn't matter what most app registers are, signal handler doesn't
      * expect anything except the frame on the stack.  We do need to set xsp,
@@ -7515,23 +7858,33 @@ receive_pending_signal(dcontext_t *dcontext)
     /* "lock" the array to prevent a new signal that interrupts this bit of
      * code from prepended or deleting from the array while we're accessing it
      */
+    /* Keep blockable signals waiting in the kernel while we work on the queue;
+     * signal_sync_kernel_mask() below lets them in again.
+     */
+    block_in_kernel_ahead(dcontext, NULL);
     info->accessing_sigpending = true;
     /* barrier to prevent compiler from moving the above write below the loop */
     __asm__ __volatile__("" : : : "memory");
-    if (!info->multiple_pending_units &&
-        info->num_pending + 2 >= DYNAMO_OPTION(max_pending_signals)) {
+    if (info->num_pending + 2 >= info->pending_capacity) {
         /* We're close to the limit: proactively get a new unit while it's safe
          * to acquire locks.  We do that by pushing over the edge.
-         * We assume that filling up a 2nd unit is too pathological to plan for.
+         * record_pending_signal() does not allocate past pending_capacity.
          */
         info->multiple_pending_units = true;
-        SYSLOG_INTERNAL_WARNING("many pending signals: asking for 2nd special unit");
-        sigpending_t *temp1 = special_heap_alloc(info->sigheap);
-        sigpending_t *temp2 = special_heap_alloc(info->sigheap);
-        sigpending_t *temp3 = special_heap_alloc(info->sigheap);
-        special_heap_free(info->sigheap, temp1);
-        special_heap_free(info->sigheap, temp2);
-        special_heap_free(info->sigheap, temp3);
+        SYSLOG_INTERNAL_WARNING_ONCE("many pending signals: asking for another "
+                                     "special unit");
+        sigpending_t *list = NULL;
+        for (int i = info->num_pending; i <= info->pending_capacity; i++) {
+            sigpending_t *temp = special_heap_alloc(info->sigheap);
+            temp->next = list;
+            list = temp;
+        }
+        while (list != NULL) {
+            sigpending_t *temp = list;
+            list = list->next;
+            special_heap_free(info->sigheap, temp);
+        }
+        info->pending_capacity += DYNAMO_OPTION(max_pending_signals);
     }
     for (sig = 1; sig <= MAX_SIGNUM; sig++) {
         if (info->sigpending[sig] != NULL) {
@@ -7595,6 +7948,11 @@ receive_pending_signal(dcontext_t *dcontext)
         LOG(THREAD, LOG_ASYNCH, 3, "\tclearing signals_pending flag\n");
         dcontext->signals_pending = 0;
     }
+    /* Unblock in the kernel what we no longer hold and block what the app's
+     * handler mask now blocks.  A kernel-pending signal unblocked here arrives
+     * right away and is queued for the next pass.
+     */
+    signal_sync_kernel_mask(dcontext);
 }
 
 /* Returns false if should NOT issue syscall. */
@@ -7704,9 +8062,16 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
          */
 
         /* Discard blocked signals, re-set from prev mask stored in frame. */
+        block_in_kernel_ahead(dcontext, SIGMASK_FROM_UCXT(ucxt));
         set_blocked(dcontext, SIGMASK_FROM_UCXT(ucxt), true /*absolute*/);
         /* Restore DR's so sigreturn syscall won't change it. */
         *SIGMASK_FROM_UCXT(ucxt) = our_mask;
+        if (DYNAMO_OPTION(intercept_all_signals)) {
+            /* The sigreturn syscall installs the kernel mask for the restored app
+             * mask (see sig_kernel_blockable()).
+             */
+            set_frame_kernel_sigmask(info, ucxt);
+        }
     }
 #if defined(LINUX) && !defined(X64)
     else {
@@ -8297,6 +8662,8 @@ set_itimer_callback(dcontext_t *dcontext, int which, uint millisec,
     ASSERT(info != NULL && info->itimer != NULL);
     if (info->shared_itimer)
         acquire_recursive_lock(&(*info->itimer)[which].lock);
+    if (millisec != 0)
+        dr_uses_alarm_itimers = true;
     (*info->itimer)[which].dr.interval = ((uint64)millisec) * 1000;
     (*info->itimer)[which].dr.value = (*info->itimer)[which].dr.interval;
     (*info->itimer)[which].cb = func;
@@ -9004,7 +9371,7 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
     ksynch_wake_all(&ostd->suspended);
 
     thread_sig_info_t *sig_info = (thread_sig_info_t *)dcontext->signal_field;
-    byte pending_before[SIGARRAY_SIZE];
+    uint pending_before[SIGARRAY_SIZE];
     count_pending_signals(sig_info, pending_before);
 
     bool unblocked_sigs = false;
@@ -9027,8 +9394,17 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
          * prevent our own re-suspension signal from arriving before we've
          * re-blocked on the resume.
          */
-        sigprocmask_syscall(SIG_SETMASK, SIGMASK_FROM_UCXT(ucxt), &prevmask,
-                            sizeof(ucxt->uc_sigmask));
+        /* Signals the kernel can hold for the app wait there, so they arrive at
+         * the interrupted context in their order once we return (queueing them
+         * here and handing them back afterward would put them behind later
+         * instances).
+         */
+        kernel_sigset_t wait_mask = *SIGMASK_FROM_UCXT(ucxt);
+        for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+            if (sig_kernel_blockable(sig))
+                kernel_sigaddset(&wait_mask, sig);
+        }
+        sigprocmask_syscall(SIG_SETMASK, &wait_mask, &prevmask, sizeof(wait_mask));
         unblocked_sigs = true;
     }
 

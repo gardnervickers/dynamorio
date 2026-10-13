@@ -5410,6 +5410,9 @@ ignorable_system_call_normalized(int num)
 #    endif
     case SYS_ppoll:
     case SYS_epoll_pwait:
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
     /* Used as a lazy trigger. */
     case SYS_rseq:
 #endif
@@ -7818,8 +7821,16 @@ pre_system_call(dcontext_t *dcontext)
            sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize)
          */
 
-        handle_sigsuspend(dcontext, (kernel_sigset_t *)sys_param(dcontext, 0),
-                          (size_t)sys_param(dcontext, 1));
+        if (!handle_sigsuspend(dcontext, (kernel_sigset_t *)sys_param(dcontext, 0),
+                               (size_t)sys_param(dcontext, 1))) {
+            /* Invalid arguments: the kernel fails the call without delivering
+             * anything.
+             */
+            break;
+        }
+        kernel_sigset_t *kmask = signal_syscall_kernel_sigmask(dcontext);
+        if (kmask != NULL)
+            set_syscall_param(dcontext, 0, (reg_t)kmask);
         if (dcontext->signals_pending > 0) {
             /* A signal is already pending, which may be because it was blocked
              * before and is now unblocked by the sigsuspend. Since the kernel has
@@ -7858,6 +7869,17 @@ pre_system_call(dcontext_t *dcontext)
         else
 #    endif
             dcontext->sys_param3 = sys_param(dcontext, 3);
+        if (DYNAMO_OPTION(intercept_all_signals)) {
+            /* The kernel keeps the signals the app blocks pending (see
+             * signal_sync_kernel_mask()), so a real signalfd sees them.
+             */
+            kernel_sigset_t *kset = signal_signalfd_kernel_set(
+                dcontext, (kernel_sigset_t *)dcontext->sys_param1,
+                (size_t)dcontext->sys_param2);
+            if (kset != NULL)
+                set_syscall_param(dcontext, 1, (reg_t)kset);
+            break;
+        }
         new_result = handle_pre_signalfd(
             dcontext, (int)dcontext->sys_param0, (kernel_sigset_t *)dcontext->sys_param1,
             (size_t)dcontext->sys_param2, (int)dcontext->sys_param3);
@@ -7986,12 +8008,41 @@ pre_system_call(dcontext_t *dcontext)
 #    ifdef SYS_rt_sigtimedwait_time64
     case SYS_rt_sigtimedwait_time64: /* 421 */
 #    endif
-    case SYS_rt_sigtimedwait: /* 177 */
+    case SYS_rt_sigtimedwait: { /* 177 */
+        /* int rt_sigtimedwait(const sigset_t *set, siginfo_t *info,
+         *                     const struct timespec *timeout, size_t sigsetsize)
+         */
+        reg_t result;
+        if (handle_pre_sigtimedwait(dcontext, (kernel_sigset_t *)sys_param(dcontext, 0),
+                                    (kernel_siginfo_t *)sys_param(dcontext, 1),
+                                    (size_t)sys_param(dcontext, 3), &result)) {
+            if ((ptr_int_t)result < 0)
+                set_failure_return_val(dcontext, (uint) - (ptr_int_t)result);
+            else
+                set_success_return_val(dcontext, result);
+            execute_syscall = false;
+            break;
+        }
+        kernel_sigset_t *kset = signal_sigtimedwait_kernel_set(
+            dcontext, (kernel_sigset_t *)sys_param(dcontext, 0),
+            (size_t)sys_param(dcontext, 3));
+        if (kset != NULL)
+            set_syscall_param(dcontext, 0, (reg_t)kset);
+        break;
+    }
+    case SYS_rt_sigpending: { /* 176 */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = sys_param(dcontext, 1);
+        break;
+    }
     case SYS_rt_sigqueueinfo: /* 178 */
     case SYS_rt_tgsigqueueinfo:
 #endif
-    case IF_MACOS_ELSE(SYS_sigpending, SYS_rt_sigpending): { /* 176 */
-        /* FIXME i#92: handle all of these syscalls! */
+#ifdef MACOS
+    case SYS_sigpending:
+#endif
+    {
+        /* XXX i#92: handle all of these syscalls! */
         LOG(THREAD, LOG_ASYNCH | LOG_SYSCALLS, 1,
             "WARNING: unhandled signal system call %d\n", dcontext->sys_num);
         SYSLOG_INTERNAL_WARNING_ONCE("unhandled signal system call %d",
@@ -8030,6 +8081,11 @@ pre_system_call(dcontext_t *dcontext)
             set_failure_return_val(dcontext, EINTR);
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
             execute_syscall = false;
+        } else if (execute_syscall) {
+            /* Let the kernel apply the mask for the signals it holds pending. */
+            kernel_sigset_t *kmask = signal_syscall_kernel_sigmask(dcontext);
+            if (kmask != NULL)
+                set_syscall_param(dcontext, 3, (reg_t)kmask);
         }
         break;
     }
@@ -8090,9 +8146,21 @@ pre_system_call(dcontext_t *dcontext)
             set_failure_return_val(dcontext, EINTR);
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
             execute_syscall = false;
+        } else if (execute_syscall) {
+            kernel_sigset_t *kmask = signal_syscall_kernel_sigmask(dcontext);
+            if (kmask != NULL &&
+                !safe_write_ex((void *)&data_param->sigmask, sizeof(data_param->sigmask),
+                               &kmask, NULL)) {
+                set_failure_return_val(dcontext, EFAULT);
+                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+                execute_syscall = false;
+            }
         }
         break;
     }
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
     case SYS_epoll_pwait: {
         kernel_sigset_t *sigmask = (kernel_sigset_t *)sys_param(dcontext, 4);
         dcontext->sys_param4 = (reg_t)sigmask;
@@ -8113,6 +8181,10 @@ pre_system_call(dcontext_t *dcontext)
             set_failure_return_val(dcontext, EINTR);
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
             execute_syscall = false;
+        } else if (execute_syscall) {
+            kernel_sigset_t *kmask = signal_syscall_kernel_sigmask(dcontext);
+            if (kmask != NULL)
+                set_syscall_param(dcontext, 4, (reg_t)kmask);
         }
         break;
     }
@@ -9407,6 +9479,25 @@ post_system_call(dcontext_t *dcontext)
         }
         break;
     }
+#ifdef LINUX
+    case SYS_rt_sigsuspend:
+        handle_post_sigsuspend(dcontext);
+        break;
+    case SYS_rt_sigpending:
+        if (success) {
+            handle_post_sigpending(dcontext, (kernel_sigset_t *)dcontext->sys_param0,
+                                   (size_t)dcontext->sys_param1);
+        }
+        break;
+#    ifdef SYS_signalfd
+    case SYS_signalfd:
+#    endif
+    case SYS_signalfd4:
+        /* Restore the mask pointer we replaced for the kernel. */
+        if (DYNAMO_OPTION(intercept_all_signals))
+            set_syscall_param(dcontext, 1, dcontext->sys_param1);
+        break;
+#endif
 #if defined(LINUX) && !defined(X64)
     case SYS_sigreturn: /* 119 */
 #endif
@@ -9469,6 +9560,9 @@ post_system_call(dcontext_t *dcontext)
         }
         break;
     }
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
     case SYS_epoll_pwait: {
         if (dcontext->sys_param4 == (reg_t)NULL)
             break;

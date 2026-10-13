@@ -388,8 +388,31 @@ handle_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *set,
 int
 handle_post_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *set,
                         kernel_sigset_t *oset, size_t sigsetsize);
-void
+bool
 handle_sigsuspend(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize);
+
+kernel_sigset_t *
+signal_syscall_kernel_sigmask(dcontext_t *dcontext);
+
+void
+handle_post_sigsuspend(dcontext_t *dcontext);
+
+void
+signal_sync_kernel_mask(dcontext_t *dcontext);
+
+bool
+handle_pre_sigtimedwait(dcontext_t *dcontext, kernel_sigset_t *set,
+                        kernel_siginfo_t *siginfo, size_t sigsetsize, reg_t *result);
+
+void
+handle_post_sigpending(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize);
+
+kernel_sigset_t *
+signal_signalfd_kernel_set(dcontext_t *dcontext, kernel_sigset_t *mask, size_t sizemask);
+
+kernel_sigset_t *
+signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
+                               size_t sigsetsize);
 
 #ifdef LINUX
 ptr_int_t
