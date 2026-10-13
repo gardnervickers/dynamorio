@@ -43,6 +43,9 @@
 #include "fcache.h"     /* in_fcache() */
 #include "translate.h"
 #include "native_exec.h"
+#ifdef LINUX
+#    include "unix/ksynch.h" /* ksynch_wait() */
+#endif
 
 extern vm_area_vector_t *fcache_unit_areas; /* from fcache.c */
 
@@ -52,6 +55,31 @@ thread_id_t detacher_tid = INVALID_THREAD_ID;
 
 static void
 synch_thread_yield(void);
+
+static void
+synch_thread_wait(volatile int *var, int mustbe);
+
+/* Threads spinning to acquire all_threads_synch_lock. */
+static volatile int synch_all_waiters;
+
+#ifdef LINUX
+/* Bumped, with a futex wake, whenever something a thread in synch_with_all_threads()
+ * may be waiting for happens: a thread starts waiting at a safe spot, a thread
+ * waiting to start a synch-all is asked to wait at one, or all_threads_synch_lock is
+ * released.  Such a thread reads
+ * it before checking for what it waits for, then waits for it to change (bounded by
+ * SYNCH_WITH_WAIT_MS) instead of sleeping or yielding.  A yield is no shorter: it
+ * hands the CPU to app threads for the rest of their time slice.
+ */
+static volatile int synch_events;
+
+static void
+synch_event_signal(void)
+{
+    ATOMIC_INC(int, synch_events);
+    ksynch_wake_all(&synch_events);
+}
+#endif
 
 /* Thread-local data
  */
@@ -69,6 +97,11 @@ typedef struct _thread_synch_data_t {
      * trylock, as it could have been suspended while holding synch_lock (i#2805).
      */
     thread_synch_permission_t synch_perm;
+    /* Set while this thread waits to start a synch-all (for all_threads_synch_lock
+     * or for threads spinning for it), where it checks for synchs that want it at a
+     * safe spot only when it wakes up: see synch_event_signal().
+     */
+    volatile bool in_synch_all_entry;
     /* Only valid while holding all_threads_synch_lock and thread_initexit_lock.  Set
      * to whether synch_with_all_threads was successful in synching this thread.
      */
@@ -136,6 +169,7 @@ synch_thread_init(dcontext_t *dcontext)
     tsd->pending_synch_count = 0;
     tsd->synch_perm = THREAD_SYNCH_NONE;
     tsd->synch_with_success = false;
+    tsd->in_synch_all_entry = false;
     tsd->set_mcontext = NULL;
     tsd->set_context = NULL;
     /* the synch_lock is in unprotected memory so that check_wait_at_safe_spot
@@ -718,6 +752,9 @@ check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_stat
      * once we have detach handling system calls here.
      */
     spinmutex_unlock(tsd->synch_lock);
+#ifdef LINUX
+    synch_event_signal();
+#endif
     while (tsd->pending_synch_count > 0 && tsd->synch_perm != THREAD_SYNCH_NONE) {
         STATS_INC_DC(dcontext, synch_loops_wait_safe);
 #ifdef WINDOWS
@@ -729,8 +766,12 @@ check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_stat
             SPINLOCK_PAUSE();
         } else {
 #endif
-            /* FIXME case 10100: replace this sleep/yield with a wait_for_event() */
-            synch_thread_yield();
+            /* Case 10100: adjust_wait_at_safe_spot() wakes us when a synch is
+             * done, instead of us polling every SYNCH_WITH_WAIT_MS: a thread that
+             * flushes code over and over otherwise keeps the others asleep.
+             */
+            synch_thread_wait(&tsd->pending_synch_count,
+                              atomic_aligned_read_int(&tsd->pending_synch_count));
 #ifdef WINDOWS
         }
 #endif
@@ -781,6 +822,15 @@ adjust_wait_at_safe_spot(dcontext_t *dcontext, int amt)
     spinmutex_lock(tsd->synch_lock);
     ATOMIC_ADD(int, tsd->pending_synch_count, amt);
     spinmutex_unlock(tsd->synch_lock);
+#ifdef LINUX
+    /* Wake the thread if it waits at a safe spot in check_wait_at_safe_spot(), or
+     * if it waits in synch_with_all_threads() and should now go wait there.
+     */
+    if (amt < 0)
+        ksynch_wake_all(&tsd->pending_synch_count);
+    else if (tsd->in_synch_all_entry)
+        synch_event_signal();
+#endif
 }
 
 /* Case 10101: Safely sets the context for a target thread that may be waiting at a
@@ -873,10 +923,9 @@ set_synched_thread_context(thread_record_t *trec,
 #define SYNCH_ALL_THREADS_MAXIMUM_LOOPS (DYNAMO_OPTION(synch_all_threads_max_loops))
 #define SYNCH_MAXIMUM_LOOPS (DYNAMO_OPTION(synch_thread_max_loops))
 
-/* Threads spinning to acquire all_threads_synch_lock, and how many times a thread
- * starting synch_with_all_threads yields to them first.
+/* How many times a thread starting synch_with_all_threads yields to threads
+ * spinning for all_threads_synch_lock (synch_all_waiters) first.
  */
-static volatile int synch_all_waiters;
 #define SYNCH_ALL_DEFER_MAX 100
 
 /* Amt of time in ms to wait for threads to get to a safe spot per a loop,
@@ -902,6 +951,25 @@ synch_thread_yield()
     } else {
         os_thread_yield();
     }
+}
+
+/* Like synch_thread_yield(), but on Linux returns early once *var no longer equals
+ * mustbe, so a waiter does not sleep through the event it waits for.
+ */
+static void
+synch_thread_wait(volatile int *var, int mustbe)
+{
+#ifdef LINUX
+    uint num_procs = get_num_processors();
+    if (SYNCH_WITH_WAIT_MS > 0 &&
+        ((num_procs == 1 && DYNAMO_OPTION(synch_thread_sleep_UP)) ||
+         (num_procs > 1 && DYNAMO_OPTION(synch_thread_sleep_MP)))) {
+        if (*var == mustbe)
+            ksynch_wait(var, mustbe, SYNCH_WITH_WAIT_MS);
+        return;
+    }
+#endif
+    synch_thread_yield();
 }
 
 /* returns a thread_synch_result_t value
@@ -1295,8 +1363,15 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
      * every trylock below and starves a waiter such as a forking thread.  The
      * deferral is bounded, so two such threads cannot defer to each other forever.
      */
+    thread_synch_data_t *my_tsd =
+        dcontext != NULL ? (thread_synch_data_t *)dcontext->synch_field : NULL;
+    if (my_tsd != NULL)
+        my_tsd->in_synch_all_entry = true;
     for (i = 0; i < SYNCH_ALL_DEFER_MAX && atomic_aligned_read_int(&synch_all_waiters) > 0;
          i++) {
+#ifdef LINUX
+        int events = atomic_aligned_read_int(&synch_events);
+#endif
         if (dcontext != NULL && cur_state != THREAD_SYNCH_NONE &&
             should_wait_at_safe_spot(dcontext)) {
             if (dcontext->is_exiting) {
@@ -1308,7 +1383,11 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                 ATOMIC_INC(int, exiting_thread_count);
             }
         }
+#ifdef LINUX
+        synch_thread_wait(&synch_events, events);
+#else
         os_thread_yield();
+#endif
     }
 
     /* grab all_threads_synch_lock */
@@ -1321,7 +1400,12 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
      * Ditto on all other os_thread_yields in this file!
      */
     bool counted_waiter = false;
-    while (!d_r_mutex_trylock(&all_threads_synch_lock)) {
+    while (true) {
+#ifdef LINUX
+        int events = atomic_aligned_read_int(&synch_events);
+#endif
+        if (d_r_mutex_trylock(&all_threads_synch_lock))
+            break;
         if (!counted_waiter) {
             ATOMIC_INC(int, synch_all_waiters);
             counted_waiter = true;
@@ -1349,12 +1433,18 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
          * synch with make progress towards a safe synch point). */
         if (INTERNAL_OPTION(single_thread_in_DR))
             EXITING_DR(); /* give up DR exclusion lock */
+#ifdef LINUX
+        synch_thread_wait(&synch_events, events);
+#else
         os_thread_yield();
+#endif
         if (INTERNAL_OPTION(single_thread_in_DR))
             ENTERING_DR(); /* re-gain DR exclusion lock */
     }
     if (counted_waiter)
         ATOMIC_DEC(int, synch_all_waiters);
+    if (my_tsd != NULL)
+        my_tsd->in_synch_all_entry = false;
 
     d_r_mutex_lock(&thread_initexit_lock);
     /* synch with all threads */
@@ -1414,6 +1504,9 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
         }
 
         all_synched = true;
+#ifdef LINUX
+        int events = atomic_aligned_read_int(&synch_events);
+#endif
         LOG(THREAD, LOG_SYNCH, 3, "Looping over all threads (%d threads)\n", num_threads);
         finished_non_client_threads = true;
         for (i = 0; i < num_threads; i++) {
@@ -1527,7 +1620,12 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
              * point). */
             if (INTERNAL_OPTION(single_thread_in_DR))
                 EXITING_DR(); /* give up DR exclusion lock */
+#ifdef LINUX
+            /* Stop waiting as soon as another thread reaches a safe spot. */
+            synch_thread_wait(&synch_events, events);
+#else
             synch_thread_yield();
+#endif
             if (INTERNAL_OPTION(single_thread_in_DR))
                 ENTERING_DR(); /* re-gain DR exclusion lock */
             d_r_mutex_lock(&thread_initexit_lock);
@@ -1626,6 +1724,9 @@ synch_with_all_abort:
     }
     d_r_mutex_unlock(&thread_initexit_lock);
     d_r_mutex_unlock(&all_threads_synch_lock);
+#ifdef LINUX
+    synch_event_signal();
+#endif
     ASSERT(exiting_thread_count - expect_self_exiting == 0);
     ASSERT(!all_synched); /* ensure our OUT values will be NULL,0
                              for THREAD_SYNCH_SUSPEND_FAILURE_ABORT */
@@ -1689,6 +1790,9 @@ end_synch_with_all_threads(thread_record_t **threads, uint num_threads, bool res
      */
     d_r_mutex_unlock(&thread_initexit_lock);
     d_r_mutex_unlock(&all_threads_synch_lock);
+#ifdef LINUX
+    synch_event_signal();
+#endif
     if (threads != NULL) {
         global_heap_free(
             threads, num_threads * sizeof(thread_record_t *) HEAPACCT(ACCT_THREAD_MGT));
