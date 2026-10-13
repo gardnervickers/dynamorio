@@ -7622,6 +7622,37 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
     }
 }
 
+/* Whether raise_signal_as_fault() can raise sig. */
+static bool
+can_raise_signal_as_fault(int sig)
+{
+#if defined(AARCH64) || defined(X86)
+    return sig == SIGSEGV || sig == SIGILL || sig == SIGTRAP;
+#else
+    return sig == SIGSEGV;
+#endif
+}
+
+/* Raises sig, whose action must be SIG_DFL, by executing an instruction that
+ * makes the kernel force it on us.
+ */
+static void
+raise_signal_as_fault(int sig)
+{
+#ifdef AARCH64
+    if (sig == SIGILL)
+        __asm__ __volatile__("udf #0");
+    else if (sig == SIGTRAP)
+        __asm__ __volatile__("brk #0");
+#elif defined(X86)
+    if (sig == SIGILL)
+        __asm__ __volatile__("ud2");
+    else if (sig == SIGTRAP)
+        __asm__ __volatile__("int3");
+#endif
+    *((volatile int *)PTR_UINT_MINUS_1) = 0;
+}
+
 /* The arg to SYS_kill, i.e., the signal number, should be in dcontext->sys_param0 */
 /* This routine unblocks signals, but the caller must set the handler to default. */
 static void
@@ -7645,7 +7676,23 @@ terminate_via_kill(dcontext_t *dcontext)
      */
     memset(&info->app_sigblocked, 0, sizeof(info->app_sigblocked));
 
-    /* FIXME PR 541760: there can be multiple thread groups and thus
+    if (get_process_id() == 1 /* init of its PID namespace */ &&
+        can_raise_signal_as_fault((int)dcontext->sys_param0)) {
+        /* The kernel drops a SIG_DFL signal that the init process of a PID
+         * namespace sends itself, so SYS_kill would return and leave this thread
+         * spinning in unexpected_return().  Only a fault the kernel forces
+         * terminates such a process, as it does natively when the app faults.
+         */
+        int sig = (int)dcontext->sys_param0;
+        LOG(THREAD, LOG_ASYNCH, 1, "PID namespace init: raising signal %d as a fault\n",
+            sig);
+        dynamo_process_exit();
+        set_default_signal_action(sig);
+        raise_signal_as_fault(sig);
+        ASSERT_NOT_REACHED();
+    }
+
+    /* XXX PR 541760: there can be multiple thread groups and thus
      * this may not exit all threads in the address space
      */
     block_cleanup_and_terminate(
