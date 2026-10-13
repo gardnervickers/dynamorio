@@ -549,6 +549,15 @@ signal_handle_dup(dcontext_t *dcontext, file_t src, file_t dst)
     TABLE_RWLOCK(sigfd_table, write, unlock);
 }
 
+/* The app closes every fd in [first, last]. */
+void
+signal_handle_close_range(dcontext_t *dcontext, uint first, uint last)
+{
+    TABLE_RWLOCK(sigfd_table, write, lock);
+    generic_hash_range_remove(GLOBAL_DCONTEXT, sigfd_table, first, (ptr_uint_t)last + 1);
+    TABLE_RWLOCK(sigfd_table, write, unlock);
+}
+
 void
 signal_handle_close(dcontext_t *dcontext, file_t fd)
 {

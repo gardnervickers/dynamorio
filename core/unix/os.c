@@ -6913,10 +6913,71 @@ handle_close_pre(dcontext_t *dcontext)
 }
 
 #ifdef SYS_close_range
+/* Sets *fd to the lowest DR-owned fd in [first, last]; returns whether there is one. */
 static bool
-handle_close_range_pre(dcontext_t *dcontext, file_t fd)
+fd_table_lowest_in_range(uint first, uint last, uint *fd)
 {
-    return handle_close_generic_pre(dcontext, fd, false /*set_return_val*/);
+    bool found = false;
+    ptr_uint_t key;
+    int iter = 0;
+    TABLE_RWLOCK(fd_table, read, lock);
+    while ((iter = generic_hash_iterate_next(GLOBAL_DCONTEXT, fd_table, iter, &key,
+                                             NULL)) >= 0) {
+        if (key >= first && key <= last && (!found || key < *fd)) {
+            *fd = (uint)key;
+            found = true;
+        }
+    }
+    TABLE_RWLOCK(fd_table, read, unlock);
+    return found;
+}
+
+/* Applies close_range(first, last, flags) to the app's fds, leaving DR-owned ones
+ * alone, with one syscall per run of fds between DR-owned ones: the range is
+ * typically [N, ~0U] (glibc's closefrom(), Python's close_fds). Returns 0 or a
+ * negative errno.
+ */
+static int
+handle_close_range(dcontext_t *dcontext, uint first, uint last, uint flags)
+{
+    int ret;
+    if (TESTANY(CLOSE_RANGE_UNSHARE, flags)) {
+        /* Unshare up front, once. For a range reaching the end of the table, the
+         * kernel's own unshare copies only the fds below the range, ours included.
+         */
+        ret = dynamorio_syscall(SYS_unshare, 1, CLONE_FILES);
+        if (ret != 0)
+            return ret;
+        flags &= ~CLOSE_RANGE_UNSHARE;
+    }
+    if (!TESTANY(CLOSE_RANGE_CLOEXEC, flags)) {
+        /* Keep our own copies of stdin, stdout and stderr (see
+         * handle_close_generic_pre()); they become DR-owned fds outside the range.
+         */
+        for (uint fd = first; fd <= last && fd <= STDERR; fd++)
+            handle_close_generic_pre(dcontext, fd, false /*set_return_val*/);
+#    ifdef LINUX
+        signal_handle_close_range(dcontext, first, last);
+#    endif
+    }
+    uint from = first;
+    while (true) {
+        uint dr_fd = 0;
+        bool skip = fd_table_lowest_in_range(from, last, &dr_fd);
+        if (skip) {
+            SYSLOG_INTERNAL_WARNING_ONCE("app trying to close private fd(s)");
+            LOG(THREAD, LOG_SYSCALLS, 2, "close_range: skipping DR file %d\n", dr_fd);
+        }
+        if (!skip || dr_fd > from) {
+            ret = dynamorio_syscall(SYS_close_range, 3, from, skip ? dr_fd - 1 : last,
+                                    flags);
+            if (ret != 0)
+                return ret;
+        }
+        if (!skip || dr_fd == last)
+            return 0;
+        from = dr_fd + 1;
+    }
 }
 #endif
 
@@ -8621,67 +8682,22 @@ pre_system_call(dcontext_t *dcontext)
 #endif
 #ifdef SYS_close_range
     case SYS_close_range: {
-        /* client.file_io indeed tests this for all arch, but it hasn't yet been
-         * run on an AArchXX machine that has close_range available.
-         */
-        IF_AARCHXX(ASSERT_NOT_TESTED());
-        uint first_fd = sys_param(dcontext, 0), last_fd = sys_param(dcontext, 1);
-        uint flags = sys_param(dcontext, 2);
-        bool is_cloexec = TEST(CLOSE_RANGE_CLOEXEC, flags);
-        if (is_cloexec) {
-            /* client.file_io has a test for CLOSE_RANGE_CLOEXEC, but it hasn't been
-             * verified on a system with kernel version >= 5.11 yet.
-             */
-            ASSERT_NOT_TESTED();
-        }
-        /* We do not let the app execute their own close_range ever. Instead we
-         * make multiple close_range syscalls ourselves, one for each contiguous
-         * sub-range of non-DR-private fds in [first, last].
+        uint first_fd = (uint)sys_param(dcontext, 0);
+        uint last_fd = (uint)sys_param(dcontext, 1);
+        uint flags = (uint)sys_param(dcontext, 2);
+        /* We do not let the app execute their own close_range ever: we close the
+         * parts of [first, last] around DR-owned fds ourselves.
          */
         execute_syscall = false;
-        if (first_fd > last_fd) {
+        if (first_fd > last_fd ||
+            TESTANY(~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC), flags)) {
             set_failure_return_val(dcontext, EINVAL);
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
             break;
         }
-        uint cur_range_first_fd = 0;
-        uint cur_range_last_fd = 0;
-        bool cur_range_valid = false;
-        int ret = 0;
-        for (int i = first_fd; i <= last_fd; i++) {
-            /* Do not allow any changes to DR-owned FDs. */
-            if ((is_cloexec && fd_is_dr_owned(i)) ||
-                (!is_cloexec && !handle_close_range_pre(dcontext, i))) {
-                SYSLOG_INTERNAL_WARNING_ONCE("app trying to close private fd(s)");
-                if (cur_range_valid) {
-                    cur_range_valid = false;
-                    ret = dynamorio_syscall(SYS_close_range, 3, cur_range_first_fd,
-                                            cur_range_last_fd, flags);
-                    if (ret != 0)
-                        break;
-                }
-            } else {
-#    ifdef LINUX
-                if (!is_cloexec) {
-                    signal_handle_close(dcontext, i);
-                }
-#    endif
-                if (cur_range_valid) {
-                    ASSERT(cur_range_last_fd == i - 1);
-                    cur_range_last_fd = i;
-                } else {
-                    cur_range_first_fd = i;
-                    cur_range_last_fd = i;
-                    cur_range_valid = true;
-                }
-            }
-        }
-        if (cur_range_valid) {
-            ret = dynamorio_syscall(SYS_close_range, 3, cur_range_first_fd,
-                                    cur_range_last_fd, flags);
-        }
+        int ret = handle_close_range(dcontext, first_fd, last_fd, flags);
         if (ret != 0) {
-            set_failure_return_val(dcontext, ret);
+            set_failure_return_val(dcontext, -ret);
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
         } else {
             set_success_return_val(dcontext, 0);
