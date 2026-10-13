@@ -7346,10 +7346,15 @@ pre_system_call(dcontext_t *dcontext)
         bool image = addr != NULL && !TEST(MAP_ANONYMOUS, flags) &&
             mmap_check_for_module_overlap(addr, len, TEST(PROT_READ, prot), 0, true);
         if (addr != NULL &&
-            !app_memory_pre_alloc(dcontext, addr, len, osprot_to_memprot(prot),
-                                  !TEST(MAP_FIXED, flags), false /*we'll update in post*/,
-                                  image /*best estimate*/)) {
-            if (!TEST(MAP_FIXED, flags)) {
+            !app_memory_pre_alloc(
+                dcontext, addr, len, osprot_to_memprot(prot), !TESTANY(MAP_FIXED, flags),
+                false /*we'll update in post*/, image /*best estimate*/)) {
+            if (TESTANY(MAP_FIXED_NOREPLACE, flags)) {
+                /* The kernel itself refuses any overlap with EEXIST, and removing
+                 * the address turned the request into one for page 0, which fails
+                 * with EPERM.
+                 */
+            } else if (!TESTANY(MAP_FIXED, flags)) {
                 /* Rather than failing or skipping the syscall we just remove
                  * the hint which should eliminate any overlap.
                  */
