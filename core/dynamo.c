@@ -681,6 +681,10 @@ dynamorio_app_init_part_two_finalize(void)
          */
         if (!DYNAMO_OPTION(thin_client)) {
             vm_areas_init();
+#if defined(LINUX) && defined(AARCH64)
+            /* Needs the module list, which vm_areas_init() fills. */
+            signal_find_vdso_sigreturn();
+#endif
 #ifdef RCT_IND_BRANCH
             /* relies on is_in_dynamo_dll() which needs vm_areas_init */
             rct_init();

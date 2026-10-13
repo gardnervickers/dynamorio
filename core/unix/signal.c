@@ -3554,6 +3554,43 @@ sig_has_restorer(thread_sig_info_t *info, int sig)
     }
     return (info->restorer_valid[sig] == 1);
 }
+
+#if defined(LINUX) && defined(AARCH64)
+/* The vDSO's __kernel_rt_sigreturn, where the kernel points a handler's return
+ * address when the app gave no SA_RESTORER.  Unwinders such as libgcc's recognize
+ * a signal frame by its "mov x8, #139; svc #0" there; dynamorio_sigreturn differs
+ * and is DR's own address.  Looked up at thread init, outside signal handlers.
+ */
+static app_pc vdso_rt_sigreturn;
+#endif
+
+#if defined(LINUX) && defined(AARCH64)
+void
+signal_find_vdso_sigreturn(void)
+{
+    if (vdso_page_start == NULL)
+        return;
+    vdso_rt_sigreturn = (app_pc)d_r_get_proc_address((module_base_t)vdso_page_start,
+                                                     "__kernel_rt_sigreturn");
+    LOG(GLOBAL, LOG_ASYNCH, 1, "vDSO __kernel_rt_sigreturn is " PFX "\n",
+        vdso_rt_sigreturn);
+}
+#endif
+
+/* Where an app signal handler returns. */
+static reg_t
+app_sigreturn_target(thread_sig_info_t *info, int sig)
+{
+#ifdef LINUX
+    if (sig_has_restorer(info, sig))
+        return (reg_t)info->sighand->action[sig]->restorer;
+#    ifdef AARCH64
+    if (vdso_rt_sigreturn != NULL)
+        return (reg_t)vdso_rt_sigreturn;
+#    endif
+#endif
+    return (reg_t)dynamorio_sigreturn;
+}
 #endif
 
 /* Returns the size of the frame for delivering to the app.
@@ -6402,12 +6439,7 @@ execute_handler_from_cache(dcontext_t *dcontext, int sig, sigframe_rt_t *our_fra
         sc->SC_R1 = (reg_t) & ((sigframe_rt_t *)xsp)->info;
         sc->SC_R2 = (reg_t) & ((sigframe_rt_t *)xsp)->uc;
     }
-#    ifdef LINUX
-    if (sig_has_restorer(info, sig))
-        sc->SC_LR = (reg_t)info->sighand->action[sig]->restorer;
-    else
-#    endif
-        sc->SC_LR = (reg_t)dynamorio_sigreturn;
+    sc->SC_LR = app_sigreturn_target(info, sig);
 #elif defined(RISCV64)
     /* FIXME i#3544: Check if xsp is cast correctly? */
     sc->SC_A0 = sig;
@@ -6652,12 +6684,7 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
         mcontext->r1 = (reg_t) & ((sigframe_rt_t *)xsp)->info;
         mcontext->r2 = (reg_t) & ((sigframe_rt_t *)xsp)->uc;
     }
-#    ifdef LINUX
-    if (sig_has_restorer(info, sig))
-        mcontext->lr = (reg_t)info->sighand->action[sig]->restorer;
-    else
-#    endif
-        mcontext->lr = (reg_t)dynamorio_sigreturn;
+    mcontext->lr = app_sigreturn_target(info, sig);
 #elif defined(RISCV64)
     /* FIXME i#3544: Check if xsp is cast correctly? */
     mcontext->a0 = sig;
@@ -6934,12 +6961,7 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
             : "rdi", "rsi", "rdx", "rcx");
 #    else
         reg_t link_reg_var;
-#        ifdef LINUX
-        if (sig_has_restorer(info, sig))
-            link_reg_var = (reg_t)info->sighand->action[sig]->restorer;
-        else
-#        endif
-            link_reg_var = (reg_t)dynamorio_sigreturn;
+        link_reg_var = app_sigreturn_target(info, sig);
         asm volatile("ldr " ASM_R0 ", %[sig]\n\t"
                      "ldr " ASM_R1 ", %[siginfo]\n\t"
                      "ldr " ASM_R2 ", %[ucontext]\n\t"
@@ -6994,12 +7016,7 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
         sc->SC_R1 = (reg_t) & ((sigframe_rt_t *)new_xsp)->info;
         sc->SC_R2 = (reg_t) & ((sigframe_rt_t *)new_xsp)->uc;
     }
-#    ifdef LINUX
-    if (sig_has_restorer(info, sig))
-        sc->SC_LR = (reg_t)info->sighand->action[sig]->restorer;
-    else
-#    endif
-        sc->SC_LR = (reg_t)dynamorio_sigreturn;
+    sc->SC_LR = app_sigreturn_target(info, sig);
 #elif defined(RISCV64)
     /* FIXME i#3544: Check if new_xsp is cast correctly? */
     sc->SC_A0 = sig;

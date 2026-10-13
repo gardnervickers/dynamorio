@@ -569,6 +569,10 @@ os_clone_post(dcontext_t *dcontext);
 
 void
 signal_fork_init(dcontext_t *dcontext);
+#if defined(LINUX) && defined(AARCH64)
+void
+signal_find_vdso_sigreturn(void);
+#endif
 void
 signal_fork_pre(dcontext_t *dcontext, bool clear_sighand);
 
