@@ -1542,6 +1542,20 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
         num_threads_temp = num_threads;
         synch_array_temp = synch_array;
 
+#ifdef UNIX
+        /* Let each thread that has not run since a previous synch resumed it do so
+         * before we ask any to wait for us.  Such a thread would otherwise find
+         * itself wanted again as soon as it ran, and stay at its safe spot or go
+         * straight back to one (a flush sends threads in the cache to
+         * d_r_dispatch): a thread that synchs over and over, such as one flushing
+         * for each of an app's code writes, would keep the others from running for
+         * as long as it went on.  We would wait for each when we suspend it anyway.
+         */
+        for (i = 0; i < num_threads; i++) {
+            if (synch_array[i] == SYNCH_WITH_ALL_NEW && threads[i]->id != my_id)
+                os_thread_wait_resumed(threads[i]);
+        }
+#endif
         for (i = 0; i < num_threads; i++) {
             /* do not de-ref threads[i] after synching if it was cleaned up! */
             if (synch_array[i] != SYNCH_WITH_ALL_SYNCHED && threads[i]->id != my_id) {

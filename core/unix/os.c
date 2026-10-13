@@ -4063,6 +4063,18 @@ os_thread_finish_resume(os_thread_data_t *ostd)
     ostd->resume_pending = false;
 }
 
+/* Waits for this thread to complete our last os_thread_resume() of it, if it has
+ * not yet run since: see os_thread_finish_resume().
+ */
+void
+os_thread_wait_resumed(thread_record_t *tr)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)tr->dcontext->os_field;
+    d_r_mutex_lock(&ostd->suspend_lock);
+    os_thread_finish_resume(ostd);
+    d_r_mutex_unlock(&ostd->suspend_lock);
+}
+
 bool
 os_thread_suspend(thread_record_t *tr)
 {
