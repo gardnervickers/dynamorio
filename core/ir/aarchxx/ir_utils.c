@@ -174,7 +174,7 @@ insert_mov_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_esti
 
     CLIENT_ASSERT(opnd_is_reg(dst), "AArch64 cannot store an immediate direct to memory");
 
-    if (opnd_get_reg(dst) == DR_REG_XZR) {
+    if (opnd_get_reg(dst) == DR_REG_XZR || opnd_get_reg(dst) == DR_REG_WZR) {
         /* Moving a value to the zero register is a no-op. We insert nothing,
          * so *first and *last are set to NULL. Caller beware!
          */
@@ -185,7 +185,10 @@ insert_mov_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_esti
         return;
     }
 
-    ASSERT((uint)(opnd_get_reg(dst) - DR_REG_X0) < 31);
+    ASSERT((uint)(opnd_get_reg(dst) - DR_REG_X0) < 31 ||
+           (uint)(opnd_get_reg(dst) - DR_REG_W0) < 31);
+    /* MOVK with a shift of 32 or 48 is only encodable for an X register. */
+    const int num_halfwords = reg_is_32bit(opnd_get_reg(dst)) ? 2 : 4;
     if (src_inst != NULL)
         val = (ptr_int_t)encode_estimate;
 
@@ -197,8 +200,12 @@ insert_mov_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_esti
     PRE(ilist, instr, mov);
     if (first != NULL)
         *first = mov;
-    for (i = 1; i < 4; i++) {
-        if ((val >> (16 * i) & 0xffff) != 0) {
+    for (i = 1; i < num_halfwords; i++) {
+        /* For an instr operand, val is only an estimate of the final address, which
+         * can differ in any halfword (e.g., if the code crosses a 64K boundary), so we
+         * must set every halfword.
+         */
+        if (src_inst != NULL || (val >> (16 * i) & 0xffff) != 0) {
             /* movk x(dst), #(val >> sh & 0xffff), lsl #(sh) */
             mov = INSTR_CREATE_movk(dcontext, dst,
                                     src_inst == NULL
@@ -234,7 +241,10 @@ insert_mov_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_esti
                                      : opnd_create_instr_ex(src_inst, OPSZ_2, 0));
         PRE(ilist, instr, mov1);
         val = (val >> 16) & 0xffff;
-        if (val == 0) {
+        /* For an instr operand, val is only an estimate of the final address, whose
+         * top half could differ, so we always need the movt.
+         */
+        if (val == 0 && src_inst == NULL) {
             /* movw zero-extends so we're done */
             mov2 = NULL;
         } else {
