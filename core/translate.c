@@ -956,6 +956,9 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
     cache_pc target_cache = mc->pc;
     recreate_success_t res = (just_pc ? RECREATE_SUCCESS_PC : RECREATE_SUCCESS_STATE);
     translate_walk_t walk;
+#ifdef AARCH64
+    bool code_changed = false;
+#endif
 
     LOG(THREAD_GET, LOG_INTERP, 3,
         "recreate_app : looking for " PFX " in frag @ " PFX " (tag " PFX ")\n",
@@ -1151,8 +1154,54 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
             LOG(THREAD_GET, LOG_INTERP, 2, "recreate_app -- found ok pc " PFX "\n",
                 answer);
             mc->pc = answer;
+#ifdef AARCH64
+            if (code_changed && res == RECREATE_SUCCESS_STATE &&
+                tdcontext != get_thread_private_dcontext()) {
+                /* The pc and spills come from code the thread did not execute, so
+                 * the state is a guess.  A synch must not relocate the thread here:
+                 * it retries once the thread has left this fragment.  For a fault
+                 * in this thread we have nothing better and keep the guess.
+                 */
+                LOG(THREAD_GET, LOG_INTERP, 2,
+                    "recreate_app -- app code changed before " PFX
+                    ": state is not reliable\n",
+                    target_cache);
+                res = RECREATE_SUCCESS_PC;
+            }
+#endif
             return res;
         }
+#ifdef AARCH64
+        /* With software cache consistency (-no_hw_cache_consistency) the app writes
+         * new code before its IC IVAU makes us flush the fragments built from the old
+         * code, so this thread can be in a fragment whose app code has since changed.
+         * The ilist we re-decoded then describes code the fragment was not built
+         * from, and it can map the cache pc to the wrong app pc: e.g., a callee's
+         * verified entry NOP patched to a direct branch is elided in the new ilist,
+         * which then places the branch target's instructions at the old fragment's
+         * offsets, and a thread relocated there skips the target's first
+         * instructions.  App instructions we copied unchanged must decode to the
+         * same opcode in the cache.  We compare opcodes rather than bytes so that
+         * patching an immediate (e.g., a MOVK of a JIT's inline cache) does not
+         * count: it changes neither the fragment layout nor the spill state.
+         * Only instructions before the target matter: the thread has not executed
+         * the target's instruction yet and may as well execute the new one.
+         */
+        if (!code_changed && instr_is_app(inst) && !instr_is_our_mangling(inst) &&
+            !instr_is_cti(inst) && instr_raw_bits_valid(inst)) {
+            instr_t cache_instr;
+            instr_init(tdcontext, &cache_instr);
+            if (decode(tdcontext, cpc, &cache_instr) == NULL ||
+                instr_get_opcode(&cache_instr) != instr_get_opcode(inst)) {
+                LOG(THREAD_GET, LOG_INTERP, 2,
+                    "recreate_app -- cache " PFX " no longer matches app " PFX "\n", cpc,
+                    instr_get_translation(inst));
+                STATS_INC(recreate_app_code_changed);
+                code_changed = true;
+            }
+            instr_free(tdcontext, &cache_instr);
+        }
+#endif
         /* we only use translation pointers, never just raw bit pointers */
         if (instr_get_translation(inst) != NULL) {
             prev_ok = inst;
