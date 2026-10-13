@@ -332,7 +332,7 @@ drutil_insert_get_mem_addr_x86(void *drcontext, instrlist_t *bb, instr_t *where,
 }
 #elif defined(AARCHXX) || defined(RISCV64)
 
-#    ifdef ARM
+#    ifdef AARCHXX
 static bool
 instr_has_opnd(instr_t *instr, opnd_t opnd)
 {
@@ -367,7 +367,23 @@ instrlist_find_app_instr(instrlist_t *ilist, instr_t *where, opnd_t opnd)
     }
     return NULL;
 }
-#    endif /* ARM */
+#    endif /* AARCHXX */
+
+/* LDRAA and LDRAB authenticate their base register, so the address they access
+ * is the base with its pointer authentication code removed.  (If authentication
+ * fails, the access faults.)  Strips the code from dst, holding base plus offset.
+ */
+static void
+strip_pac_if_auth_load(void *drcontext, instrlist_t *bb, instr_t *where, opnd_t memref,
+                       reg_id_t dst)
+{
+#    ifdef AARCH64
+    instr_t *app = instrlist_find_app_instr(bb, where, memref);
+    if (app != NULL &&
+        (instr_get_opcode(app) == OP_ldraa || instr_get_opcode(app) == OP_ldrab))
+        PRE(bb, where, INSTR_CREATE_xpacd(drcontext, opnd_create_reg(dst)));
+#    endif
+}
 
 static reg_id_t
 replace_stolen_reg(void *drcontext, instrlist_t *bb, instr_t *where, opnd_t memref,
@@ -464,6 +480,7 @@ drutil_insert_get_mem_addr_risc(void *drcontext, instrlist_t *bb, instr_t *where
 #    define MAX_ADD_IMM_DISP (1 << 12)
             if (IF_ARM_ELSE(instr_is_encoding_possible(instr), disp < MAX_ADD_IMM_DISP)) {
                 PRE(bb, where, instr);
+                strip_pac_if_auth_load(drcontext, bb, where, memref, dst);
                 return true;
             }
 #    undef MAX_ADD_IMM_DISP
@@ -515,6 +532,7 @@ drutil_insert_get_mem_addr_risc(void *drcontext, instrlist_t *bb, instr_t *where
                 XINST_CREATE_move(drcontext, opnd_create_reg(dst),
                                   opnd_create_reg(base)));
         }
+        strip_pac_if_auth_load(drcontext, bb, where, memref, dst);
     }
     return true;
 }
