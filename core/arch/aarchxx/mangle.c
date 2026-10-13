@@ -4137,6 +4137,47 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     insert_compare_and_jump_not_equal(dcontext, ilist, instr, op_res, op_res,
                                       opnd_create_reg(epoch_reg), no_match);
 
+    /* Once the physical store has succeeded the application's store exclusive
+     * has completed: a thread stopped after it must resume after the app
+     * instruction with the status we got, not at the store, where the consumed
+     * reservation would make it report failure for a store that happened and
+     * the application would apply its update twice.  Everything after the store
+     * is therefore a mangling epilogue that translation emulates (all TLS
+     * restores) and that both outcomes reach, so the mismatch path, which only
+     * needs to reproduce the store's fault, comes before the physical store:
+     *
+     *       <checks; cbnz op_res, no_match>
+     *       b      do_store
+     *   no_match:
+     *       str    xzr, ldstex_size
+     *       clrex
+     *       stxr   <the app's store, to fail or fault like it>
+     *       b      done
+     *   do_store:
+     *       stxr   <app>
+     *       cbnz   status, retry       <- epilogue from here on
+     *   done:
+     *       <restores>
+     */
+    instr_t *do_store = INSTR_CREATE_label(dcontext);
+    instr_t *done = INSTR_CREATE_label(dcontext);
+    PRE(ilist, instr, XINST_CREATE_jump(dcontext, opnd_create_instr(do_store)));
+    PRE(ilist, instr, no_match);
+    /* Address/size mismatches consume the reservation too. */
+    PRE(ilist, instr,
+        instr_create_save_to_tls(dcontext, DR_REG_XZR, TLS_LDSTEX_SIZE_SLOT));
+    /* Clear the monitor, which would happen on a real mismatch. */
+    PRE(ilist, instr, INSTR_CREATE_clrex(dcontext));
+    /* Execute the store to duplicate a fault, which happens natively on a mismatch.
+     * If we don't do this, the app will likely loop back and might loop forever or
+     * might fault incorrectly on the load if its base is now bad.  It is the
+     * original store even when we replace a 2x4-byte stxp below: it is meant to
+     * fail anyway.
+     */
+    PRE(ilist, instr, instr_clone(dcontext, instr));
+    PRE(ilist, instr, XINST_CREATE_jump(dcontext, opnd_create_instr(done)));
+    PRE(ilist, instr, do_store);
+
     /* The exclusive store is next. To ensure the code we emit works reliably on all
      * AArch64 implementations the exclusive store must match the exclusive load created
      * by create_ldax_from_stex() above. In most cases it will automatically match
@@ -4152,7 +4193,6 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
      * possible we will find it in app code and we have decided that DynamoRIO should be
      * able to handle it.
      */
-    instr_t *orig_instr_clone = instr;
     if (!is_pair && instr_num_srcs(instr) > 1) {
         /* We are mangling a 2x4-byte stxp and we need to replace it with a 1x8-byte
          * stxr.
@@ -4180,41 +4220,76 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                 : INSTR_CREATE_stxr(dcontext, instr_get_dst(instr, 0),
                                     instr_get_dst(instr, 1), opnd_create_reg(scratch));
         PRE(ilist, instr, replacement_instr);
-        /* Remove the original stxp instruction, but don't destroy it. It gets reinserted
-         * later in the no_match path below.
-         * It doesn't matter that the store on the no_match path does not match the load
-         * because it is intended to always fail anyway.
-         */
         instrlist_remove(ilist, instr);
+        instr_destroy(dcontext, instr);
         instr = replacement_instr;
-    } else {
-        /* Keep the original store exclusive. We don't need to emit anything because it
-         * is already in the ilist, but we do need to create a clone of the instruction
-         * to insert in the no_match path below.
-         */
-        orig_instr_clone = instr_clone(dcontext, instr);
+    }
+
+    instr_t *post_store = instr_get_next(instr);
+    /* Physical monitor loss with an unchanged guest epoch is a host-only retry.
+     * The retry reloads expected values before taking the physical reservation.
+     * Translation treats this branch as not taken: a thread can only be stopped
+     * here by a guest interruption, which advances the epoch, so the retry would
+     * fail anyway and the failure status is the application's result.
+     */
+    PRE(ilist, post_store,
+        instr_set_translation_mangling_epilogue(
+            dcontext, ilist,
+            INSTR_CREATE_cbnz(dcontext, opnd_create_instr(retry),
+                              opnd_create_reg(reg_res))));
+    PRE(ilist, post_store, done);
+    /* The status is the application's result.  A discarded status instead
+     * restores the scratch register we borrowed.
+     */
+    if (discard_status) {
+        PRE(ilist, post_store,
+            instr_set_translation_mangling_epilogue(
+                dcontext, ilist,
+                instr_create_restore_from_tls(dcontext, reg_to_pointer_sized(reg_res),
+                                              TLS_LDSTEX_STATUS_SLOT)));
+    }
+    PRE(ilist, post_store,
+        instr_set_translation_mangling_epilogue(
+            dcontext, ilist,
+            instr_create_restore_from_tls(dcontext, epoch_reg, epoch_slot)));
+    if (should_restore) {
+        PRE(ilist, post_store,
+            instr_set_translation_mangling_epilogue(
+                dcontext, ilist, instr_create_restore_from_tls(dcontext, scratch, slot)));
+    }
+    if (should_restore2) {
+        PRE(ilist, post_store,
+            instr_set_translation_mangling_epilogue(
+                dcontext, ilist,
+                instr_create_restore_from_tls(dcontext, scratch2, slot2)));
+    }
+    if (should_restore3) {
+        PRE(ilist, post_store,
+            instr_set_translation_mangling_epilogue(
+                dcontext, ilist,
+                instr_create_restore_from_tls(dcontext, scratch3, slot3)));
+    }
+    if (stolen_swap_reg != DR_REG_NULL) {
+        if (instr_writes_to_reg(instr, stolen_swap_reg, DR_QUERY_INCLUDE_COND_DSTS)) {
+            PRE(ilist, post_store,
+                instr_set_translation_mangling_epilogue(
+                    dcontext, ilist,
+                    instr_create_save_to_tls(dcontext, stolen_swap_reg,
+                                             TLS_REG_STOLEN_SLOT)));
+        }
+        if (swap_restore) {
+            PRE(ilist, post_store,
+                instr_set_translation_mangling_epilogue(
+                    dcontext, ilist,
+                    instr_create_restore_from_tls(dcontext, stolen_swap_reg, swap_slot)));
+        }
     }
 #else
     instr_t *orig_instr_clone = instr_clone(dcontext, instr);
-#endif
-
     instr_t *post_store = instr_get_next(instr);
     instr_t *skip_clrex = INSTR_CREATE_label(dcontext);
-#ifdef AARCH64
-    /* Physical monitor loss with an unchanged guest epoch is a host-only retry.
-     * The retry reloads expected values before taking the physical reservation.
-     */
-    PRE(ilist, post_store,
-        INSTR_CREATE_cbnz(dcontext, opnd_create_instr(retry),
-                          opnd_create_reg(reg_res)));
-#endif
     PRE(ilist, post_store, XINST_CREATE_jump(dcontext, opnd_create_instr(skip_clrex)));
     PRE(ilist, post_store, no_match);
-#ifdef AARCH64
-    /* Address/size mismatches consume the reservation too. */
-    PRE(ilist, post_store,
-        instr_create_save_to_tls(dcontext, DR_REG_XZR, TLS_LDSTEX_SIZE_SLOT));
-#endif
     /* Clear the monitor, which would happen on a real mismatch. */
     PRE(ilist, post_store, INSTR_CREATE_clrex(dcontext));
     /* Execute the store to duplicate a fault, which happens natively on a mismatch.
@@ -4223,28 +4298,12 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
      */
     PRE(ilist, post_store, orig_instr_clone);
     PRE(ilist, post_store, skip_clrex);
-#ifdef AARCH64
-    /* Retire the status spill without restoring the old value after success.
-     * A discarded status instead restores the scratch register we borrowed.
-     */
-    if (!discard_status)
-        PRE(ilist, post_store,
-            instr_create_save_to_tls(dcontext, reg_to_pointer_sized(reg_res),
-                                     TLS_LDSTEX_STATUS_SLOT));
-    PRE(ilist, post_store,
-        instr_create_restore_from_tls(dcontext, reg_to_pointer_sized(reg_res),
-                                      TLS_LDSTEX_STATUS_SLOT));
-    PRE(ilist, post_store,
-        instr_create_restore_from_tls(dcontext, epoch_reg, epoch_slot));
-#endif
     if (should_restore) {
-#ifdef ARM
         if (!is_cbnz_available(dcontext, reg_res)) {
             PRE(ilist, post_store,
                 instr_create_restore_from_tls(dcontext, scratch, TLS_LDSTEX_FLAGS_SLOT));
             dr_restore_arith_flags_from_reg(dcontext, ilist, post_store, scratch);
         }
-#endif
         PRE(ilist, post_store, instr_create_restore_from_tls(dcontext, scratch, slot));
     }
     if (should_restore2) {
@@ -4263,6 +4322,7 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                 instr_create_restore_from_tls(dcontext, stolen_swap_reg, swap_slot));
         }
     }
+#endif
     return next_instr;
 }
 

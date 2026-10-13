@@ -318,8 +318,12 @@ translate_walk_track_pre_instr(dcontext_t *tdcontext, instr_t *inst,
              * - mangle_reads_thread_register()
              * Each of these cases is a tls restore, and we assert as much.
              */
+            /* A mangling epilogue is emulated by translate_walk_restore() rather
+             * than restored from spill slots, and need not restore every spill.
+             */
             DOCHECK(1, {
-                if (walk->reg_spill_offs[r] != UINT_MAX) {
+                if (walk->reg_spill_offs[r] != UINT_MAX &&
+                    IF_AARCH64_ELSE(!instr_is_our_mangling_epilogue(inst), true)) {
                     instr_t *curr;
                     bool spill_or_restore = false;
                     reg_id_t reg;
@@ -420,7 +424,7 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
 #elif defined(AARCHXX)
             /* Do not reset for:
              *     cbnz/bne in ldstex mangling,
-             *     the b after strex,
+             *     the b after strex or after the last ldstex check,
              *     tbz/tbnz in selfmod sandbox mangling.
              */
             !(instr_get_opcode(inst) == OP_cbnz ||
@@ -430,9 +434,7 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
               (instr_get_opcode(inst) == OP_b &&
                (instr_get_prev(inst) != NULL &&
                 (instr_is_exclusive_store(instr_get_prev(inst)) ||
-                 (instr_get_opcode(instr_get_prev(inst)) == OP_cbnz &&
-                  instr_get_prev(instr_get_prev(inst)) != NULL &&
-                  instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst)))))))
+                 instr_get_opcode(instr_get_prev(inst)) == OP_cbnz)))
                   IF_AARCH64(|| instr_get_opcode(inst) == OP_tbz ||
                              instr_get_opcode(inst) == OP_tbnz))
 #elif defined(RISCV64)
@@ -622,10 +624,19 @@ static void
 emulate_epilogue(dcontext_t *tdcontext, priv_mcontext_t *mc, instr_t *first_inst)
 {
     app_pc translation = instr_get_translation(first_inst);
-    for (instr_t *inst = first_inst;
-         inst != NULL && instr_is_our_mangling_epilogue(inst) &&
-         instr_get_translation(inst) == translation;
-         inst = instr_get_next(inst)) {
+    for (instr_t *inst = first_inst; inst != NULL; inst = instr_get_next(inst)) {
+        /* A label can join paths into an epilogue. */
+        if (instr_is_label(inst))
+            continue;
+        if (!instr_is_our_mangling_epilogue(inst) ||
+            instr_get_translation(inst) != translation)
+            break;
+        /* The only branch in an epilogue is the host-only retry after a physical
+         * store exclusive, which we treat as not taken: the store's status is the
+         * application's result (see mangle_exclusive_store()).
+         */
+        if (instr_get_opcode(inst) == OP_cbnz)
+            continue;
         if (!d_r_emulate_instr(tdcontext, inst, mc))
             ASSERT(false && "emulate_epilogue emulation failed");
     }
