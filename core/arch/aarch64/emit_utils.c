@@ -241,6 +241,33 @@ insert_exit_stub_other_flags(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
     return (int)((byte *)pc - (byte *)write_stub_pc);
 }
 
+/* Returns the size of the range of offsets reachable by the direct branch encoding
+ * enc (the offsets reachable are -limit to limit-4), or 0 if enc is not one of the
+ * branches we patch.
+ */
+static ptr_uint_t
+branch_offset_limit(uint enc)
+{
+    if ((enc & 0xfc000000) == 0x14000000) /* B (OP_b): imm26 * 4 */
+        return 0x8000000;
+    if ((enc & 0xff000010) == 0x54000000 ||
+        (enc & 0x7e000000) == 0x34000000) /* B.cond, CBNZ, CBZ: imm19 * 4 */
+        return 0x100000;
+    if ((enc & 0x7e000000) == 0x36000000) /* TBNZ, TBZ: imm14 * 4 */
+        return 0x8000;
+    return 0;
+}
+
+/* Returns whether the direct branch encoding enc can reach a target at offset off
+ * (computed as unsigned, modulo arithmetic).
+ */
+static bool
+branch_offset_reaches(uint enc, ptr_uint_t off)
+{
+    ptr_uint_t limit = branch_offset_limit(enc);
+    return limit != 0 && ALIGNED(off, 4) && off + limit < 2 * limit;
+}
+
 bool
 exit_cti_reaches_target(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
                         cache_pc target_pc)
@@ -250,15 +277,8 @@ exit_cti_reaches_target(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
     ptr_uint_t off = (ptr_uint_t)target_pc - (ptr_uint_t)branch_pc;
     uint enc = *(uint *)branch_pc;
     ASSERT(ALIGNED(branch_pc, 4) && ALIGNED(target_pc, 4));
-    if ((enc & 0xfc000000) == 0x14000000) /* B (OP_b)*/
-        return (off + 0x8000000 < 0x10000000);
-    else if ((enc & 0xff000010) == 0x54000000 ||
-             (enc & 0x7e000000) == 0x34000000) /* B.cond, CBNZ, CBZ */
-        return (off + 0x40000 < 0x80000);
-    else if ((enc & 0x7e000000) == 0x36000000) /* TBNZ, TBZ */
-        return (off + 0x2000 < 0x4000);
-    ASSERT(false);
-    return false;
+    ASSERT(branch_offset_limit(enc) != 0);
+    return branch_offset_reaches(enc, off);
 }
 
 void
@@ -356,18 +376,26 @@ patch_branch(dr_isa_mode_t isa_mode, cache_pc branch_pc, cache_pc target_pc,
     uint *pc_writable = (uint *)vmcode_get_writable_addr(branch_pc);
     uint enc = *pc_writable;
     ASSERT(ALIGNED(branch_pc, 4) && ALIGNED(target_pc, 4));
+    if (!branch_offset_reaches(enc, off)) {
+        /* Callers are supposed to check exit_cti_reaches_target() or to target a
+         * nearby stub.  Masking the offset into the immediate field would send the
+         * branch somewhere else entirely, so do not continue even in release builds.
+         */
+        ASSERT(false && "patch_branch: unknown branch or target out of range");
+        REPORT_FATAL_ERROR_AND_EXIT(INTERNAL_SYSLOG_CRITICAL, 3, get_application_name(),
+                                    get_application_pid(),
+                                    "AArch64 branch patch target out of range");
+        return;
+    }
     if ((enc & 0xfc000000) == 0x14000000) { /* B */
-        ASSERT(off + 0x8000000 < 0x10000000);
         *pc_writable = (0x14000000 | (0x03ffffff & off >> 2));
     } else if ((enc & 0xff000010) == 0x54000000 ||
                (enc & 0x7e000000) == 0x34000000) { /* B.cond, CBNZ, CBZ */
-        ASSERT(off + 0x100000 < 0x200000);
         *pc_writable = (enc & 0xff00001f) | (0x00ffffe0 & off >> 2 << 5);
-    } else if ((enc & 0x7e000000) == 0x36000000) { /* TBNZ, TBZ */
-        ASSERT(off + 0x8000 < 0x10000);
+    } else {
+        ASSERT((enc & 0x7e000000) == 0x36000000); /* TBNZ, TBZ */
         *pc_writable = (enc & 0xfff8001f) | (0x0007ffe0 & off >> 2 << 5);
-    } else
-        ASSERT(false);
+    }
     if (hot_patch)
         machine_cache_sync(branch_pc, branch_pc + 4, true);
     return;
