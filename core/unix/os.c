@@ -3869,6 +3869,14 @@ send_suspend_signal(thread_record_t *tr, pid_t pid, thread_id_t tid)
 
 static bool
 os_thread_suspend_internal(thread_record_t *tr, bool *vfork_skipped);
+#ifdef LINUX
+static bool
+os_thread_in_vfork(thread_record_t *tr);
+/* The process whose thread group is in SYS_exit_group, protected by
+ * thread_initexit_lock: see handle_exit() and os_vfork_pre().
+ */
+static process_id_t exit_group_pid;
+#endif
 
 /* Completes the previous os_thread_resume() of this thread, if any: waits until its
  * suspend signal handler has acknowledged the wakeup, so that a new suspend signal
@@ -6853,12 +6861,27 @@ handle_exit(dcontext_t *dcontext)
         int num_threads, i;
         exit_process = true;
         d_r_mutex_lock(&thread_initexit_lock);
+#ifdef LINUX
+        /* No thread of this group starts a vfork child from now on. */
+        exit_group_pid = mypid;
+#endif
         get_list_of_threads(&threads, &num_threads);
         for (i = 0; i < num_threads; i++) {
             if (threads[i]->pid != mypid && !IS_CLIENT_THREAD(threads[i]->dcontext)) {
                 exit_process = false;
                 break;
             }
+#ifdef LINUX
+            /* A thread in a vfork-style clone has a child in its own process that
+             * shares our address space and keeps running DR, possibly before it
+             * is on the thread list, until it execs or exits: SYS_exit_group does
+             * not stop it, so DR must not exit underneath it.
+             */
+            if (os_thread_in_vfork(threads[i])) {
+                exit_process = false;
+                break;
+            }
+#endif
         }
         if (!exit_process) {
             /* We need to clean up the other threads in our group here. */
@@ -6873,7 +6896,13 @@ handle_exit(dcontext_t *dcontext)
             copy_mcontext(mc, &mcontext);
             mc->pc = SYSCALL_PC(dcontext);
             for (i = 0; i < num_threads; i++) {
-                if (threads[i]->id != myid && threads[i]->pid == mypid) {
+                if (threads[i]->id != myid && threads[i]->pid == mypid
+                        /* A thread waiting in vfork cannot take the termination
+                         * signal before its child execs or exits, while
+                         * SYS_exit_group ends it at once natively: leave it to
+                         * the syscall.
+                         */
+                        IF_LINUX(&&!os_thread_in_vfork(threads[i]))) {
                     /* See comments in dynamo_process_exit_cleanup(): we terminate
                      * to make cleanup easier, but may want to switch to shifting
                      * the target thread to a stack-free loop.
@@ -7251,24 +7280,51 @@ os_switch_seg_to_context(dcontext_t *dcontext, reg_id_t seg, bool to_app)
 }
 
 #ifdef LINUX
+/* Whether tr waits in a vfork-style clone (see os_vfork_pre()). */
+static bool
+os_thread_in_vfork(thread_record_t *tr)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)tr->dcontext->os_field;
+    return ostd != NULL && ostd->vfork_waiting;
+}
+
 /* A thread about to wait in a vfork-style clone. Synch-all users may count it
  * as synched while it waits (os_thread_suspend_unless_vfork()); "no xfer" keeps
  * flushes from redirecting it. A suspend already pending is taken first: this
  * thread is in DR code and handles the signal before entering the kernel.
  */
 static void
-os_vfork_pre(dcontext_t *dcontext)
+os_vfork_pre(dcontext_t *dcontext, uint64 flags)
 {
     os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
     set_synch_state(dcontext, THREAD_SYNCH_NO_LOCKS_NO_XFER);
     while (true) {
+        /* thread_initexit_lock orders this against handle_exit()'s check for
+         * threads in vfork: no synch-all can be suspending this thread while we
+         * hold it, and an exit_group cannot miss our vfork.
+         */
+        d_r_mutex_lock(&thread_initexit_lock);
+        if (exit_group_pid == get_process_id()) {
+            /* Our thread group is exiting and will terminate this thread. A vfork
+             * child started now could outlive the exit (its own process shares
+             * our memory), still running DR as DR goes away. Undo the new-thread
+             * accounting that the exit would otherwise wait on, and wait here.
+             */
+            d_r_mutex_unlock(&thread_initexit_lock);
+            signal_clone_abandoned(dcontext, flags);
+            ATOMIC_DEC(int, uninit_thread_count);
+            while (true)
+                os_thread_sleep(10);
+        }
         d_r_mutex_lock(&ostd->suspend_lock);
         if (ostd->suspend_count == 0) {
             ostd->vfork_waiting = true;
             d_r_mutex_unlock(&ostd->suspend_lock);
+            d_r_mutex_unlock(&thread_initexit_lock);
             return;
         }
         d_r_mutex_unlock(&ostd->suspend_lock);
+        d_r_mutex_unlock(&thread_initexit_lock);
         os_thread_yield();
     }
 }
@@ -7437,7 +7493,7 @@ handle_clone_pre(dcontext_t *dcontext)
         os_clone_pre(dcontext);
         os_new_thread_pre();
         if (TESTANY(CLONE_VFORK, flags))
-            os_vfork_pre(dcontext);
+            os_vfork_pre(dcontext, flags);
     } else {
         /* This is really a fork. */
         bool clear_sighand = dcontext->sys_num == SYS_clone3 &&

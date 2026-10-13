@@ -359,6 +359,9 @@ void
 signal_reinstate_alarm_handlers(dcontext_t *dcontext);
 void
 handle_clone(dcontext_t *dcontext, uint64 flags);
+
+void
+signal_clone_abandoned(dcontext_t *dcontext, uint64 flags);
 /* If returns false to skip the syscall, the result is in "result". */
 bool
 handle_sigaction(dcontext_t *dcontext, int sig, const kernel_sigaction_t *act,

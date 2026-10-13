@@ -2081,6 +2081,18 @@ signal_reinstate_alarm_handlers(dcontext_t *dcontext)
  * look like kernel, and pass error code back to os.c
  */
 
+/* Undoes handle_clone() for a clone syscall that will never be made. */
+void
+signal_clone_abandoned(dcontext_t *dcontext, uint64 flags)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!TESTANY(CLONE_SIGHAND, flags)) {
+        d_r_mutex_lock(&info->child_lock);
+        info->num_unstarted_children--;
+        d_r_mutex_unlock(&info->child_lock);
+    }
+}
+
 void
 handle_clone(dcontext_t *dcontext, uint64 flags)
 {
