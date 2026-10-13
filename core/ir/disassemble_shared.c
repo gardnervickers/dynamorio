@@ -404,7 +404,8 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT
             if (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
                 print_to_buffer(buf, bufsz, sofar, ", #");
             if (IF_X64_ELSE(disp < 0, (disp & 0xff000000) == 0xff000000)) {
-                disp = -disp;
+                /* Unsigned negation: -INT_MIN overflows. */
+                disp = (int)(0U - (uint)disp);
                 print_to_buffer(buf, bufsz, sofar, "-");
             } else if (base != REG_NULL || index != REG_NULL) {
                 if (TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)))
@@ -419,7 +420,8 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT
              * for intel's syntax. XXX i#3574: should we do the same for intel's syntax?
              */
             if (disp < 0) {
-                disp = -disp;
+                /* Unsigned negation: -INT_MIN overflows. */
+                disp = (int)(0U - (uint)disp);
                 print_to_buffer(buf, bufsz, sofar, "-");
             }
         }
@@ -1306,12 +1308,18 @@ internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT
         /* TODO i#4382: Implement DR_DISASM_AARCH64. */
         SYSLOG_INTERNAL_WARNING_ONCE("Selected disassembly style is not implemented for "
                                      "AArch64: no operands will be printed.");
+        /* The operand printer below needs instr_info_t, which AArch64 lacks. */
+        *sofar = offs_post_name;
+        if (offs_post_name < bufsz)
+            buf[offs_post_name] = '\0';
+        return;
 #endif
         instr_disassemble_opnds_noimplicit(buf, bufsz, sofar, dcontext, instr);
         /* we avoid trailing spaces if no operands */
         if (*sofar == offs_pre_opnds) {
             *sofar = offs_post_name;
-            buf[offs_post_name] = '\0';
+            if (offs_post_name < bufsz)
+                buf[offs_post_name] = '\0';
         }
         return;
     }
@@ -1344,7 +1352,8 @@ internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT
     /* we avoid trailing spaces if no operands */
     if (*sofar == offs_pre_opnds) {
         *sofar = offs_post_name;
-        buf[offs_post_name] = '\0';
+        if (offs_post_name < bufsz)
+            buf[offs_post_name] = '\0';
     }
 }
 

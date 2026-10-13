@@ -978,8 +978,9 @@ opnd_size_to_shift_amount(opnd_size_t size)
 {
     switch (size) {
     default:
-        ASSERT(false);
-        /* fall-through */
+        /* Reachable with any client-supplied size: a usage error, not internal. */
+        CLIENT_ASSERT(false, "opnd_size_to_shift_amount: unsupported size");
+        return 0;
     case OPSZ_1: return 0;
     case OPSZ_2: return 1;
     case OPSZ_4: return 2;
@@ -2147,6 +2148,11 @@ reg_get_value_priv(reg_id_t reg, priv_mcontext_t *mc)
 {
     if (reg == REG_NULL)
         return 0;
+#ifdef AARCH64
+    /* The zero registers appear as e.g. a memory index (ldr x0, [x1, xzr]). */
+    if (reg == DR_REG_XZR || reg == DR_REG_WZR)
+        return 0;
+#endif
 #ifdef X64
     if (reg >= REG_START_64 && reg <= REG_STOP_64)
         return reg_get_value_helper(reg, mc);
@@ -2193,6 +2199,49 @@ reg_get_value(reg_id_t reg, dr_mcontext_t *mc)
     return reg_get_value_priv(reg, dr_mcontext_as_priv_mcontext(mc));
 }
 
+#ifdef AARCH64
+/* Locates reg's storage in mc for reg_{get,set}_value_ex().  Returns false for
+ * registers the context does not hold (including Z/P registers wider than their
+ * slots, which an offline decoder's vector length can produce).  GPRs return
+ * true with *slot NULL: they go through reg_{get,set}_value_priv().
+ */
+static bool
+reg_get_mcontext_slot_aarch64(reg_id_t reg, dr_simd_t *simd, dr_svep_t *svep,
+                              dr_ffr_t *ffr, byte **slot, size_t *size)
+{
+    *slot = NULL;
+    *size = opnd_size_in_bytes(reg_get_size(reg));
+    if ((reg >= DR_REG_X0 && reg <= DR_REG_XZR) ||
+        (reg >= DR_REG_W0 && reg <= DR_REG_WZR))
+        return true;
+    if (reg >= DR_REG_START_Z && reg <= DR_REG_STOP_Z)
+        *slot = (byte *)&simd[reg - DR_REG_START_Z];
+    else if (reg >= DR_REG_Q0 && reg <= DR_REG_Q31)
+        *slot = (byte *)&simd[reg - DR_REG_Q0];
+    else if (reg >= DR_REG_D0 && reg <= DR_REG_D31)
+        *slot = (byte *)&simd[reg - DR_REG_D0];
+    else if (reg >= DR_REG_S0 && reg <= DR_REG_S31)
+        *slot = (byte *)&simd[reg - DR_REG_S0];
+    else if (reg >= DR_REG_H0 && reg <= DR_REG_H31)
+        *slot = (byte *)&simd[reg - DR_REG_H0];
+    else if (reg >= DR_REG_B0 && reg <= DR_REG_B31)
+        *slot = (byte *)&simd[reg - DR_REG_B0];
+    else if (reg >= DR_REG_START_P && reg <= DR_REG_STOP_P) {
+        if (*size > sizeof(svep[0]))
+            return false;
+        *slot = (byte *)&svep[reg - DR_REG_START_P];
+        return true;
+    } else if (reg == DR_REG_FFR) {
+        if (*size > sizeof(*ffr))
+            return false;
+        *slot = (byte *)ffr;
+        return true;
+    } else
+        return false;
+    return *size > 0 && *size <= sizeof(simd[0]);
+}
+#endif
+
 DR_API
 /* Supports all but floating-point */
 bool
@@ -2222,19 +2271,17 @@ reg_get_value_ex(reg_id_t reg, dr_mcontext_t *mc, DR_PARAM_OUT byte *val)
         *(reg_t *)val = regval;
     }
 #elif defined(AARCH64)
-    if (reg >= DR_REG_START_Z && reg <= DR_REG_STOP_Z) {
-        if (!TEST(DR_MC_MULTIMEDIA, mc->flags) || mc->size != sizeof(dr_mcontext_t))
-            return false;
-        memcpy(val, &mc->simd[reg - DR_REG_START_Z],
-               opnd_size_in_bytes(reg_get_size(reg)));
-    } else if (reg >= DR_REG_START_P && reg <= DR_REG_STOP_P) {
-        if (!TEST(DR_MC_MULTIMEDIA, mc->flags) || mc->size != sizeof(dr_mcontext_t))
-            return false;
-        memcpy(val, &mc->svep[reg - DR_REG_START_P],
-               opnd_size_in_bytes(reg_get_size(reg)));
-    } else {
+    byte *slot;
+    size_t size;
+    if (!reg_get_mcontext_slot_aarch64(reg, mc->simd, mc->svep, &mc->ffr, &slot, &size))
+        return false;
+    if (slot == NULL) {
         reg_t regval = reg_get_value(reg, mc);
         *(reg_t *)val = regval;
+    } else {
+        if (!TESTANY(DR_MC_MULTIMEDIA, mc->flags) || mc->size != sizeof(dr_mcontext_t))
+            return false;
+        memcpy(val, slot, size);
     }
 #else
     CLIENT_ASSERT(false, "NYI i#1551");
@@ -2247,13 +2294,22 @@ reg_get_value_ex(reg_id_t reg, dr_mcontext_t *mc, DR_PARAM_OUT byte *val)
 void
 reg_set_value_priv(reg_id_t reg, priv_mcontext_t *mc, reg_t value)
 {
+#ifdef AARCH64
+    /* Writes to the zero register are discarded. */
+    if (reg == DR_REG_XZR)
+        return;
+#endif
     CLIENT_ASSERT(reg_is_pointer_sized(reg),
                   "reg_get_value_helper(): internal error non-ptr sized reg");
 
     if (reg == REG_NULL)
         return;
 
-    *(reg_t *)((byte *)mc + opnd_get_reg_mcontext_offs(reg)) = value;
+    /* Never write outside the context for an unsupported register. */
+    const int offs = opnd_get_reg_mcontext_offs(reg);
+    if (offs < 0)
+        return;
+    *(reg_t *)((byte *)mc + offs) = value;
 }
 
 bool
@@ -2279,6 +2335,22 @@ reg_set_value_ex_priv(reg_id_t reg, priv_mcontext_t *mc, byte *val_buf)
         return false;
     }
 
+    return true;
+#elif defined(AARCH64)
+    byte *slot;
+    size_t size;
+    if (!reg_get_mcontext_slot_aarch64(reg, mc->simd, mc->svep, &mc->ffr, &slot, &size))
+        return false;
+    if (slot == NULL) {
+        reg_t regval = *(reg_t *)val_buf;
+        /* Writing a W register zeroes the upper half of the X register. */
+        if (reg >= DR_REG_W0 && reg <= DR_REG_WZR) {
+            regval &= 0xffffffffULL;
+            reg = dr_reg_fixer[reg];
+        }
+        reg_set_value_priv(reg, mc, regval);
+    } else
+        memcpy(slot, val_buf, size);
     return true;
 #else
     CLIENT_ASSERT(false, "NYI  i#1551, i#3504");

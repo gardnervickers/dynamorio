@@ -174,6 +174,12 @@ double_print(double val, uint precision, uint *top, uint *bottom, const char **s
     }
     for (i = 0, precision_multiple = 1; i < precision; i++)
         precision_multiple *= 10;
+    /* Converting an out-of-range double (or NaN) to uint is undefined. */
+    if (!(val < 4294967296.0)) {
+        *top = UINT_MAX;
+        *bottom = 0;
+        return;
+    }
     *top = (uint)val;
     *bottom = (uint)((val - *top) * precision_multiple);
 }
@@ -192,6 +198,9 @@ print_to_buffer(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, const cha
     ssize_t len;
     va_list ap;
     bool ok;
+    /* Nothing fits (and bufsz - *sofar would wrap). */
+    if (*sofar >= bufsz)
+        return false;
     va_start(ap, fmt);
     len = d_r_vsnprintf(buf + *sofar, bufsz - *sofar, fmt, ap);
     va_end(ap);

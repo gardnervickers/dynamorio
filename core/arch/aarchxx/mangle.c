@@ -2001,6 +2001,24 @@ mangle_rel_addr(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
 {
 #ifdef AARCH64
     uint opc = instr_get_opcode(instr);
+    if (opc == OP_prfm) {
+        /* PRFM (literal) has no destination register to materialize the address
+         * into, so prefetch through a scratch register instead.
+         */
+        app_pc prf_tgt;
+        instr_get_rel_addr_target(instr, &prf_tgt);
+        PRE(ilist, instr, instr_create_save_to_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
+        insert_mov_immed_ptrsz(dcontext, (ptr_int_t)prf_tgt, opnd_create_reg(DR_REG_X0),
+                               ilist, next_instr, NULL, NULL);
+        PRE(ilist, next_instr,
+            INSTR_CREATE_prfm(dcontext, instr_get_src(instr, 0),
+                              opnd_create_base_disp(DR_REG_X0, REG_NULL, 0, 0, OPSZ_0)));
+        PRE(ilist, next_instr,
+            instr_create_restore_from_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
+        instrlist_remove(ilist, instr);
+        instr_destroy(dcontext, instr);
+        return NULL;
+    }
     opnd_t dst = instr_get_dst(instr, 0);
     opnd_t src = instr_get_src(instr, 0);
     app_pc tgt;

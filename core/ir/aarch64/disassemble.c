@@ -111,6 +111,17 @@ opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM
         print_to_buffer(buf, bufsz, sofar, ",%s", name);
 }
 
+/* Instruction predicates and condition operands can be set by clients to any
+ * value, so check before indexing.
+ */
+static const char *
+pred_name(ptr_int_t pred)
+{
+    if (pred < 0 || pred >= (ptr_int_t)(sizeof(pred_names) / sizeof(pred_names[0])))
+        return "<invalid>";
+    return pred_names[pred];
+}
+
 bool
 opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, opnd_t opnd)
 {
@@ -124,9 +135,11 @@ opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, opn
         print_to_buffer(buf, bufsz, sofar, "%s", extend_name(t));
         return true;
     }
-    if (opnd_is_immed_int(opnd) && TEST(DR_OPND_IS_CONDITION, opnd_get_flags(opnd))) {
-        dr_pred_type_t pred = DR_PRED_EQ + opnd_get_immed_int(opnd);
-        print_to_buffer(buf, bufsz, sofar, "%s", pred_names[pred]);
+    if (opnd_is_immed_int(opnd) && TESTANY(DR_OPND_IS_CONDITION, opnd_get_flags(opnd))) {
+        /* Check the range before adding: the immediate can be anything. */
+        const ptr_int_t cond = opnd_get_immed_int(opnd);
+        print_to_buffer(buf, bufsz, sofar, "%s",
+                        pred_name(cond >= 0 && cond < 16 ? DR_PRED_EQ + cond : -1));
         return true;
     }
     return false;
@@ -156,10 +169,10 @@ print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
         instr_get_predicate(instr) != DR_PRED_MASKED) {
         if (instr_get_opcode(instr) == OP_bcond) {
             print_to_buffer(buf, bufsz, sofar, "b.%s",
-                            pred_names[instr_get_predicate(instr)]);
+                            pred_name(instr_get_predicate(instr)));
         } else {
             print_to_buffer(buf, bufsz, sofar, "%s.%s", name,
-                            pred_names[instr_get_predicate(instr)]);
+                            pred_name(instr_get_predicate(instr)));
         }
     } else
         print_to_buffer(buf, bufsz, sofar, "%s", name);

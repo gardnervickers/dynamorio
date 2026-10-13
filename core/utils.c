@@ -1790,6 +1790,9 @@ vprint_to_buffer(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, const ch
     extern int d_r_vsnprintf(char *s, size_t max, const char *fmt, va_list ap);
     ssize_t len;
     bool ok;
+    /* Nothing fits (and bufsz - *sofar would wrap). */
+    if (*sofar >= bufsz)
+        return false;
     /* we use d_r_vsnprintf for consistent return value and to handle floats */
     len = d_r_vsnprintf(buf + *sofar, bufsz - *sofar, fmt, ap);
     /* we support appending an empty string (len==0) */

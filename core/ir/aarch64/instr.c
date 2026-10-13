@@ -276,12 +276,25 @@ instr_is_mov_constant(instr_t *instr, ptr_int_t *value)
      * in theory be used to generate a zero, nor "MOV reg, wzr/xzr" (for now).
      */
 
-    /* movn/movz reg, imm */
+    /* movn/movz reg, imm, lsl, shift */
     if (opc == OP_movn || opc == OP_movz) {
         opnd_t op = instr_get_src(instr, 0);
         if (opnd_is_immed_int(op)) {
-            ptr_int_t imm = opnd_get_immed_int(op);
-            *value = (opc == OP_movn ? ~imm : imm);
+            ptr_uint_t imm = (ptr_uint_t)opnd_get_immed_int(op);
+            if (instr_num_srcs(instr) == 3 &&
+                opnd_is_immed_int(instr_get_src(instr, 2))) {
+                ptr_int_t shift = opnd_get_immed_int(instr_get_src(instr, 2));
+                if (shift < 0 || shift >= 64)
+                    return false;
+                imm <<= shift;
+            }
+            if (opc == OP_movn)
+                imm = ~imm;
+            /* A W destination zeroes the upper half. */
+            if (instr_num_dsts(instr) > 0 && opnd_is_reg(instr_get_dst(instr, 0)) &&
+                reg_get_size(opnd_get_reg(instr_get_dst(instr, 0))) == OPSZ_4)
+                imm &= 0xffffffffULL;
+            *value = (ptr_int_t)imm;
             return true;
         } else
             return false;
@@ -798,7 +811,7 @@ instr_compute_vector_address(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
                              DR_PARAM_OUT bool *have_addr, DR_PARAM_OUT app_pc *addr,
                              DR_PARAM_OUT bool *write)
 {
-    CLIENT_ASSERT(have_addr != NULL && addr != NULL && mc != NULL && write != NULL,
+    CLIENT_ASSERT(have_addr != NULL && mc != NULL && write != NULL,
                   "SVE address computation: invalid args");
     CLIENT_ASSERT(TEST(DR_MC_MULTIMEDIA, mc_flags),
                   "dr_mcontext_t.flags must include DR_MC_MULTIMEDIA");
@@ -806,15 +819,20 @@ instr_compute_vector_address(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
                   "Incompatible client, invalid dr_mcontext_t.size.");
 
     *write = instr_is_scatter(instr);
-    ASSERT(*write || instr_is_gather(instr));
+    /* Vector-addressed prefetches are neither gathers nor scatters. */
+    ASSERT(*write || instr_is_gather(instr) || instr_is_prefetch(instr));
 
     const size_t vl_bytes = opnd_size_in_bytes(OPSZ_SVE_VECLEN_BYTES);
     /* DynamoRIO currently supports up to 512-bit vector registers so a predicate register
      * value should be <= 64-bits.
      * If DynamoRIO is extended in the future to support large vector lengths this
      * function will need to be updated to cope with larger predicate mask values.
+     * Until then refuse rather than read past the dr_mcontext_t slots: an offline
+     * decoder can be configured with any architectural vector length.
      */
-    ASSERT(vl_bytes / 8 <= sizeof(uint64));
+    if (vl_bytes == 0 || vl_bytes > sizeof(mc->simd[0]) ||
+        vl_bytes / 8 > sizeof(mc->svep[0]))
+        return false;
 
     const reg_t governing_pred = opnd_get_reg(instr_get_src(instr, 1));
     ASSERT(governing_pred >= DR_REG_START_P && governing_pred <= DR_REG_STOP_P);
@@ -826,6 +844,8 @@ instr_compute_vector_address(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
 
     const size_t element_size_bytes =
         opnd_size_in_bytes(opnd_get_vector_element_size(curop));
+    if (element_size_bytes != 4 && element_size_bytes != 8)
+        return false;
     const size_t num_elements = vl_bytes / element_size_bytes;
 
     size_t active_elements_found = 0;
@@ -833,6 +853,10 @@ instr_compute_vector_address(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
         if (is_active_in_mask(element, mask, element_size_bytes)) {
             active_elements_found++;
             if (active_elements_found - 1 == addr_index) {
+                /* The public API allows a NULL addr. */
+                app_pc local_addr;
+                if (addr == NULL)
+                    addr = &local_addr;
                 const reg_t base_reg = opnd_get_base(curop);
                 if (reg_is_z(base_reg)) {
                     /* Vector base: extract the current element. */

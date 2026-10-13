@@ -1963,7 +1963,7 @@ instr_reg_in_dst(instr_t *instr, reg_id_t reg)
     if (reg == DR_REG_FFR) {
         switch (instr_get_opcode(instr)) {
         case OP_setffr:
-        case OP_rdffr:
+        case OP_wrffr:
 
         case OP_ldff1b:
         case OP_ldff1d:
@@ -2009,7 +2009,7 @@ instr_reg_in_src(instr_t *instr, reg_id_t reg)
      */
     if (reg == DR_REG_FFR) {
         switch (instr_get_opcode(instr)) {
-        case OP_wrffr:
+        case OP_rdffr:
         case OP_rdffrs: return true;
         default: break;
         }
@@ -2096,6 +2096,12 @@ instr_writes_to_reg(instr_t *instr, reg_id_t reg, dr_opnd_query_flags_t flags)
 
     if (!TEST(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_is_predicated(instr))
         return false;
+
+#ifdef AARCH64
+    /* FFR is implicit and never an operand: see instr_reg_in_dst(). */
+    if (reg == DR_REG_FFR)
+        return instr_reg_in_dst(instr, reg);
+#endif
 
     for (i = 0; i < instr_num_dsts(instr); i++) {
         opnd = instr_get_dst(instr, i);

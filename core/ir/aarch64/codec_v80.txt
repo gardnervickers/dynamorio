@@ -126,7 +126,7 @@
 # Instruction definitions:
 
 0101111011100000101110xxxxxxxxxx  n   6    BASE        abs             d0 : d5
-0x001110xx100000101110xxxxxxxxxx  n   6    BASE        abs            dq0 : dq5 bhsd_sz
+0x001110xx100000101110xxxxxxxxxx  n   6    BASE        abs            dq0 : dq5 bhsd_sz_q
 x0011010000xxxxx000000xxxxxxxxxx  r   7    BASE        adc            wx0 : wx5 wx16
 x0111010000xxxxx000000xxxxxxxxxx  rw  8    BASE       adcs            wx0 : wx5 wx16
 x00100010xxxxxxxxxxxxxxxxxxxxxxx  n   9    BASE        add          wx0sp : wx5sp imm12 lsl imm12sh
@@ -135,11 +135,11 @@ x0001011xx0xxxxxxxxxxxxxxxxxxxxx  n   9    BASE        add            wx0 : wx5 
 10001011001xxxxxx0xxxxxxxxxxxxxx  n   9    BASE        add          wx0sp : wx5sp w16 ext extam
 10001011001xxxxxxx0xxxxxxxxxxxxx  n   9    BASE        add          wx0sp : wx5sp w16 ext extam
 10001011001xxxxxx11xxxxxxxxxxxxx  n   9    BASE        add          wx0sp : wx5sp x16 ext extam
-0x001110xx1xxxxx100001xxxxxxxxxx  n   9    BASE        add            dq0 : dq5 dq16 bhsd_sz
+0x001110xx1xxxxx100001xxxxxxxxxx  n   9    BASE        add            dq0 : dq5 dq16 bhsd_sz_q
 01011110111xxxxx100001xxxxxxxxxx  n   9    BASE        add             d0 : d5 d16
 00001110xx1xxxxx010000xxxxxxxxxx  n   10   BASE      addhn             d0 : q5 q16 bhs_sz
 01001110xx1xxxxx010000xxxxxxxxxx  n   11   BASE     addhn2             q0 : q5 q16 bhs_sz
-0x001110xx1xxxxx101111xxxxxxxxxx  n   12   BASE       addp            dq0 : dq5 dq16 bhsd_sz
+0x001110xx1xxxxx101111xxxxxxxxxx  n   12   BASE       addp            dq0 : dq5 dq16 bhsd_sz_q
 0101111011110001101110xxxxxxxxxx  n   12   BASE       addp             d0 : q5
 x01100010xxxxxxxxxxxxxxxxxxxxxxx  w   13   BASE       adds            wx0 : wx5sp imm12 lsl imm12sh
 x0101011xx0xxxxxxxxxxxxxxxxxxxxx  w   13   BASE       adds            wx0 : wx5 wx16 shift3 imm6
@@ -147,7 +147,7 @@ x0101011xx0xxxxxxxxxxxxxxxxxxxxx  w   13   BASE       adds            wx0 : wx5 
 10101011001xxxxxx0xxxxxxxxxxxxxx  w   13   BASE       adds            wx0 : wx5sp w16 ext extam
 10101011001xxxxxxx0xxxxxxxxxxxxx  w   13   BASE       adds            wx0 : wx5sp w16 ext extam
 10101011001xxxxxx11xxxxxxxxxxxxx  w   13   BASE       adds            wx0 : wx5sp x16 ext extam
-0x001110xx110001101110xxxxxxxxxx  n   14   BASE       addv            dq0 : dq5 bhsd_sz
+0x001110xx110001101110xxxxxxxxxx  n   14   BASE       addv            dq0 : dq5 bhs_sz_lanes
 0xx10000xxxxxxxxxxxxxxxxxxxxxxxx  n   15   BASE        adr            adr
 1xx10000xxxxxxxxxxxxxxxxxxxxxxxx  n   16   BASE       adrp            adr
 0100111000101000010110xxxxxxxxxx  n   17   BASE       aesd             q0 : q0 q5
@@ -187,27 +187,27 @@ x101101011000000000101xxxxxxxxxx  n   59   BASE        cls            wx0 : wx5
 0x001110xx100000010010xxxxxxxxxx  n   59   BASE        cls            dq0 : dq5 bhs_sz
 x101101011000000000100xxxxxxxxxx  n   60   BASE        clz            wx0 : wx5
 0x101110xx100000010010xxxxxxxxxx  n   60   BASE        clz            dq0 : dq5 bhs_sz
-0x101110xx1xxxxx100011xxxxxxxxxx  n   61   BASE       cmeq            dq0 : dq5 dq16 bhsd_sz
-0x001110xx100000100110xxxxxxxxxx  n   61   BASE       cmeq            dq0 : dq5 bhsd_sz
+0x101110xx1xxxxx100011xxxxxxxxxx  n   61   BASE       cmeq            dq0 : dq5 dq16 bhsd_sz_q
+0x001110xx100000100110xxxxxxxxxx  n   61   BASE       cmeq            dq0 : dq5 bhsd_sz_q
 0101111011100000100110xxxxxxxxxx  n   61   BASE       cmeq             d0 : d5
 01111110111xxxxx100011xxxxxxxxxx  n   61   BASE       cmeq             d0 : d5 d16
-0x001110xx1xxxxx001111xxxxxxxxxx  n   62   BASE       cmge            dq0 : dq5 dq16 bhsd_sz
-0x101110xx100000100010xxxxxxxxxx  n   62   BASE       cmge            dq0 : dq5 bhsd_sz
+0x001110xx1xxxxx001111xxxxxxxxxx  n   62   BASE       cmge            dq0 : dq5 dq16 bhsd_sz_q
+0x101110xx100000100010xxxxxxxxxx  n   62   BASE       cmge            dq0 : dq5 bhsd_sz_q
 0111111011100000100010xxxxxxxxxx  n   62   BASE       cmge             d0 : d5
 01011110111xxxxx001111xxxxxxxxxx  n   62   BASE       cmge             d0 : d5 d16
-0x001110xx1xxxxx001101xxxxxxxxxx  n   63   BASE       cmgt            dq0 : dq5 dq16 bhsd_sz
-0x001110xx100000100010xxxxxxxxxx  n   63   BASE       cmgt            dq0 : dq5 bhsd_sz
+0x001110xx1xxxxx001101xxxxxxxxxx  n   63   BASE       cmgt            dq0 : dq5 dq16 bhsd_sz_q
+0x001110xx100000100010xxxxxxxxxx  n   63   BASE       cmgt            dq0 : dq5 bhsd_sz_q
 0101111011100000100010xxxxxxxxxx  n   63   BASE       cmgt             d0 : d5
 01011110111xxxxx001101xxxxxxxxxx  n   63   BASE       cmgt             d0 : d5 d16
-0x101110xx1xxxxx001101xxxxxxxxxx  n   64   BASE       cmhi            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx001101xxxxxxxxxx  n   64   BASE       cmhi            dq0 : dq5 dq16 bhsd_sz_q
 01111110111xxxxx001101xxxxxxxxxx  n   64   BASE       cmhi             d0 : d5 d16
-0x101110xx1xxxxx001111xxxxxxxxxx  n   65   BASE       cmhs            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx001111xxxxxxxxxx  n   65   BASE       cmhs            dq0 : dq5 dq16 bhsd_sz_q
 01111110111xxxxx001111xxxxxxxxxx  n   65   BASE       cmhs             d0 : d5 d16
 0111111011100000100110xxxxxxxxxx  n   66   BASE       cmle             d0 : d5
-0x101110xx100000100110xxxxxxxxxx  n   66   BASE       cmle            dq0 : dq5 bhsd_sz
-0x001110xx100000101010xxxxxxxxxx  n   67   BASE       cmlt            dq0 : dq5 bhsd_sz
+0x101110xx100000100110xxxxxxxxxx  n   66   BASE       cmle            dq0 : dq5 bhsd_sz_q
+0x001110xx100000101010xxxxxxxxxx  n   67   BASE       cmlt            dq0 : dq5 bhsd_sz_q
 0101111011100000101010xxxxxxxxxx  n   67   BASE       cmlt             d0 : d5
-0x001110xx1xxxxx100011xxxxxxxxxx  n   68   BASE      cmtst            dq0 : dq5 dq16 bhsd_sz
+0x001110xx1xxxxx100011xxxxxxxxxx  n   68   BASE      cmtst            dq0 : dq5 dq16 bhsd_sz_q
 01011110111xxxxx100011xxxxxxxxxx  n   68   BASE      cmtst             d0 : d5 d16
 0x00111000100000010110xxxxxxxxxx  n   69   BASE        cnt            dq0 : dq5
 00011010110xxxxx010000xxxxxxxxxx  n   70   BASE     crc32b             w0 : w5 w16
@@ -240,9 +240,9 @@ x1011010100xxxxxxxxx01xxxxxxxxxx  r   81   BASE      csneg            wx0 : wx5 
 11010101000000110011xxxx10111111  n   85   BASE        dmb                : imm4
 11010110101111110000001111100000  n   86   BASE       drps                :
 11010101000000110011xxxx10011111  n   87   BASE        dsb                : imm4
-01011110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup            dq0 : dq5 imm5
-00001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             d0 : d5 imm5
-01001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             q0 : q5 imm5
+01011110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup            dq0 : dq5 imm5_dup
+00001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             d0 : d5 imm5_dup
+01001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             q0 : q5 imm5_dup
 00001110000xxxxx000011xxxxxxxxxx  n   88   BASE        dup             d0 : wx5_imm5 bhs_imm5_sz_s
 01001110000xxxxx000011xxxxxxxxxx  n   88   BASE        dup             q0 : wx5_imm5 bhsd_imm5_sz_s
 x1001010xx1xxxxxxxxxxxxxxxxxxxxx  n   89   BASE        eon            wx0 : wx5 wx16 shift4 imm6
@@ -253,55 +253,55 @@ x1001010xx0xxxxxxxxxxxxxxxxxxxxx  n   90   BASE        eor            wx0 : wx5 
 0x101110000xxxxx0xxxx0xxxxxxxxxx  n   92   BASE        ext            dq0 : dq5 dq16 imm4idx
 00010011100xxxxxxxxxxxxxxxxxxxxx  n   93   BASE       extr             w0 : w5 w16 imms
 10010011110xxxxxxxxxxxxxxxxxxxxx  n   93   BASE       extr             x0 : x5 x16 imms
-0x1011101x1xxxxx110101xxxxxxxxxx  n   94   BASE       fabd            dq0 : dq5 dq16 sd_sz
+0x1011101x1xxxxx110101xxxxxxxxxx  n   94   BASE       fabd            dq0 : dq5 dq16 sd_sz_q
 01111110101xxxxx110101xxxxxxxxxx  n   94   BASE       fabd             s0 : s5 s16
 01111110111xxxxx110101xxxxxxxxxx  n   94   BASE       fabd             d0 : d5 d16
 00011110xx100000110000xxxxxxxxxx  n   95   BASE       fabs     float_reg0 : float_reg5
-0x0011101x100000111110xxxxxxxxxx  n   95   BASE       fabs            dq0 : dq5 sd_sz
-0x1011100x1xxxxx111011xxxxxxxxxx  n   96   BASE      facge            dq0 : dq5 dq16 sd_sz
+0x0011101x100000111110xxxxxxxxxx  n   95   BASE       fabs            dq0 : dq5 sd_sz_q
+0x1011100x1xxxxx111011xxxxxxxxxx  n   96   BASE      facge            dq0 : dq5 dq16 sd_sz_q
 01111110001xxxxx111011xxxxxxxxxx  n   96   BASE      facge             s0 : s5 s16
 01111110011xxxxx111011xxxxxxxxxx  n   96   BASE      facge             d0 : d5 d16
-0x1011101x1xxxxx111011xxxxxxxxxx  n   97   BASE      facgt            dq0 : dq5 dq16 sd_sz
+0x1011101x1xxxxx111011xxxxxxxxxx  n   97   BASE      facgt            dq0 : dq5 dq16 sd_sz_q
 01111110101xxxxx111011xxxxxxxxxx  n   97   BASE      facgt             s0 : s5 s16
 01111110111xxxxx111011xxxxxxxxxx  n   97   BASE      facgt             d0 : d5 d16
-0x0011100x1xxxxx110101xxxxxxxxxx  n   98   BASE       fadd            dq0 : dq5 dq16 sd_sz
+0x0011100x1xxxxx110101xxxxxxxxxx  n   98   BASE       fadd            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx001010xxxxxxxxxx  n   98   BASE       fadd     float_reg0 : float_reg5 float_reg16
-0x1011100x1xxxxx110101xxxxxxxxxx  n   99   BASE      faddp            dq0 : dq5 dq16 sd_sz
+0x1011100x1xxxxx110101xxxxxxxxxx  n   99   BASE      faddp            dq0 : dq5 dq16 sd_sz_q
 0111111000110000110110xxxxxxxxxx  n   99   BASE      faddp             s0 : d5 sd_sz
 0111111001110000110110xxxxxxxxxx  n   99   BASE      faddp             d0 : q5 sd_sz
 00011110001xxxxxxxxx01xxxxx0xxxx  rw  100  BASE      fccmp                : s5 s16 nzcv cond
 00011110011xxxxxxxxx01xxxxx0xxxx  rw  100  BASE      fccmp                : d5 d16 nzcv cond
 00011110001xxxxxxxxx01xxxxx1xxxx  rw  101  BASE     fccmpe                : s5 s16 nzcv cond
 00011110011xxxxxxxxx01xxxxx1xxxx  rw  101  BASE     fccmpe                : d5 d16 nzcv cond
-0x0011100x1xxxxx111001xxxxxxxxxx  n   102  BASE      fcmeq            dq0 : dq5 dq16 sd_sz
-0x0011101x100000110110xxxxxxxxxx  n   102  BASE      fcmeq            dq0 : dq5 zero_fp_const sd_sz
+0x0011100x1xxxxx111001xxxxxxxxxx  n   102  BASE      fcmeq            dq0 : dq5 dq16 sd_sz_q
+0x0011101x100000110110xxxxxxxxxx  n   102  BASE      fcmeq            dq0 : dq5 zero_fp_const sd_sz_q
 0101111010100000110110xxxxxxxxxx  n   102  BASE      fcmeq             s0 : s5 zero_fp_const
 0101111011100000110110xxxxxxxxxx  n   102  BASE      fcmeq             d0 : d5 zero_fp_const
 01011110001xxxxx111001xxxxxxxxxx  n   102  BASE      fcmeq             s0 : s5 s16
 01011110011xxxxx111001xxxxxxxxxx  n   102  BASE      fcmeq             d0 : d5 d16
-0x1011100x1xxxxx111001xxxxxxxxxx  n   103  BASE      fcmge            dq0 : dq5 dq16 sd_sz
-0x1011101x100000110010xxxxxxxxxx  n   103  BASE      fcmge            dq0 : dq5 zero_fp_const sd_sz
+0x1011100x1xxxxx111001xxxxxxxxxx  n   103  BASE      fcmge            dq0 : dq5 dq16 sd_sz_q
+0x1011101x100000110010xxxxxxxxxx  n   103  BASE      fcmge            dq0 : dq5 zero_fp_const sd_sz_q
 0111111010100000110010xxxxxxxxxx  n   103  BASE      fcmge             s0 : s5 zero_fp_const
 0111111011100000110010xxxxxxxxxx  n   103  BASE      fcmge             d0 : d5 zero_fp_const
 01111110001xxxxx111001xxxxxxxxxx  n   103  BASE      fcmge             s0 : s5 s16
 01111110011xxxxx111001xxxxxxxxxx  n   103  BASE      fcmge             d0 : d5 d16
-0x1011101x1xxxxx111001xxxxxxxxxx  n   104  BASE      fcmgt            dq0 : dq5 dq16 sd_sz
-0x0011101x100000110010xxxxxxxxxx  n   104  BASE      fcmgt            dq0 : dq5 zero_fp_const sd_sz
+0x1011101x1xxxxx111001xxxxxxxxxx  n   104  BASE      fcmgt            dq0 : dq5 dq16 sd_sz_q
+0x0011101x100000110010xxxxxxxxxx  n   104  BASE      fcmgt            dq0 : dq5 zero_fp_const sd_sz_q
 0101111010100000110010xxxxxxxxxx  n   104  BASE      fcmgt             s0 : s5 zero_fp_const
 0101111011100000110010xxxxxxxxxx  n   104  BASE      fcmgt             d0 : d5 zero_fp_const
 011111101x1xxxxx111001xxxxxxxxxx  n   104  BASE      fcmgt  bhsd_size_reg0 : bhsd_size_reg5 bhsd_size_reg16
 0111111010100000110110xxxxxxxxxx  n   105  BASE      fcmle             s0 : s5 zero_fp_const
 0111111011100000110110xxxxxxxxxx  n   105  BASE      fcmle             d0 : d5 zero_fp_const
-0x1011101x100000110110xxxxxxxxxx  n   105  BASE      fcmle            dq0 : dq5 zero_fp_const sd_sz
+0x1011101x100000110110xxxxxxxxxx  n   105  BASE      fcmle            dq0 : dq5 zero_fp_const sd_sz_q
 0101111010100000111010xxxxxxxxxx  n   106  BASE      fcmlt             s0 : s5 zero_fp_const
 0101111011100000111010xxxxxxxxxx  n   106  BASE      fcmlt             d0 : d5 zero_fp_const
-0x0011101x100000111010xxxxxxxxxx  n   106  BASE      fcmlt            dq0 : dq5 zero_fp_const sd_sz
-0001111001100000001000xxxxx01000  w   107  BASE       fcmp                : d5 zero_fp_const
-0001111000100000001000xxxxx01000  w   107  BASE       fcmp                : s5 zero_fp_const
+0x0011101x100000111010xxxxxxxxxx  n   106  BASE      fcmlt            dq0 : dq5 zero_fp_const sd_sz_q
+00011110011vvvvv001000xxxxx01000  w   107  BASE       fcmp                : d5 zero_fp_const
+00011110001vvvvv001000xxxxx01000  w   107  BASE       fcmp                : s5 zero_fp_const
 00011110011xxxxx001000xxxxx00000  w   107  BASE       fcmp                : d5 d16
 00011110001xxxxx001000xxxxx00000  w   107  BASE       fcmp                : s5 s16
-0001111001100000001000xxxxx11000  w   108  BASE      fcmpe                : d5 zero_fp_const
-0001111000100000001000xxxxx11000  w   108  BASE      fcmpe                : s5 zero_fp_const
+00011110011vvvvv001000xxxxx11000  w   108  BASE      fcmpe                : d5 zero_fp_const
+00011110001vvvvv001000xxxxx11000  w   108  BASE      fcmpe                : s5 zero_fp_const
 00011110011xxxxx001000xxxxx10000  w   108  BASE      fcmpe                : d5 d16
 00011110001xxxxx001000xxxxx10000  w   108  BASE      fcmpe                : s5 s16
 00011110001xxxxxxxxx11xxxxxxxxxx  r   109  BASE      fcsel             s0 : s5 s16 cond
@@ -318,14 +318,14 @@ x1001010xx0xxxxxxxxxxxxxxxxxxxxx  n   90   BASE        eor            wx0 : wx5 
 1001111001100100000000xxxxxxxxxx  n   111  BASE     fcvtas             x0 : d5
 0101111000100001110010xxxxxxxxxx  n   111  BASE     fcvtas             s0 : s5
 0101111001100001110010xxxxxxxxxx  n   111  BASE     fcvtas             d0 : d5
-0x0011100x100001110010xxxxxxxxxx  n   111  BASE     fcvtas            dq0 : dq5 sd_sz
+0x0011100x100001110010xxxxxxxxxx  n   111  BASE     fcvtas            dq0 : dq5 sd_sz_q
 0001111000100101000000xxxxxxxxxx  n   112  BASE     fcvtau             w0 : s5
 1001111000100101000000xxxxxxxxxx  n   112  BASE     fcvtau             x0 : s5
 0001111001100101000000xxxxxxxxxx  n   112  BASE     fcvtau             w0 : d5
 1001111001100101000000xxxxxxxxxx  n   112  BASE     fcvtau             x0 : d5
 0111111000100001110010xxxxxxxxxx  n   112  BASE     fcvtau             s0 : s5
 0111111001100001110010xxxxxxxxxx  n   112  BASE     fcvtau             d0 : d5
-0x1011100x100001110010xxxxxxxxxx  n   112  BASE     fcvtau            dq0 : dq5 sd_sz
+0x1011100x100001110010xxxxxxxxxx  n   112  BASE     fcvtau            dq0 : dq5 sd_sz_q
 000011100x100001011110xxxxxxxxxx  n   113  BASE      fcvtl             q0 : dq5 hs_fsz
 010011100x100001011110xxxxxxxxxx  n   114  BASE     fcvtl2             q0 : dq5 hs_fsz
 0001111000110000000000xxxxxxxxxx  n   115  BASE     fcvtms             w0 : s5
@@ -334,12 +334,12 @@ x1001010xx0xxxxxxxxxxxxxxxxxxxxx  n   90   BASE        eor            wx0 : wx5 
 1001111001110000000000xxxxxxxxxx  n   115  BASE     fcvtms             x0 : d5
 0101111000100001101110xxxxxxxxxx  n   115  BASE     fcvtms             s0 : s5
 0101111001100001101110xxxxxxxxxx  n   115  BASE     fcvtms             d0 : d5
-0x0011100x100001101110xxxxxxxxxx  n   115  BASE     fcvtms            dq0 : dq5 sd_sz
+0x0011100x100001101110xxxxxxxxxx  n   115  BASE     fcvtms            dq0 : dq5 sd_sz_q
 x001111000110001000000xxxxxxxxxx  n   116  BASE     fcvtmu            wx0 : s5
 x001111001110001000000xxxxxxxxxx  n   116  BASE     fcvtmu            wx0 : d5
 0111111000100001101110xxxxxxxxxx  n   116  BASE     fcvtmu             s0 : s5
 0111111001100001101110xxxxxxxxxx  n   116  BASE     fcvtmu             d0 : d5
-0x1011100x100001101110xxxxxxxxxx  n   116  BASE     fcvtmu            dq0 : dq5 sd_sz
+0x1011100x100001101110xxxxxxxxxx  n   116  BASE     fcvtmu            dq0 : dq5 sd_sz_q
 000011100x100001011010xxxxxxxxxx  n   117  BASE      fcvtn             d0 : q5 sd_sz
 010011100x100001011010xxxxxxxxxx  n   118  BASE     fcvtn2             q0 : q5 sd_sz
 0001111000100000000000xxxxxxxxxx  n   119  BASE     fcvtns             w0 : s5
@@ -348,26 +348,26 @@ x001111001110001000000xxxxxxxxxx  n   116  BASE     fcvtmu            wx0 : d5
 1001111001100000000000xxxxxxxxxx  n   119  BASE     fcvtns             x0 : d5
 0101111000100001101010xxxxxxxxxx  n   119  BASE     fcvtns             s0 : s5
 0101111001100001101010xxxxxxxxxx  n   119  BASE     fcvtns             d0 : d5
-0x0011100x100001101010xxxxxxxxxx  n   119  BASE     fcvtns            dq0 : dq5 sd_sz
+0x0011100x100001101010xxxxxxxxxx  n   119  BASE     fcvtns            dq0 : dq5 sd_sz_q
 x001111000100001000000xxxxxxxxxx  n   120  BASE     fcvtnu            wx0 : s5
 x001111001100001000000xxxxxxxxxx  n   120  BASE     fcvtnu            wx0 : d5
 0111111000100001101010xxxxxxxxxx  n   120  BASE     fcvtnu             s0 : s5
 0111111001100001101010xxxxxxxxxx  n   120  BASE     fcvtnu             d0 : d5
-0x1011100x100001101010xxxxxxxxxx  n   120  BASE     fcvtnu            dq0 : dq5 sd_sz
+0x1011100x100001101010xxxxxxxxxx  n   120  BASE     fcvtnu            dq0 : dq5 sd_sz_q
 0001111000101000000000xxxxxxxxxx  n   121  BASE     fcvtps             w0 : s5
 1001111000101000000000xxxxxxxxxx  n   121  BASE     fcvtps             x0 : s5
 0001111001101000000000xxxxxxxxxx  n   121  BASE     fcvtps             w0 : d5
 1001111001101000000000xxxxxxxxxx  n   121  BASE     fcvtps             x0 : d5
 0101111010100001101010xxxxxxxxxx  n   121  BASE     fcvtps             s0 : s5
 0101111011100001101010xxxxxxxxxx  n   121  BASE     fcvtps             d0 : d5
-0x0011101x100001101010xxxxxxxxxx  n   121  BASE     fcvtps            dq0 : dq5 sd_sz
+0x0011101x100001101010xxxxxxxxxx  n   121  BASE     fcvtps            dq0 : dq5 sd_sz_q
 0001111000101001000000xxxxxxxxxx  n   122  BASE     fcvtpu             w0 : s5
 1001111000101001000000xxxxxxxxxx  n   122  BASE     fcvtpu             x0 : s5
 0001111001101001000000xxxxxxxxxx  n   122  BASE     fcvtpu             w0 : d5
 1001111001101001000000xxxxxxxxxx  n   122  BASE     fcvtpu             x0 : d5
 0111111010100001101010xxxxxxxxxx  n   122  BASE     fcvtpu             s0 : s5
 0111111011100001101010xxxxxxxxxx  n   122  BASE     fcvtpu             d0 : d5
-0x1011101x100001101010xxxxxxxxxx  n   122  BASE     fcvtpu            dq0 : dq5 sd_sz
+0x1011101x100001101010xxxxxxxxxx  n   122  BASE     fcvtpu            dq0 : dq5 sd_sz_q
 0111111001100001011010xxxxxxxxxx  n   123  BASE     fcvtxn             s0 : d5
 0010111001100001011010xxxxxxxxxx  n   123  BASE     fcvtxn             d0 : q5 sd_sz
 0110111001100001011010xxxxxxxxxx  n   124  BASE    fcvtxn2             q0 : q5 sd_sz
@@ -375,53 +375,53 @@ x001111000111000000000xxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : s5
 x001111001111000000000xxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : d5
 0101111010100001101110xxxxxxxxxx  n   125  BASE     fcvtzs             s0 : s5
 0101111011100001101110xxxxxxxxxx  n   125  BASE     fcvtzs             d0 : d5
-0x0011101x100001101110xxxxxxxxxx  n   125  BASE     fcvtzs            dq0 : dq5 sd_sz
+0x0011101x100001101110xxxxxxxxxx  n   125  BASE     fcvtzs            dq0 : dq5 sd_sz_q
 x001111000011000xxxxxxxxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : s5 scale
 x001111001011000xxxxxxxxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : d5 scale
-0101111100xxxxxx111111xxxxxxxxxx  n   125  BASE     fcvtzs             s0 : s5 immhb_fxp
+01011111001xxxxx111111xxxxxxxxxx  n   125  BASE     fcvtzs             s0 : s5 immhb_fxp
 0101111101xxxxxx111111xxxxxxxxxx  n   125  BASE     fcvtzs             d0 : d5 immhb_fxp
 x001111000111001000000xxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : s5
 x001111001111001000000xxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5
 0111111010100001101110xxxxxxxxxx  n   126  BASE     fcvtzu             s0 : s5
 0111111011100001101110xxxxxxxxxx  n   126  BASE     fcvtzu             d0 : d5
-0x1011101x100001101110xxxxxxxxxx  n   126  BASE     fcvtzu            dq0 : dq5 sd_sz
+0x1011101x100001101110xxxxxxxxxx  n   126  BASE     fcvtzu            dq0 : dq5 sd_sz_q
 x001111000011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : s5 scale
 x001111001011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5 scale
-0111111100xxxxxx111111xxxxxxxxxx  n   126  BASE     fcvtzu             s0 : s5 immhb_fxp
+01111111001xxxxx111111xxxxxxxxxx  n   126  BASE     fcvtzu             s0 : s5 immhb_fxp
 0111111101xxxxxx111111xxxxxxxxxx  n   126  BASE     fcvtzu             d0 : d5 immhb_fxp
-0x1011100x1xxxxx111111xxxxxxxxxx  n   127  BASE       fdiv            dq0 : dq5 dq16 sd_sz
+0x1011100x1xxxxx111111xxxxxxxxxx  n   127  BASE       fdiv            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx000110xxxxxxxxxx  n   127  BASE       fdiv     float_reg0 : float_reg5 float_reg16
 00011111xx0xxxxx0xxxxxxxxxxxxxxx  n   128  BASE      fmadd     float_reg0 : float_reg5 float_reg16 float_reg10
-0x0011100x1xxxxx111101xxxxxxxxxx  n   129  BASE       fmax            dq0 : dq5 dq16 sd_sz
+0x0011100x1xxxxx111101xxxxxxxxxx  n   129  BASE       fmax            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx010010xxxxxxxxxx  n   129  BASE       fmax     float_reg0 : float_reg5 float_reg16
-0x0011100x1xxxxx110001xxxxxxxxxx  n   130  BASE     fmaxnm            dq0 : dq5 dq16 sd_sz
+0x0011100x1xxxxx110001xxxxxxxxxx  n   130  BASE     fmaxnm            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx011010xxxxxxxxxx  n   130  BASE     fmaxnm     float_reg0 : float_reg5 float_reg16
-0x1011100x1xxxxx110001xxxxxxxxxx  n   131  BASE    fmaxnmp            dq0 : dq5 dq16 sd_sz
+0x1011100x1xxxxx110001xxxxxxxxxx  n   131  BASE    fmaxnmp            dq0 : dq5 dq16 sd_sz_q
 0111111000110000110010xxxxxxxxxx  n   131  BASE    fmaxnmp             s0 : dq5_sz sd_sz
 0111111001110000110010xxxxxxxxxx  n   131  BASE    fmaxnmp             d0 : dq5_sz sd_sz
 0110111000110000110010xxxxxxxxxx  n   132  BASE    fmaxnmv             s0 : q5 sd_sz
-0x1011100x1xxxxx111101xxxxxxxxxx  n   133  BASE      fmaxp            dq0 : dq5 dq16 sd_sz
+0x1011100x1xxxxx111101xxxxxxxxxx  n   133  BASE      fmaxp            dq0 : dq5 dq16 sd_sz_q
 0111111000110000111110xxxxxxxxxx  n   133  BASE      fmaxp             s0 : dq5_sz sd_sz
 0111111001110000111110xxxxxxxxxx  n   133  BASE      fmaxp             d0 : dq5_sz sd_sz
-0x10111000110000111110xxxxxxxxxx  n   134  BASE      fmaxv             s0 : dq5 s_const_sz
-0x0011101x1xxxxx111101xxxxxxxxxx  n   135  BASE       fmin            dq0 : dq5 dq16 sd_sz
+0110111000110000111110xxxxxxxxxx  n   134  BASE      fmaxv             s0 : dq5 s_const_sz
+0x0011101x1xxxxx111101xxxxxxxxxx  n   135  BASE       fmin            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx010110xxxxxxxxxx  n   135  BASE       fmin     float_reg0 : float_reg5 float_reg16
-0x0011101x1xxxxx110001xxxxxxxxxx  n   136  BASE     fminnm            dq0 : dq5 dq16 sd_sz
+0x0011101x1xxxxx110001xxxxxxxxxx  n   136  BASE     fminnm            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx011110xxxxxxxxxx  n   136  BASE     fminnm     float_reg0 : float_reg5 float_reg16
-0x1011101x1xxxxx110001xxxxxxxxxx  n   137  BASE    fminnmp            dq0 : dq5 dq16 sd_sz
+0x1011101x1xxxxx110001xxxxxxxxxx  n   137  BASE    fminnmp            dq0 : dq5 dq16 sd_sz_q
 0111111010110000110010xxxxxxxxxx  n   137  BASE    fminnmp             s0 : dq5_sz sd_sz
 0111111011110000110010xxxxxxxxxx  n   137  BASE    fminnmp             d0 : dq5_sz sd_sz
 0110111010110000110010xxxxxxxxxx  n   138  BASE    fminnmv             s0 : q5 sd_sz
-0x1011101x1xxxxx111101xxxxxxxxxx  n   139  BASE      fminp            dq0 : dq5 dq16 sd_sz
+0x1011101x1xxxxx111101xxxxxxxxxx  n   139  BASE      fminp            dq0 : dq5 dq16 sd_sz_q
 0111111010110000111110xxxxxxxxxx  n   139  BASE      fminp             s0 : dq5_sz sd_sz
 0111111011110000111110xxxxxxxxxx  n   139  BASE      fminp             d0 : dq5_sz sd_sz
-0x10111010110000111110xxxxxxxxxx  n   140  BASE      fminv             s0 : dq5 s_const_sz
-0x0011100x1xxxxx110011xxxxxxxxxx  n   141  BASE       fmla            dq0 : dq0 dq5 dq16 sd_sz
-0x0011111xxxxxxx0001x0xxxxxxxxxx  n   141  BASE       fmla            dq0 : dq0 dq5 dq16 vindex_SD sd_sz
+0110111010110000111110xxxxxxxxxx  n   140  BASE      fminv             s0 : dq5 s_const_sz
+0x0011100x1xxxxx110011xxxxxxxxxx  n   141  BASE       fmla            dq0 : dq0 dq5 dq16 sd_sz_q
+0x0011111xxxxxxx0001x0xxxxxxxxxx  n   141  BASE       fmla            dq0 : dq0 dq5 dq16 vindex_SD sd_sz_q
 0101111110xxxxxx0001x0xxxxxxxxxx  n   141  BASE       fmla             s0 : s0 s5 q16 vindex_SD sd_sz
 0101111111xxxxxx0001x0xxxxxxxxxx  n   141  BASE       fmla             d0 : d0 d5 q16 vindex_SD sd_sz
-0x0011111xxxxxxx0101x0xxxxxxxxxx  n   144  BASE       fmls            dq0 : dq0 dq5 dq16 vindex_SD sd_sz
-0x0011101x1xxxxx110011xxxxxxxxxx  n   144  BASE       fmls            dq0 : dq0 dq5 dq16 sd_sz
+0x0011111xxxxxxx0101x0xxxxxxxxxx  n   144  BASE       fmls            dq0 : dq0 dq5 dq16 vindex_SD sd_sz_q
+0x0011101x1xxxxx110011xxxxxxxxxx  n   144  BASE       fmls            dq0 : dq0 dq5 dq16 sd_sz_q
 0101111110xxxxxx0101x0xxxxxxxxxx  n   144  BASE       fmls             s0 : s0 s5 dq16 vindex_SD sd_sz
 0101111111xxxxxx0101x0xxxxxxxxxx  n   144  BASE       fmls             d0 : d0 d5 dq16 vindex_SD sd_sz
 00011110001xxxxxxxx10000000xxxxx  n   147  BASE       fmov             s0 : fpimm8_13
@@ -436,60 +436,60 @@ x001111001011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5 s
 1001111010101110000000xxxxxxxxxx  n   147  BASE       fmov             x0 : q5 vindex_D1 d_const_sz
 0110111100000xxx111101xxxxxxxxxx  n   147  BASE       fmov             q0 : fpimm8 d_const_sz
 00011111xx0xxxxx1xxxxxxxxxxxxxxx  n   148  BASE      fmsub     float_reg0 : float_reg5 float_reg16 float_reg10
-0x0011111xxxxxxx1001x0xxxxxxxxxx  n   149  BASE       fmul            dq0 : dq5 dq16 vindex_SD sd_sz
+0x0011111xxxxxxx1001x0xxxxxxxxxx  n   149  BASE       fmul            dq0 : dq5 dq16 vindex_SD sd_sz_q
 0101111110xxxxxx1001x0xxxxxxxxxx  n   149  BASE       fmul             s0 : s5 dq16 vindex_SD sd_sz
 0101111111xxxxxx1001x0xxxxxxxxxx  n   149  BASE       fmul             d0 : d5 dq16 vindex_SD sd_sz
-0x1011100x1xxxxx110111xxxxxxxxxx  n   149  BASE       fmul            dq0 : dq5 dq16 sd_sz
+0x1011100x1xxxxx110111xxxxxxxxxx  n   149  BASE       fmul            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx000010xxxxxxxxxx  n   149  BASE       fmul     float_reg0 : float_reg5 float_reg16
-0x0011100x1xxxxx110111xxxxxxxxxx  n   150  BASE      fmulx            dq0 : dq5 dq16 sd_sz
-0x1011111xxxxxxx1001x0xxxxxxxxxx  n   150  BASE      fmulx            dq0 : dq5 dq16 vindex_SD sd_sz
+0x0011100x1xxxxx110111xxxxxxxxxx  n   150  BASE      fmulx            dq0 : dq5 dq16 sd_sz_q
+0x1011111xxxxxxx1001x0xxxxxxxxxx  n   150  BASE      fmulx            dq0 : dq5 dq16 vindex_SD sd_sz_q
 0111111110xxxxxx1001x0xxxxxxxxxx  n   150  BASE      fmulx             s0 : s5 q16 vindex_SD sd_sz
 0111111111xxxxxx1001x0xxxxxxxxxx  n   150  BASE      fmulx             d0 : d5 q16 vindex_SD sd_sz
 01011110001xxxxx110111xxxxxxxxxx  n   150  BASE      fmulx             s0 : s5 s16
 01011110011xxxxx110111xxxxxxxxxx  n   150  BASE      fmulx             d0 : d5 d16
 00011110xx100001010000xxxxxxxxxx  n   151  BASE       fneg     float_reg0 : float_reg5
-0x1011101x100000111110xxxxxxxxxx  n   151  BASE       fneg            dq0 : dq5 sd_sz
+0x1011101x100000111110xxxxxxxxxx  n   151  BASE       fneg            dq0 : dq5 sd_sz_q
 00011111xx1xxxxx0xxxxxxxxxxxxxxx  n   152  BASE     fnmadd     float_reg0 : float_reg5 float_reg16 float_reg10
 00011111xx1xxxxx1xxxxxxxxxxxxxxx  n   153  BASE     fnmsub     float_reg0 : float_reg5 float_reg16 float_reg10
 00011110xx1xxxxx100010xxxxxxxxxx  n   154  BASE      fnmul     float_reg0 : float_reg5 float_reg16
 0101111010100001110110xxxxxxxxxx  n   155  BASE     frecpe             s0 : s5
 0101111011100001110110xxxxxxxxxx  n   155  BASE     frecpe             d0 : d5
-0x0011101x100001110110xxxxxxxxxx  n   155  BASE     frecpe            dq0 : dq5 sd_sz
-0x0011100x1xxxxx111111xxxxxxxxxx  n   156  BASE     frecps            dq0 : dq5 dq16 sd_sz
+0x0011101x100001110110xxxxxxxxxx  n   155  BASE     frecpe            dq0 : dq5 sd_sz_q
+0x0011100x1xxxxx111111xxxxxxxxxx  n   156  BASE     frecps            dq0 : dq5 dq16 sd_sz_q
 01011110001xxxxx111111xxxxxxxxxx  n   156  BASE     frecps             s0 : s5 s16
 01011110011xxxxx111111xxxxxxxxxx  n   156  BASE     frecps             d0 : d5 d16
 0101111010100001111110xxxxxxxxxx  n   157  BASE     frecpx             s0 : s5
 0101111011100001111110xxxxxxxxxx  n   157  BASE     frecpx             d0 : d5
 00011110xx100110010000xxxxxxxxxx  n   158  BASE     frinta     float_reg0 : float_reg5
-0x1011100x100001100010xxxxxxxxxx  n   158  BASE     frinta            dq0 : dq5 sd_sz
+0x1011100x100001100010xxxxxxxxxx  n   158  BASE     frinta            dq0 : dq5 sd_sz_q
 00011110xx100111110000xxxxxxxxxx  n   159  BASE     frinti     float_reg0 : float_reg5
-0x1011101x100001100110xxxxxxxxxx  n   159  BASE     frinti            dq0 : dq5 sd_sz
+0x1011101x100001100110xxxxxxxxxx  n   159  BASE     frinti            dq0 : dq5 sd_sz_q
 00011110xx100101010000xxxxxxxxxx  n   160  BASE     frintm     float_reg0 : float_reg5
-0x0011100x100001100110xxxxxxxxxx  n   160  BASE     frintm            dq0 : dq5 sd_sz
+0x0011100x100001100110xxxxxxxxxx  n   160  BASE     frintm            dq0 : dq5 sd_sz_q
 00011110xx100100010000xxxxxxxxxx  n   161  BASE     frintn     float_reg0 : float_reg5
-0x0011100x100001100010xxxxxxxxxx  n   161  BASE     frintn            dq0 : dq5 sd_sz
+0x0011100x100001100010xxxxxxxxxx  n   161  BASE     frintn            dq0 : dq5 sd_sz_q
 00011110xx100100110000xxxxxxxxxx  n   162  BASE     frintp     float_reg0 : float_reg5
-0x0011101x100001100010xxxxxxxxxx  n   162  BASE     frintp            dq0 : dq5 sd_sz
+0x0011101x100001100010xxxxxxxxxx  n   162  BASE     frintp            dq0 : dq5 sd_sz_q
 00011110xx100111010000xxxxxxxxxx  n   163  BASE     frintx     float_reg0 : float_reg5
-0x1011100x100001100110xxxxxxxxxx  n   163  BASE     frintx            dq0 : dq5 sd_sz
+0x1011100x100001100110xxxxxxxxxx  n   163  BASE     frintx            dq0 : dq5 sd_sz_q
 00011110xx100101110000xxxxxxxxxx  n   164  BASE     frintz     float_reg0 : float_reg5
-0x0011101x100001100110xxxxxxxxxx  n   164  BASE     frintz            dq0 : dq5 sd_sz
+0x0011101x100001100110xxxxxxxxxx  n   164  BASE     frintz            dq0 : dq5 sd_sz_q
 0111111010100001110110xxxxxxxxxx  n   165  BASE    frsqrte             s0 : s5
 0111111011100001110110xxxxxxxxxx  n   165  BASE    frsqrte             d0 : d5
-0x1011101x100001110110xxxxxxxxxx  n   165  BASE    frsqrte            dq0 : dq5 sd_sz
-0x0011101x1xxxxx111111xxxxxxxxxx  n   166  BASE    frsqrts            dq0 : dq5 dq16 sd_sz
+0x1011101x100001110110xxxxxxxxxx  n   165  BASE    frsqrte            dq0 : dq5 sd_sz_q
+0x0011101x1xxxxx111111xxxxxxxxxx  n   166  BASE    frsqrts            dq0 : dq5 dq16 sd_sz_q
 01011110101xxxxx111111xxxxxxxxxx  n   166  BASE    frsqrts             s0 : s5 s16
 01011110111xxxxx111111xxxxxxxxxx  n   166  BASE    frsqrts             d0 : d5 d16
 00011110xx100001110000xxxxxxxxxx  n   167  BASE      fsqrt     float_reg0 : float_reg5
-0x1011101x100001111110xxxxxxxxxx  n   167  BASE      fsqrt            dq0 : dq5 sd_sz
-0x0011101x1xxxxx110101xxxxxxxxxx  n   168  BASE       fsub            dq0 : dq5 dq16 sd_sz
+0x1011101x100001111110xxxxxxxxxx  n   167  BASE      fsqrt            dq0 : dq5 sd_sz_q
+0x0011101x1xxxxx110101xxxxxxxxxx  n   168  BASE       fsub            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx001110xxxxxxxxxx  n   168  BASE       fsub     float_reg0 : float_reg5 float_reg16
 11010100010xxxxxxxxxxxxxxxx00000  n   169  BASE        hlt                : imm16
 11010100000xxxxxxxxxxxxxxxx00010  n   170  BASE        hvc                : imm16
 11010101000010000111010100011111  n   576  BASE   ic_iallu                :
 11010101000010000111000100011111  n   577  BASE ic_ialluis                :
 110101010000101101110101001xxxxx  n   578  BASE    ic_ivau                : memx0
-01101110000xxxxx0xxxx1xxxxxxxxxx  n   171  BASE        ins        q0 imm5 : q5 imm4idx
+01101110000xxxxx0xxxx1xxxxxxxxxx  n   171  BASE        ins        q0 imm5_dup : q5 imm4idx
 01001110000xxxxx000111xxxxxxxxxx  n   171  BASE        ins    q0 imm5_idx : wx5_imm5 bhsd_imm5_sz
 11010101000000110011xxxx11011111  n   172  BASE        isb                : imm4
 0x001100010000000010xxxxxxxxxxxx  n   173  BASE        ld1  vt0 vt1 vt2 vt3 : memvm vmsz
@@ -546,10 +546,10 @@ x001111001011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5 s
 0x001101111xxxxx101001xxxxxxxxxx  n   179  BASE        ld4  q0 q0p1 q0p2 q0p3 x5sp : memvs index3 x5sp x16immvs d_const_sz
 0x001101011000001110xxxxxxxxxxxx  n   180  BASE       ld4r  dq0 dq0p1 dq0p2 dq0p3 : memvr vmsz
 0x001101111xxxxx1110xxxxxxxxxxxx  n   180  BASE       ld4r  dq0 dq0p1 dq0p2 dq0p3 x5sp : memvr x5sp x16immvr vmsz
-1000100011011111111111xxxxxxxxxx  n   193  BASE       ldar             w0 : mem0
-1100100011011111111111xxxxxxxxxx  n   193  BASE       ldar             x0 : mem0
-0000100011011111111111xxxxxxxxxx  n   194  BASE      ldarb             w0 : mem0
-0100100011011111111111xxxxxxxxxx  n   195  BASE      ldarh             w0 : mem0
+10001000110^^^^^1^^^^^xxxxxxxxxx  n   193  BASE       ldar             w0 : mem0
+11001000110^^^^^1^^^^^xxxxxxxxxx  n   193  BASE       ldar             x0 : mem0
+00001000110^^^^^1^^^^^xxxxxxxxxx  n   194  BASE      ldarb             w0 : mem0
+01001000110^^^^^1^^^^^xxxxxxxxxx  n   195  BASE      ldarh             w0 : mem0
 10001000011^^^^^1xxxxxxxxxxxxxxx  n   196  BASE      ldaxp         w0 w10 : mem0p
 11001000011^^^^^1xxxxxxxxxxxxxxx  n   196  BASE      ldaxp         x0 x10 : mem0p
 10001000010^^^^^1^^^^^xxxxxxxxxx  n   197  BASE      ldaxr             w0 : mem0
@@ -674,10 +674,10 @@ x0011010110xxxxx001000xxxxxxxxxx  n   309  BASE       lslv            wx0 : wx5 
 x0011010110xxxxx001001xxxxxxxxxx  n   310  BASE       lsrv            wx0 : wx5 wx16
 x0011011000xxxxx0xxxxxxxxxxxxxxx  n   311  BASE       madd            wx0 : wx5 wx16 wx10
 0x001110xx1xxxxx100101xxxxxxxxxx  n   312  BASE        mla            dq0 : dq0 dq5 dq16 bhs_sz
-0x1011111xxxxxxx0000x0xxxxxxxxxx  n   312  BASE        mla            dq0 : dq5 dq16 vindex_SD sd_sz
+0x10111110xxxxxx0000x0xxxxxxxxxx  n   312  BASE        mla            dq0 : dq5 dq16 vindex_SD s_const_sz
 0x10111101xxxxxx0000x0xxxxxxxxxx  n   312  BASE        mla            dq0 : dq5 dq16_h_sz vindex_H h_sz
 0x101110xx1xxxxx100101xxxxxxxxxx  n   313  BASE        mls            dq0 : dq0 dq5 dq16 bhs_sz
-0x1011111xxxxxxx0100x0xxxxxxxxxx  n   313  BASE        mls            dq0 : dq5 dq16 vindex_SD sd_sz
+0x10111110xxxxxx0100x0xxxxxxxxxx  n   313  BASE        mls            dq0 : dq5 dq16 vindex_SD s_const_sz
 0x10111101xxxxxx0100x0xxxxxxxxxx  n   313  BASE        mls            dq0 : dq5 dq16_h_sz vindex_H h_sz
 0x00111100000xxx111001xxxxxxxxxx  n   314  BASE       movi            dq0 : imm8 cmode4_b_sz
 0x00111100000xxx10x001xxxxxxxxxx  n   314  BASE       movi            dq0 : imm8 cmode_h_sz
@@ -702,12 +702,13 @@ x0011011000xxxxx0xxxxxxxxxxxxxxx  n   311  BASE       madd            wx0 : wx5 
 11010101000000110100xxxx1xx11111  ew  319  BASE        msr                : pstate imm4
 x0011011000xxxxx1xxxxxxxxxxxxxxx  n   320  BASE       msub            wx0 : wx5 wx16 wx10
 0x001110xx1xxxxx100111xxxxxxxxxx  n   321  BASE        mul            dq0 : dq5 dq16 bhs_sz
-0x001111xxxxxxxx1000x0xxxxxxxxxx  n   321  BASE        mul            dq0 : dq5 dq16_h_sz vindex_H hs_sz
+0x00111110xxxxxx1000x0xxxxxxxxxx  n   321  BASE        mul            dq0 : dq5 dq16 vindex_SD s_const_sz
+0x00111101xxxxxx1000x0xxxxxxxxxx  n   321  BASE        mul            dq0 : dq5 dq16_h_sz vindex_H h_sz
 0x10111100000xxx10x001xxxxxxxxxx  n   322  BASE       mvni            dq0 : imm8 cmode_h_sz
 0x10111100000xxx0xx001xxxxxxxxxx  n   322  BASE       mvni            dq0 : imm8 cmode_s_sz
 0x10111100000xxx110x01xxxxxxxxxx  n   322  BASE       mvni            dq0 : imm8 cmode4_s_sz_msl
 0111111011100000101110xxxxxxxxxx  n   323  BASE        neg             q0 : q5
-0x101110xx100000101110xxxxxxxxxx  n   323  BASE        neg            dq0 : dq5 bhsd_sz
+0x101110xx100000101110xxxxxxxxxx  n   323  BASE        neg            dq0 : dq5 bhsd_sz_q
 11010101000000110010000000011111  n   324  BASE        nop                :
 0x10111000100000010110xxxxxxxxxx  n   325  BASE        not            dq0 : dq5
 x0101010xx1xxxxxxxxxxxxxxxxxxxxx  n   326  BASE        orn            wx0 : wx5 wx16 shift4 imm6
@@ -732,9 +733,9 @@ x101101011000000000000xxxxxxxxxx  n   335  BASE       rbit            wx0 : wx5
 0101101011000000000010xxxxxxxxxx  n   337  BASE        rev             w0 : w5
 1101101011000000000011xxxxxxxxxx  n   337  BASE        rev             x0 : x5
 x101101011000000000001xxxxxxxxxx  n   338  BASE      rev16            wx0 : wx5
-0x001110xx100000000110xxxxxxxxxx  n   338  BASE      rev16            dq0 : dq5 bd_sz
+0x001110xx100000000110xxxxxxxxxx  n   338  BASE      rev16            dq0 : dq5 b_sz
 1101101011000000000010xxxxxxxxxx  n   339  BASE      rev32             x0 : x5
-0x101110xx100000000010xxxxxxxxxx  n   339  BASE      rev32            dq0 : dq5 bhs_sz
+0x101110xx100000000010xxxxxxxxxx  n   339  BASE      rev32            dq0 : dq5 bh_sz
 0x001110xx100000000010xxxxxxxxxx  n   340  BASE      rev64            dq0 : dq5 bhs_sz
 x0011010110xxxxx001011xxxxxxxxxx  n   341  BASE       rorv            wx0 : wx5 wx16
 0000111100xxxxxx100011xxxxxxxxxx  n   342  BASE      rshrn             d0 : q5 hsd_immh_sz immhb_shf
@@ -747,11 +748,11 @@ x0011010110xxxxx001011xxxxxxxxxx  n   341  BASE       rorv            wx0 : wx5 
 0x001110xx1xxxxx011101xxxxxxxxxx  n   349  BASE       sabd            dq0 : dq5 dq16 bhs_sz
 00001110xx1xxxxx011100xxxxxxxxxx  n   350  BASE      sabdl             q0 : d5 d16 bhs_sz
 01001110xx1xxxxx011100xxxxxxxxxx  n   351  BASE     sabdl2             q0 : q5 q16 bhs_sz
-0x001110xx100000011010xxxxxxxxxx  n   352  BASE     sadalp            dq0 : dq5 bhsd_sz
+0x001110xx100000011010xxxxxxxxxx  n   352  BASE     sadalp            dq0 : dq5 bhs_sz
 00001110xx1xxxxx000000xxxxxxxxxx  n   353  BASE      saddl             q0 : d5 d16 bhs_sz
 01001110xx1xxxxx000000xxxxxxxxxx  n   354  BASE     saddl2             q0 : q5 q16 bhs_sz
-0x001110xx100000001010xxxxxxxxxx  n   355  BASE     saddlp            dq0 : dq5 bhsd_sz
-0x001110xx110000001110xxxxxxxxxx  n   356  BASE     saddlv            dq0 : dq5 bhsd_sz
+0x001110xx100000001010xxxxxxxxxx  n   355  BASE     saddlp            dq0 : dq5 bhs_sz
+0x001110xx110000001110xxxxxxxxxx  n   356  BASE     saddlv            dq0 : dq5 bhs_sz_lanes
 00001110xx1xxxxx000100xxxxxxxxxx  n   357  BASE      saddw             q0 : q5 d16 bhs_sz
 01001110xx1xxxxx000100xxxxxxxxxx  n   358  BASE     saddw2             q0 : q5 q16 bhs_sz
 x1011010000xxxxx000000xxxxxxxxxx  r   359  BASE        sbc            wx0 : wx5 wx16
@@ -762,12 +763,12 @@ x001111000100010000000xxxxxxxxxx  n   362  BASE      scvtf             s0 : wx5
 x001111001100010000000xxxxxxxxxx  n   362  BASE      scvtf             d0 : wx5
 0101111000100001110110xxxxxxxxxx  n   362  BASE      scvtf             s0 : s5
 0101111001100001110110xxxxxxxxxx  n   362  BASE      scvtf             d0 : d5
-0x0011100x100001110110xxxxxxxxxx  n   362  BASE      scvtf            dq0 : dq5 sd_sz
+0x0011100x100001110110xxxxxxxxxx  n   362  BASE      scvtf            dq0 : dq5 sd_sz_q
 x001111000000010xxxxxxxxxxxxxxxx  n   362  BASE      scvtf             s0 : wx5 scale
 x001111001000010xxxxxxxxxxxxxxxx  n   362  BASE      scvtf             d0 : wx5 scale
-0101111100xxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf             s0 : s5 immhb_fxp
+01011111001xxxxx111001xxxxxxxxxx  n   362  BASE      scvtf             s0 : s5 immhb_fxp
 0101111101xxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf             d0 : d5 immhb_fxp
-0x0011110xxxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf            dq0 : dq5 immhb_fxp bhsd_immh_sz
+0x0011110xxxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf            dq0 : dq5 immhb_fxp bhsd_immh_sz_q
 x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 wx16
 11010101000000110010000010011111  n   365  BASE        sev                :
 11010101000000110010000010111111  n   366  BASE       sevl                :
@@ -783,27 +784,27 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 01011110000xxxxx011000xxxxxxxxxx  n   376  BASE  sha256su1             q0 : q5 q16 s_const_sz
 0x001110xx1xxxxx000001xxxxxxxxxx  n   377  BASE      shadd            dq0 : dq5 dq16 bhs_sz
 0101111101xxxxxx010101xxxxxxxxxx  n   378  BASE        shl             d0 : d5 immhb_0shf
-0x0011110xxxxxxx010101xxxxxxxxxx  n   378  BASE        shl            dq0 : dq5 bhsd_immh_sz immhb_0shf
+0x0011110xxxxxxx010101xxxxxxxxxx  n   378  BASE        shl            dq0 : dq5 bhsd_immh_sz_q immhb_0shf
 00101110xx100001001110xxxxxxxxxx  n   379  BASE       shll             d0 : d5 bhs_sz
 01101110xx100001001110xxxxxxxxxx  n   380  BASE      shll2             q0 : q5 bhs_sz
 0000111100xxxxxx100001xxxxxxxxxx  n   381  BASE       shrn             d0 : q5 hsd_immh_sz immhb_shf
 0100111100xxxxxx100001xxxxxxxxxx  n   382  BASE      shrn2             q0 : q5 hsd_immh_sz immhb_shf
 0x001110xx1xxxxx001001xxxxxxxxxx  n   383  BASE      shsub            dq0 : dq5 dq16 bhs_sz
 0111111101xxxxxx010101xxxxxxxxxx  n   384  BASE        sli             d0 : d5 immhb_0shf
-0x1011110xxxxxxx010101xxxxxxxxxx  n   384  BASE        sli            dq0 : dq5 bhsd_immh_sz immhb_0shf
+0x1011110xxxxxxx010101xxxxxxxxxx  n   384  BASE        sli            dq0 : dq5 bhsd_immh_sz_q immhb_0shf
 10011011001xxxxx0xxxxxxxxxxxxxxx  n   385  BASE     smaddl             x0 : w5 w16 x10
 0x001110xx1xxxxx011001xxxxxxxxxx  n   386  BASE       smax            dq0 : dq5 dq16 bhs_sz
 0x001110xx1xxxxx101001xxxxxxxxxx  n   387  BASE      smaxp            dq0 : dq5 dq16 bhs_sz
-0x001110xx110000101010xxxxxxxxxx  n   388  BASE      smaxv            dq0 : dq5 bhsd_sz
+0x001110xx110000101010xxxxxxxxxx  n   388  BASE      smaxv            dq0 : dq5 bhs_sz_lanes
 11010100000xxxxxxxxxxxxxxxx00011  n   389  BASE        smc                : imm16
 0x001110xx1xxxxx011011xxxxxxxxxx  n   390  BASE       smin            dq0 : dq5 dq16 bhs_sz
 0x001110xx1xxxxx101011xxxxxxxxxx  n   391  BASE      sminp            dq0 : dq5 dq16 bhs_sz
-0x001110xx110001101010xxxxxxxxxx  n   392  BASE      sminv            dq0 : dq5 bhsd_sz
+0x001110xx110001101010xxxxxxxxxx  n   392  BASE      sminv            dq0 : dq5 bhs_sz_lanes
 00001110xx1xxxxx100000xxxxxxxxxx  n   393  BASE      smlal             q0 : d5 d16 bhs_sz
-000011111xxxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal            dq0 : dq5 dq16 vindex_SD sd_sz
+0000111110xxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal            dq0 : dq5 dq16 vindex_SD s_const_sz
 0000111101xxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal            dq0 : dq5 dq16_h_sz vindex_H h_sz
 01001110xx1xxxxx100000xxxxxxxxxx  n   394  BASE     smlal2             q0 : q5 q16 bhs_sz
-010011111xxxxxxx0010x0xxxxxxxxxx  n   394  BASE     smlal2            dq0 : dq5 dq16 vindex_SD sd_sz
+0100111110xxxxxx0010x0xxxxxxxxxx  n   394  BASE     smlal2            dq0 : dq5 dq16 vindex_SD s_const_sz
 0100111101xxxxxx0010x0xxxxxxxxxx  n   394  BASE     smlal2            dq0 : dq5 dq16_h_sz vindex_H h_sz
 00001110xx1xxxxx101000xxxxxxxxxx  n   395  BASE      smlsl             q0 : d5 d16 bhs_sz
 0000111110xxxxxx0110x0xxxxxxxxxx  n   395  BASE      smlsl             q0 : dq5 dq16 vindex_SD sd_sz
@@ -825,12 +826,12 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 0101111001100000011110xxxxxxxxxx  n   402  BASE      sqabs             h0 : h5
 0101111010100000011110xxxxxxxxxx  n   402  BASE      sqabs             s0 : s5
 0101111011100000011110xxxxxxxxxx  n   402  BASE      sqabs             d0 : d5
-0x001110xx100000011110xxxxxxxxxx  n   402  BASE      sqabs            dq0 : dq5 bhsd_sz
+0x001110xx100000011110xxxxxxxxxx  n   402  BASE      sqabs            dq0 : dq5 bhsd_sz_q
 01011110001xxxxx000011xxxxxxxxxx  n   403  BASE      sqadd             b0 : b5 b16
 01011110011xxxxx000011xxxxxxxxxx  n   403  BASE      sqadd             h0 : h5 h16
 01011110101xxxxx000011xxxxxxxxxx  n   403  BASE      sqadd             s0 : s5 s16
 01011110111xxxxx000011xxxxxxxxxx  n   403  BASE      sqadd             d0 : d5 d16
-0x001110xx1xxxxx000011xxxxxxxxxx  n   403  BASE      sqadd            dq0 : dq5 dq16 bhsd_sz
+0x001110xx1xxxxx000011xxxxxxxxxx  n   403  BASE      sqadd            dq0 : dq5 dq16 bhsd_sz_q
 00001110xx1xxxxx100100xxxxxxxxxx  n   404  BASE    sqdmlal             q0 : d5 d16 hs_sz
 01011110011xxxxx100100xxxxxxxxxx  n   404  BASE    sqdmlal             s0 : s0 h5 h16
 01011110101xxxxx100100xxxxxxxxxx  n   404  BASE    sqdmlal             d0 : d0 s5 s16
@@ -854,10 +855,10 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 0x001110xx1xxxxx101101xxxxxxxxxx  n   408  BASE    sqdmulh            dq0 : dq5 dq16 hs_sz
 01011110011xxxxx101101xxxxxxxxxx  n   408  BASE    sqdmulh             h0 : h5 h16
 01011110101xxxxx101101xxxxxxxxxx  n   408  BASE    sqdmulh             s0 : s5 s16
-0x0011111xxxxxxx1100x0xxxxxxxxxx  n   408  BASE    sqdmulh            dq0 : dq5 dq16 vindex_SD sd_sz
+0x00111110xxxxxx1100x0xxxxxxxxxx  n   408  BASE    sqdmulh            dq0 : dq5 dq16 vindex_SD s_const_sz
 0x00111101xxxxxx1100x0xxxxxxxxxx  n   408  BASE    sqdmulh            dq0 : dq5 dq16_h_sz vindex_H h_sz
 0101111101xxxxxx1100x0xxxxxxxxxx  n   408  BASE    sqdmulh             h0 : h5 dq16_h_sz vindex_H h_sz
-010111111xxxxxxx1100x0xxxxxxxxxx  n   408  BASE    sqdmulh             s0 : s5 dq16 vindex_SD sd_sz
+0101111110xxxxxx1100x0xxxxxxxxxx  n   408  BASE    sqdmulh             s0 : s5 dq16 vindex_SD s_const_sz
 00001110xx1xxxxx110100xxxxxxxxxx  n   409  BASE    sqdmull             q0 : d5 d16 hs_sz
 0000111101xxxxxx1011x0xxxxxxxxxx  n   409  BASE    sqdmull             q0 : d5 dq16_h_sz vindex_H hs_sz
 0000111110xxxxxx1011x0xxxxxxxxxx  n   409  BASE    sqdmull             q0 : d5 dq16 vindex_SD sd_sz
@@ -872,15 +873,15 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 0111111001100000011110xxxxxxxxxx  n   411  BASE      sqneg             h0 : h5
 0111111010100000011110xxxxxxxxxx  n   411  BASE      sqneg             s0 : s5
 0111111011100000011110xxxxxxxxxx  n   411  BASE      sqneg             d0 : d5
-0x101110xx100000011110xxxxxxxxxx  n   411  BASE      sqneg            dq0 : dq5 bhsd_sz
+0x101110xx100000011110xxxxxxxxxx  n   411  BASE      sqneg            dq0 : dq5 bhsd_sz_q
 01111110011xxxxx101101xxxxxxxxxx  n   413  BASE   sqrdmulh             h0 : h5 h16
 01111110101xxxxx101101xxxxxxxxxx  n   413  BASE   sqrdmulh             s0 : s5 s16
 0x101110xx1xxxxx101101xxxxxxxxxx  n   413  BASE   sqrdmulh            dq0 : dq5 dq16 hs_sz
-0x0011111xxxxxxx1101x0xxxxxxxxxx  n   413  BASE   sqrdmulh            dq0 : dq5 dq16 vindex_SD sd_sz
+0x00111110xxxxxx1101x0xxxxxxxxxx  n   413  BASE   sqrdmulh            dq0 : dq5 dq16 vindex_SD s_const_sz
 0x00111101xxxxxx1101x0xxxxxxxxxx  n   413  BASE   sqrdmulh            dq0 : dq5 dq16_h_sz vindex_H h_sz
 0101111101xxxxxx1101x0xxxxxxxxxx  n   413  BASE   sqrdmulh             h0 : h5 dq16_h_sz vindex_H h_sz
-010111111xxxxxxx1101x0xxxxxxxxxx  n   413  BASE   sqrdmulh             s0 : s5 dq16 vindex_SD sd_sz
-0x001110xx1xxxxx010111xxxxxxxxxx  n   414  BASE     sqrshl            dq0 : dq5 dq16 bhsd_sz
+0101111110xxxxxx1101x0xxxxxxxxxx  n   413  BASE   sqrdmulh             s0 : s5 dq16 vindex_SD s_const_sz
+0x001110xx1xxxxx010111xxxxxxxxxx  n   414  BASE     sqrshl            dq0 : dq5 dq16 bhsd_sz_q
 01011110001xxxxx010111xxxxxxxxxx  n   414  BASE     sqrshl             b0 : b5 b16
 01011110011xxxxx010111xxxxxxxxxx  n   414  BASE     sqrshl             h0 : h5 h16
 01011110101xxxxx010111xxxxxxxxxx  n   414  BASE     sqrshl             s0 : s5 s16
@@ -891,7 +892,7 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 0010111100xxxxxx100011xxxxxxxxxx  n   417  BASE   sqrshrun             d0 : q5 hsd_immh_sz immhb_shf
 0111111100xxxxxx100011xxxxxxxxxx  n   417  BASE   sqrshrun  bhsd_immh_reg0 : hsd_immh_reg5 immhb_shf
 0110111100xxxxxx100011xxxxxxxxxx  n   418  BASE  sqrshrun2             q0 : q5 hsd_immh_sz immhb_shf
-0x001110xx1xxxxx010011xxxxxxxxxx  n   419  BASE      sqshl            dq0 : dq5 dq16 bhsd_sz
+0x001110xx1xxxxx010011xxxxxxxxxx  n   419  BASE      sqshl            dq0 : dq5 dq16 bhsd_sz_q
 01011110001xxxxx010011xxxxxxxxxx  n   419  BASE      sqshl             b0 : b5 b16
 01011110011xxxxx010011xxxxxxxxxx  n   419  BASE      sqshl             h0 : h5 h16
 01011110101xxxxx010011xxxxxxxxxx  n   419  BASE      sqshl             s0 : s5 s16
@@ -900,12 +901,12 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 010111110001xxxx011101xxxxxxxxxx  n   419  BASE      sqshl             h0 : h5 immhb_0shf
 01011111001xxxxx011101xxxxxxxxxx  n   419  BASE      sqshl             s0 : s5 immhb_0shf
 0101111101xxxxxx011101xxxxxxxxxx  n   419  BASE      sqshl             d0 : d5 immhb_0shf
-0x0011110xxxxxxx011101xxxxxxxxxx  n   419  BASE      sqshl            dq0 : dq5 bhsd_immh_sz immhb_0shf
+0x0011110xxxxxxx011101xxxxxxxxxx  n   419  BASE      sqshl            dq0 : dq5 bhsd_immh_sz_q immhb_0shf
 0111111100001xxx011001xxxxxxxxxx  n   420  BASE     sqshlu             b0 : b5 immhb_0shf
 011111110001xxxx011001xxxxxxxxxx  n   420  BASE     sqshlu             h0 : h5 immhb_0shf
 01111111001xxxxx011001xxxxxxxxxx  n   420  BASE     sqshlu             s0 : s5 immhb_0shf
 0111111101xxxxxx011001xxxxxxxxxx  n   420  BASE     sqshlu             d0 : d5 immhb_0shf
-0x1011110xxxxxxx011001xxxxxxxxxx  n   420  BASE     sqshlu            dq0 : dq5 bhsd_immh_sz immhb_0shf
+0x1011110xxxxxxx011001xxxxxxxxxx  n   420  BASE     sqshlu            dq0 : dq5 bhsd_immh_sz_q immhb_0shf
 0101111100001xxx100101xxxxxxxxxx  n   421  BASE     sqshrn             b0 : h5 immhb_shf
 010111110001xxxx100101xxxxxxxxxx  n   421  BASE     sqshrn             h0 : s5 immhb_shf
 01011111001xxxxx100101xxxxxxxxxx  n   421  BASE     sqshrn             s0 : d5 immhb_shf
@@ -914,7 +915,7 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 0010111100xxxxxx100001xxxxxxxxxx  n   423  BASE    sqshrun             d0 : q5 hsd_immh_sz immhb_shf
 0111111100xxxxxx100001xxxxxxxxxx  n   423  BASE    sqshrun  bhsd_immh_reg0 : hsd_immh_reg5 immhb_shf
 0110111100xxxxxx100001xxxxxxxxxx  n   424  BASE   sqshrun2             q0 : q5 hsd_immh_sz immhb_shf
-0x001110xx1xxxxx001011xxxxxxxxxx  n   425  BASE      sqsub            dq0 : dq5 dq16 bhsd_sz
+0x001110xx1xxxxx001011xxxxxxxxxx  n   425  BASE      sqsub            dq0 : dq5 dq16 bhsd_sz_q
 01011110001xxxxx001011xxxxxxxxxx  n   425  BASE      sqsub             b0 : b5 b16
 01011110011xxxxx001011xxxxxxxxxx  n   425  BASE      sqsub             h0 : h5 h16
 01011110101xxxxx001011xxxxxxxxxx  n   425  BASE      sqsub             s0 : s5 s16
@@ -931,21 +932,21 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 01101110xx100001001010xxxxxxxxxx  n   429  BASE    sqxtun2             q0 : q5 bhs_sz
 0x001110xx1xxxxx000101xxxxxxxxxx  n   430  BASE     srhadd            dq0 : dq5 dq16 bhs_sz
 0111111101xxxxxx010001xxxxxxxxxx  n   431  BASE        sri             d0 : d5 immhb_shf
-0x1011110xxxxxxx010001xxxxxxxxxx  n   431  BASE        sri            dq0 : dq5 bhsd_immh_sz immhb_shf
-0x001110xx1xxxxx010101xxxxxxxxxx  n   432  BASE      srshl            dq0 : dq5 dq16 bhsd_sz
+0x1011110xxxxxxx010001xxxxxxxxxx  n   431  BASE        sri            dq0 : dq5 bhsd_immh_sz_q immhb_shf
+0x001110xx1xxxxx010101xxxxxxxxxx  n   432  BASE      srshl            dq0 : dq5 dq16 bhsd_sz_q
 01011110111xxxxx010101xxxxxxxxxx  n   432  BASE      srshl             d0 : d5 d16
 0101111101xxxxxx001001xxxxxxxxxx  n   433  BASE      srshr             d0 : d5 immhb_shf
-0x0011110xxxxxxx001001xxxxxxxxxx  n   433  BASE      srshr            dq0 : dq5 bhsd_immh_sz immhb_shf
+0x0011110xxxxxxx001001xxxxxxxxxx  n   433  BASE      srshr            dq0 : dq5 bhsd_immh_sz_q immhb_shf
 0101111101xxxxxx001101xxxxxxxxxx  n   434  BASE      srsra             d0 : d5 immhb_shf
-0x0011110xxxxxxx001101xxxxxxxxxx  n   434  BASE      srsra            dq0 : dq5 bhsd_immh_sz immhb_shf
-0x001110xx1xxxxx010001xxxxxxxxxx  n   435  BASE       sshl            dq0 : dq5 dq16 bhsd_sz
+0x0011110xxxxxxx001101xxxxxxxxxx  n   434  BASE      srsra            dq0 : dq5 bhsd_immh_sz_q immhb_shf
+0x001110xx1xxxxx010001xxxxxxxxxx  n   435  BASE       sshl            dq0 : dq5 dq16 bhsd_sz_q
 01011110111xxxxx010001xxxxxxxxxx  n   435  BASE       sshl             d0 : d5 d16
-000011110xxxxxxx101001xxxxxxxxxx  n   436  BASE      sshll             q0 : d5 bhsd_immh_sz immhb_0shf
-010011110xxxxxxx101001xxxxxxxxxx  n   437  BASE     sshll2             q0 : q5 bhsd_immh_sz immhb_0shf
+000011110xxxxxxx101001xxxxxxxxxx  n   436  BASE      sshll             q0 : d5 bhs_immh_sz immhb_0shf
+010011110xxxxxxx101001xxxxxxxxxx  n   437  BASE     sshll2             q0 : q5 bhs_immh_sz immhb_0shf
 0101111101xxxxxx000001xxxxxxxxxx  n   438  BASE       sshr             d0 : d5 immhb_shf
-0x0011110xxxxxxx000001xxxxxxxxxx  n   438  BASE       sshr            dq0 : dq5 bhsd_immh_sz immhb_shf
+0x0011110xxxxxxx000001xxxxxxxxxx  n   438  BASE       sshr            dq0 : dq5 bhsd_immh_sz_q immhb_shf
 0101111101xxxxxx000101xxxxxxxxxx  n   439  BASE       ssra             d0 : d5 immhb_shf
-0x0011110xxxxxxx000101xxxxxxxxxx  n   439  BASE       ssra            dq0 : dq5 bhsd_immh_sz immhb_shf
+0x0011110xxxxxxx000101xxxxxxxxxx  n   439  BASE       ssra            dq0 : dq5 bhsd_immh_sz_q immhb_shf
 00001110xx1xxxxx001000xxxxxxxxxx  n   440  BASE      ssubl             q0 : d5 d16 bhs_sz
 01001110xx1xxxxx001000xxxxxxxxxx  n   441  BASE     ssubl2             q0 : q5 q16 bhs_sz
 00001110xx1xxxxx001100xxxxxxxxxx  n   442  BASE      ssubw             q0 : q5 d16 bhs_sz
@@ -1087,7 +1088,7 @@ x1001011xx0xxxxxxxxxxxxxxxxxxxxx  n   470  BASE        sub            wx0 : wx5 
 11001011001xxxxxx0xxxxxxxxxxxxxx  n   470  BASE        sub          wx0sp : wx5sp w16 ext extam
 11001011001xxxxxxx0xxxxxxxxxxxxx  n   470  BASE        sub          wx0sp : wx5sp w16 ext extam
 11001011001xxxxxx11xxxxxxxxxxxxx  n   470  BASE        sub          wx0sp : wx5sp x16 ext extam
-0x101110xx1xxxxx100001xxxxxxxxxx  n   470  BASE        sub            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx100001xxxxxxxxxx  n   470  BASE        sub            dq0 : dq5 dq16 bhsd_sz_q
 01111110111xxxxx100001xxxxxxxxxx  n   470  BASE        sub             d0 : d5 d16
 00001110xx1xxxxx011000xxxxxxxxxx  n   471  BASE      subhn             d0 : q5 q16 bhs_sz
 01001110xx1xxxxx011000xxxxxxxxxx  n   472  BASE     subhn2             q0 : q5 q16 bhs_sz
@@ -1101,7 +1102,7 @@ x1101011xx0xxxxxxxxxxxxxxxxxxxxx  w   473  BASE       subs            wx0 : wx5 
 0101111001100000001110xxxxxxxxxx  n   474  BASE     suqadd             h0 : h5
 0101111010100000001110xxxxxxxxxx  n   474  BASE     suqadd             s0 : s5
 0101111011100000001110xxxxxxxxxx  n   474  BASE     suqadd             d0 : d5
-0x001110xx100000001110xxxxxxxxxx  n   474  BASE     suqadd            dq0 : dq5 bhsd_sz
+0x001110xx100000001110xxxxxxxxxx  n   474  BASE     suqadd            dq0 : dq5 bhsd_sz_q
 11010100000xxxxxxxxxxxxxxxx00001  n   475  BASE        svc                : imm16
 1101010100001xxxxxxxxxxxxxxxxxxx  n   488  BASE        sys             x0 : imm3 crn imm4 op2
 1101010100101xxxxxxxxxxxxxxxxxxx  n   489  BASE       sysl             x0 : imm3 crn imm4 op2
@@ -1109,19 +1110,19 @@ x1101011xx0xxxxxxxxxxxxxxxxxxxxx  w   473  BASE       subs            wx0 : wx5 
 x0110111xxxxxxxxxxxxxxxxxxxxxxxx  n   491  BASE       tbnz            tbz
 0x001110000xxxxx0xx100xxxxxxxxxx  n   492  BASE        tbx            dq0 : dq5 dq16 len
 x0110110xxxxxxxxxxxxxxxxxxxxxxxx  n   493  BASE        tbz            tbz
-0x001110xx0xxxxx001010xxxxxxxxxx  n   494  BASE       trn1            dq0 : dq5 dq16 bhsd_sz
-0x001110xx0xxxxx011010xxxxxxxxxx  n   495  BASE       trn2            dq0 : dq5 dq16 bhsd_sz
+0x001110xx0xxxxx001010xxxxxxxxxx  n   494  BASE       trn1            dq0 : dq5 dq16 bhsd_sz_q
+0x001110xx0xxxxx011010xxxxxxxxxx  n   495  BASE       trn2            dq0 : dq5 dq16 bhsd_sz_q
 0x101110xx1xxxxx011111xxxxxxxxxx  n   496  BASE       uaba            dq0 : dq5 dq16 bhs_sz
 00101110xx1xxxxx010100xxxxxxxxxx  n   497  BASE      uabal             q0 : d5 d16 bhs_sz
 01101110xx1xxxxx010100xxxxxxxxxx  n   498  BASE     uabal2             q0 : q5 q16 bhs_sz
 0x101110xx1xxxxx011101xxxxxxxxxx  n   499  BASE       uabd            dq0 : dq5 dq16 bhs_sz
 00101110xx1xxxxx011100xxxxxxxxxx  n   500  BASE      uabdl             q0 : d5 d16 bhs_sz
 01101110xx1xxxxx011100xxxxxxxxxx  n   501  BASE     uabdl2             q0 : q5 q16 bhs_sz
-0x101110xx100000011010xxxxxxxxxx  n   502  BASE     uadalp            dq0 : dq5 bhsd_sz
+0x101110xx100000011010xxxxxxxxxx  n   502  BASE     uadalp            dq0 : dq5 bhs_sz
 00101110xx1xxxxx000000xxxxxxxxxx  n   503  BASE      uaddl             q0 : d5 d16 bhs_sz
 01101110xx1xxxxx000000xxxxxxxxxx  n   504  BASE     uaddl2             q0 : q5 q16 bhs_sz
-0x101110xx100000001010xxxxxxxxxx  n   505  BASE     uaddlp            dq0 : dq5 bhsd_sz
-0x101110xx110000001110xxxxxxxxxx  n   506  BASE     uaddlv            dq0 : dq5 bhsd_sz
+0x101110xx100000001010xxxxxxxxxx  n   505  BASE     uaddlp            dq0 : dq5 bhs_sz
+0x101110xx110000001110xxxxxxxxxx  n   506  BASE     uaddlv            dq0 : dq5 bhs_sz_lanes
 00101110xx1xxxxx000100xxxxxxxxxx  n   507  BASE      uaddw             q0 : q5 d16 bhs_sz
 01101110xx1xxxxx000100xxxxxxxxxx  n   508  BASE     uaddw2             q0 : q5 q16 bhs_sz
 0101001100xxxxxxxxxxxxxxxxxxxxxx  n   509  BASE       ubfm             w0 : w5 immr imms
@@ -1130,11 +1131,11 @@ x001111000100011000000xxxxxxxxxx  n   510  BASE      ucvtf             s0 : wx5
 x001111001100011000000xxxxxxxxxx  n   510  BASE      ucvtf             d0 : wx5
 0111111000100001110110xxxxxxxxxx  n   510  BASE      ucvtf             s0 : s5
 0111111001100001110110xxxxxxxxxx  n   510  BASE      ucvtf             d0 : d5
-0x1011100x100001110110xxxxxxxxxx  n   510  BASE      ucvtf            dq0 : dq5 sd_sz
+0x1011100x100001110110xxxxxxxxxx  n   510  BASE      ucvtf            dq0 : dq5 sd_sz_q
 x001111000000011xxxxxxxxxxxxxxxx  n   510  BASE      ucvtf             s0 : wx5 scale
 x001111001000011xxxxxxxxxxxxxxxx  n   510  BASE      ucvtf             d0 : wx5 scale
 011111110xxxxxxx111001xxxxxxxxxx  n   510  BASE      ucvtf  bhsd_immh_reg0 : bhsd_immh_reg5 immhb_fxp
-0x1011110xxxxxxx111001xxxxxxxxxx  n   510  BASE      ucvtf            dq0 : dq5 immhb_fxp bhsd_immh_sz
+0x1011110xxxxxxx111001xxxxxxxxxx  n   510  BASE      ucvtf            dq0 : dq5 immhb_fxp bhsd_immh_sz_q
 0000000000000000xxxxxxxxxxxxxxxx  n   567  BASE        udf                : imm16_0
 x0011010110xxxxx000010xxxxxxxxxx  n   511  BASE       udiv            wx0 : wx5 wx16
 0x101110xx1xxxxx000001xxxxxxxxxx  n   513  BASE      uhadd            dq0 : dq5 dq16 bhs_sz
@@ -1142,10 +1143,10 @@ x0011010110xxxxx000010xxxxxxxxxx  n   511  BASE       udiv            wx0 : wx5 
 10011011101xxxxx0xxxxxxxxxxxxxxx  n   515  BASE     umaddl             x0 : w5 w16 x10
 0x101110xx1xxxxx011001xxxxxxxxxx  n   516  BASE       umax            dq0 : dq5 dq16 bhs_sz
 0x101110xx1xxxxx101001xxxxxxxxxx  n   517  BASE      umaxp            dq0 : dq5 dq16 bhs_sz
-0x101110xx110000101010xxxxxxxxxx  n   518  BASE      umaxv            dq0 : dq5 bhsd_sz
+0x101110xx110000101010xxxxxxxxxx  n   518  BASE      umaxv            dq0 : dq5 bhs_sz_lanes
 0x101110xx1xxxxx011011xxxxxxxxxx  n   519  BASE       umin            dq0 : dq5 dq16 bhs_sz
 0x101110xx1xxxxx101011xxxxxxxxxx  n   520  BASE      uminp            dq0 : dq5 dq16 bhs_sz
-0x101110xx110001101010xxxxxxxxxx  n   521  BASE      uminv            dq0 : dq5 bhsd_sz
+0x101110xx110001101010xxxxxxxxxx  n   521  BASE      uminv            dq0 : dq5 bhs_sz_lanes
 00101110xx1xxxxx100000xxxxxxxxxx  n   522  BASE      umlal             q0 : q0 d5 d16 bhs_sz
 0010111101xxxxxx0010x0xxxxxxxxxx  n   522  BASE      umlal             q0 : q0 d5 dq16_h_sz vindex_H hs_sz
 0010111110xxxxxx0010x0xxxxxxxxxx  n   522  BASE      umlal             q0 : q0 d5 dq16 vindex_SD sd_sz
@@ -1168,12 +1169,12 @@ x0011010110xxxxx000010xxxxxxxxxx  n   511  BASE       udiv            wx0 : wx5 
 01101110xx1xxxxx110000xxxxxxxxxx  n   530  BASE     umull2             q0 : q5 q16 bhs_sz
 0110111101xxxxxx1010x0xxxxxxxxxx  n   530  BASE     umull2             q0 : q5 dq16_h_sz vindex_H hs_sz
 0110111110xxxxxx1010x0xxxxxxxxxx  n   530  BASE     umull2             q0 : q5 dq16 vindex_SD sd_sz
-0x101110xx1xxxxx000011xxxxxxxxxx  n   531  BASE      uqadd            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx000011xxxxxxxxxx  n   531  BASE      uqadd            dq0 : dq5 dq16 bhsd_sz_q
 01111110001xxxxx000011xxxxxxxxxx  n   531  BASE      uqadd             b0 : b5 b16
 01111110011xxxxx000011xxxxxxxxxx  n   531  BASE      uqadd             h0 : h5 h16
 01111110101xxxxx000011xxxxxxxxxx  n   531  BASE      uqadd             s0 : s5 s16
 01111110111xxxxx000011xxxxxxxxxx  n   531  BASE      uqadd             d0 : d5 d16
-0x101110xx1xxxxx010111xxxxxxxxxx  n   532  BASE     uqrshl            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx010111xxxxxxxxxx  n   532  BASE     uqrshl            dq0 : dq5 dq16 bhsd_sz_q
 01111110001xxxxx010111xxxxxxxxxx  n   532  BASE     uqrshl             b0 : b5 b16
 01111110011xxxxx010111xxxxxxxxxx  n   532  BASE     uqrshl             h0 : h5 h16
 01111110101xxxxx010111xxxxxxxxxx  n   532  BASE     uqrshl             s0 : s5 s16
@@ -1181,9 +1182,9 @@ x0011010110xxxxx000010xxxxxxxxxx  n   511  BASE       udiv            wx0 : wx5 
 0010111100xxxxxx100111xxxxxxxxxx  n   533  BASE    uqrshrn             d0 : q5 hsd_immh_sz immhb_shf
 0111111100xxxxxx100111xxxxxxxxxx  n   533  BASE    uqrshrn  bhsd_immh_reg0 : hsd_immh_reg5 immhb_shf
 0110111100xxxxxx100111xxxxxxxxxx  n   534  BASE   uqrshrn2             q0 : q5 hsd_immh_sz immhb_shf
-0x101110xx1xxxxx010011xxxxxxxxxx  n   535  BASE      uqshl            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx010011xxxxxxxxxx  n   535  BASE      uqshl            dq0 : dq5 dq16 bhsd_sz_q
 011111110xxxxxxx011101xxxxxxxxxx  n   535  BASE      uqshl  bhsd_immh_reg0 : bhsd_immh_reg5 immhb_0shf
-0x1011110xxxxxxx011101xxxxxxxxxx  n   535  BASE      uqshl            dq0 : dq5 immhb_0shf bhsd_immh_sz
+0x1011110xxxxxxx011101xxxxxxxxxx  n   535  BASE      uqshl            dq0 : dq5 immhb_0shf bhsd_immh_sz_q
 01111110001xxxxx010011xxxxxxxxxx  n   535  BASE      uqshl             b0 : b5 b16
 01111110011xxxxx010011xxxxxxxxxx  n   535  BASE      uqshl             h0 : h5 h16
 01111110101xxxxx010011xxxxxxxxxx  n   535  BASE      uqshl             s0 : s5 s16
@@ -1191,7 +1192,7 @@ x0011010110xxxxx000010xxxxxxxxxx  n   511  BASE       udiv            wx0 : wx5 
 001011110xxxxxxx100101xxxxxxxxxx  n   536  BASE     uqshrn             d0 : q5 hsd_immh_sz immhb_shf
 0111111100xxxxxx100101xxxxxxxxxx  n   536  BASE     uqshrn  bhsd_immh_reg0 : hsd_immh_reg5 immhb_shf
 011011110xxxxxxx100101xxxxxxxxxx  n   537  BASE    uqshrn2             q0 : q5 hsd_immh_sz immhb_shf
-0x101110xx1xxxxx001011xxxxxxxxxx  n   538  BASE      uqsub            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx001011xxxxxxxxxx  n   538  BASE      uqsub            dq0 : dq5 dq16 bhsd_sz_q
 01111110001xxxxx001011xxxxxxxxxx  n   538  BASE      uqsub             b0 : b5 b16
 01111110011xxxxx001011xxxxxxxxxx  n   538  BASE      uqsub             h0 : h5 h16
 01111110101xxxxx001011xxxxxxxxxx  n   538  BASE      uqsub             s0 : s5 s16
@@ -1201,38 +1202,38 @@ x0011010110xxxxx000010xxxxxxxxxx  n   511  BASE       udiv            wx0 : wx5 
 0111111010100001010010xxxxxxxxxx  n   539  BASE      uqxtn             s0 : d5
 00101110xx100001010010xxxxxxxxxx  n   539  BASE      uqxtn             d0 : d5 bhs_sz
 01101110xx100001010010xxxxxxxxxx  n   540  BASE     uqxtn2             q0 : q5 bhs_sz
-0x0011101x100001110010xxxxxxxxxx  n   541  BASE     urecpe            dq0 : dq5 sd_sz
+0x00111010100001110010xxxxxxxxxx  n   541  BASE     urecpe            dq0 : dq5 s_const_sz
 0x101110xx1xxxxx000101xxxxxxxxxx  n   542  BASE     urhadd            dq0 : dq5 dq16 bhs_sz
-0x101110xx1xxxxx010101xxxxxxxxxx  n   543  BASE      urshl            dq0 : dq5 dq16 bhsd_sz
+0x101110xx1xxxxx010101xxxxxxxxxx  n   543  BASE      urshl            dq0 : dq5 dq16 bhsd_sz_q
 01111110111xxxxx010101xxxxxxxxxx  n   543  BASE      urshl             d0 : d5 d16
-0x1011110xxxxxxx001001xxxxxxxxxx  n   544  BASE      urshr            dq0 : dq5 bhsd_immh_sz immhb_shf
+0x1011110xxxxxxx001001xxxxxxxxxx  n   544  BASE      urshr            dq0 : dq5 bhsd_immh_sz_q immhb_shf
 0111111101xxxxxx001001xxxxxxxxxx  n   544  BASE      urshr             d0 : d5 immhb_shf
 0x10111010100001110010xxxxxxxxxx  n   545  BASE    ursqrte            dq0 : dq5 sd_sz
 0111111101xxxxxx001101xxxxxxxxxx  n   546  BASE      ursra             d0 : d5 immhb_shf
-0x1011110xxxxxxx001101xxxxxxxxxx  n   546  BASE      ursra            dq0 : dq5 bhsd_immh_sz immhb_shf
-0x101110xx1xxxxx010001xxxxxxxxxx  n   547  BASE       ushl            dq0 : dq5 dq16 bhsd_sz
+0x1011110xxxxxxx001101xxxxxxxxxx  n   546  BASE      ursra            dq0 : dq5 bhsd_immh_sz_q immhb_shf
+0x101110xx1xxxxx010001xxxxxxxxxx  n   547  BASE       ushl            dq0 : dq5 dq16 bhsd_sz_q
 01111110111xxxxx010001xxxxxxxxxx  n   547  BASE       ushl             d0 : d5 d16
-0010111100xxxxxx101001xxxxxxxxxx  n   548  BASE      ushll             q0 : d5 bhsd_immh_sz immhb_0shf
-0110111100xxxxxx101001xxxxxxxxxx  n   549  BASE     ushll2             q0 : q5 bhsd_immh_sz immhb_0shf
+0010111100xxxxxx101001xxxxxxxxxx  n   548  BASE      ushll             q0 : d5 bhs_immh_sz immhb_0shf
+0110111100xxxxxx101001xxxxxxxxxx  n   549  BASE     ushll2             q0 : q5 bhs_immh_sz immhb_0shf
 0111111101xxxxxx000001xxxxxxxxxx  n   550  BASE       ushr             d0 : d5 immhb_shf
-0x1011110xxxxxxx000001xxxxxxxxxx  n   550  BASE       ushr            dq0 : dq5 bhsd_immh_sz immhb_shf
+0x1011110xxxxxxx000001xxxxxxxxxx  n   550  BASE       ushr            dq0 : dq5 bhsd_immh_sz_q immhb_shf
 0111111000100000001110xxxxxxxxxx  n   551  BASE     usqadd             b0 : b5
 0111111001100000001110xxxxxxxxxx  n   551  BASE     usqadd             h0 : h5
 0111111010100000001110xxxxxxxxxx  n   551  BASE     usqadd             s0 : s5
 0111111011100000001110xxxxxxxxxx  n   551  BASE     usqadd             d0 : d5
-0x101110xx100000001110xxxxxxxxxx  n   551  BASE     usqadd            dq0 : dq5 bhsd_sz
+0x101110xx100000001110xxxxxxxxxx  n   551  BASE     usqadd            dq0 : dq5 bhsd_sz_q
 0111111101xxxxxx000101xxxxxxxxxx  n   552  BASE       usra             d0 : d5 immhb_shf
-0x1011110xxxxxxx000101xxxxxxxxxx  n   552  BASE       usra            dq0 : dq5 bhsd_immh_sz immhb_shf
+0x1011110xxxxxxx000101xxxxxxxxxx  n   552  BASE       usra            dq0 : dq5 bhsd_immh_sz_q immhb_shf
 00101110xx1xxxxx001000xxxxxxxxxx  n   553  BASE      usubl             q0 : d5 d16 bhs_sz
 01101110xx1xxxxx001000xxxxxxxxxx  n   554  BASE     usubl2             q0 : q5 q16 bhs_sz
 00101110xx1xxxxx001100xxxxxxxxxx  n   555  BASE      usubw             q0 : q5 d16 bhs_sz
 01101110xx1xxxxx001100xxxxxxxxxx  n   556  BASE     usubw2             q0 : q5 q16 bhs_sz
-0x001110xx0xxxxx000110xxxxxxxxxx  n   557  BASE       uzp1            dq0 : dq5 dq16 bhsd_sz
-0x001110xx0xxxxx010110xxxxxxxxxx  n   558  BASE       uzp2            dq0 : dq5 dq16 bhsd_sz
+0x001110xx0xxxxx000110xxxxxxxxxx  n   557  BASE       uzp1            dq0 : dq5 dq16 bhsd_sz_q
+0x001110xx0xxxxx010110xxxxxxxxxx  n   558  BASE       uzp2            dq0 : dq5 dq16 bhsd_sz_q
 11010101000000110010000001011111  n   559  BASE        wfe                :
 11010101000000110010000001111111  n   560  BASE        wfi                :
-00001110xx100001001010xxxxxxxxxx  n   562  BASE        xtn             d0 : d5 bhsd_sz
-01001110xx100001001010xxxxxxxxxx  n   563  BASE       xtn2             q0 : q5 bhsd_sz
+00001110xx100001001010xxxxxxxxxx  n   562  BASE        xtn             d0 : d5 bhs_sz
+01001110xx100001001010xxxxxxxxxx  n   563  BASE       xtn2             q0 : q5 bhs_sz
 11010101000000110010000000111111  n   564  BASE      yield                :
-0x001110xx0xxxxx001110xxxxxxxxxx  n   565  BASE       zip1            dq0 : dq5 dq16 bhsd_sz
-0x001110xx0xxxxx011110xxxxxxxxxx  n   566  BASE       zip2            dq0 : dq5 dq16 bhsd_sz
+0x001110xx0xxxxx001110xxxxxxxxxx  n   565  BASE       zip1            dq0 : dq5 dq16 bhsd_sz_q
+0x001110xx0xxxxx011110xxxxxxxxxx  n   566  BASE       zip2            dq0 : dq5 dq16 bhsd_sz_q

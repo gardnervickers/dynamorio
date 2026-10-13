@@ -136,7 +136,7 @@
 ----------------------xxxxx-----  simm5_5    # Signed 5 bit immediate from 5 - 9
 ---------------------x----------  imm1_ew_10 # 1 bit symbolised imm, representing 90 or 270
 ---------------------xxxxxx-----  simm6_5    # Signed 6 bit immediate from 5 - 10
---------------------xx----------  vmsz       # B/H/S/D for load/store multiple structures
+-?------------------xx----------  vmsz       # B/H/S/D for load/store multiple structures
 --------------------xx----------  imm2_nesw_10 # 2 bit symbolised imm, representing 0, 90, 180, or 270
 --------------------xxxx--------  imm4       # option for CLREX, DSB, DMB, ISB, MSR
                                              # CRm field for SYS and SYSL
@@ -159,7 +159,7 @@
 -----------------xx-------------  cmode_s_sz # Vector shift for 32 bit elements
 -----------------xx-------------  imm2_nesw_13 # 2 bit symbolised imm, representing 0, 90, 180, or 270
 -----------------xx-------------  len        # imm2 len
------------------xxxx-----------  imm4idx    # imm4 from 11-14
+-?---------------xxxx-----------  imm4idx    # imm4 from 11-14
 -----------------xxxxx----------  w10        # W register (or WZR)
 -----------------xxxxx----------  x10        # X register (or XZR)
 -----------------xxxxx----------  s10        # S register
@@ -169,7 +169,7 @@
 ----------------xxx-------------  ext        # extend type
 ----------------xxxx------------  crn        # 4 bit immediate from 12-15
 ----------------xxxx------------  cond       # condition for CCMN, CCMP
-----------------xxxxxx----------  scale      # encoding of #fbits value in scale field
+?---------------xxxxxx----------  scale      # encoding of #fbits value in scale field
 ----------------xxxxxxxxxxxxxxxx  imm16_0    # imm16 at position 0
 ---------------x----------------  imm1_ew_16 # 1 bit symbolised imm, representing 90 or 270
 --------------?------??????xxxxx  z_imm13_bhsd_0 # sve vector reg, elsz depending on size value encoded within an 13 bit immediate from 5-17
@@ -261,7 +261,7 @@
 ---------????---------xxxxx-----  hsd_immh_reg5    # hsd register, depending on immh field
 ---------????---------xxxxx-----  bhsd_immh_reg5   # bhsd register, depending on immh field
 ---------?x---------x-----------  vindex_SD        # Index for vector with single or double
----------?x---------x-----------  vindex_HS_2lane  # Index for vector with half or single, using 2 lanes
+-?-------?x---------x-----------  vindex_HS_2lane  # Index for vector with half or single, using 2 lanes
 ---------x----------------------  imm12sh    # shift for ADD/SUB (immediate); '0x'
                                              # elements, depending on bit 22 (sz)
 ---------x----------------------  sd_sz      # element width of FP vector reg for single or double
@@ -303,6 +303,14 @@
 --------xx----------------------  bhs_sz     # element width of a vector (8<<bhs_sz)
 --------xx----------------------  bhsd_sz    # element width of a vector (8<<bhsd_sz)
 --------xx----------------------  bd_sz      # element width of a vector (8<<bd_sz)
+--------xx----------------------  bh_sz      # element width of a vector (8<<bh_sz): B or H
+-?-------x----------------------  sd_sz_q    # sd_sz, but no .1D: sz=1 needs Q=1 (bit 30)
+-?------xx----------------------  bhsd_sz_q  # bhsd_sz, but no .1D: size=11 needs Q=1
+-?------xx----------------------  bhs_sz_lanes # across-lanes element size: B, H, or S with Q=1
+-?------xx----------------------  hsd_sz_q   # H, S, or D with Q=1
+-?-------????-------------------  bhsd_immh_sz_q # bhsd_immh_sz, but no .1D: immh[3]=1 needs Q=1
+---------????-------------------  bhs_immh_sz # element size from immh for widening shifts: B, H, S
+-?---------xxxxx----------------  imm5_dup   # DUP/INS element index; x0000 and (x1000, Q=0) reserved
 --------xx----------------------  shift3     # shift type for add/sub (shifted register)
 --------xx----------------------  shift4     # shift type for logical (shifted register)
 --------xx------------------xxxx  p_size_bhsd_0    # sve predicate vector reg, elsz depending on size
