@@ -179,6 +179,31 @@ sig_is_alarm_signal(int sig)
     (APP_HAS_SIGSTACK(info) && (info)->sighand->action[sig] != NULL && \
      TEST(SA_ONSTACK, (info)->sighand->action[sig]->flags))
 
+/* Like the kernel's on_sig_stack(): with SS_AUTODISARM the stack was disarmed on
+ * entry to the handler, so we cannot be on it unless the app set it while on it.
+ */
+static bool
+app_on_sigstack(thread_sig_info_t *info, reg_t sp)
+{
+    if (!APP_HAS_SIGSTACK(info) || TESTANY(SS_AUTODISARM, info->app_sigstack.ss_flags))
+        return false;
+    reg_t base = (reg_t)info->app_sigstack.ss_sp;
+    return sp > base && sp - base <= info->app_sigstack.ss_size;
+}
+
+/* The app's alternate stack as the kernel reports it to code running on sp:
+ * SS_DISABLE, SS_ONSTACK or 0, plus the SS_FLAG_BITS the app set.
+ */
+static void
+get_app_sigstack(thread_sig_info_t *info, reg_t sp, stack_t *stack)
+{
+    *stack = info->app_sigstack;
+    stack->ss_flags =
+        (APP_HAS_SIGSTACK(info) ? (app_on_sigstack(info, sp) ? SS_ONSTACK : 0)
+                                : SS_DISABLE) |
+        (info->app_sigstack.ss_flags & SS_FLAG_BITS);
+}
+
 /* If we only intercept a few signals, we leave whether un-intercepted signals
  * are blocked unchanged and stored in the kernel.  If we intercept all (not
  * quite yet: PR 297033, hence the need for this macro) we emulate the mask for
@@ -2305,27 +2330,21 @@ handle_sigaltstack(dcontext_t *dcontext, const stack_t *stack, stack_t *old_stac
                    reg_t cur_xsp, DR_PARAM_OUT uint *result)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    stack_t local_stack;
-    if (old_stack != NULL) {
-        if (!safe_write_ex(old_stack, sizeof(*old_stack), &info->app_sigstack, NULL)) {
-            *result = EFAULT;
-            return false;
-        }
-    }
+    stack_t local_stack, prior_stack;
+    /* Like the kernel, read the new stack first and report the prior one last. */
     if (stack != NULL) {
-        /* Fail in the same way the kernel does. */
         if (!d_r_safe_read(stack, sizeof(local_stack), &local_stack)) {
             *result = EFAULT;
             return false;
         }
-        if (APP_HAS_SIGSTACK(info)) {
-            /* The app is not allowed to set a new altstack while on the current one. */
-            reg_t cur_sigstk = (reg_t)info->app_sigstack.ss_sp;
-            if (cur_xsp >= cur_sigstk &&
-                cur_xsp < cur_sigstk + info->app_sigstack.ss_size) {
-                *result = EPERM;
-                return false;
-            }
+    }
+    if (old_stack != NULL)
+        get_app_sigstack(info, cur_xsp, &prior_stack);
+    if (stack != NULL) {
+        /* The app is not allowed to set a new altstack while on the current one. */
+        if (app_on_sigstack(info, cur_xsp)) {
+            *result = EPERM;
+            return false;
         }
         uint key_flag = local_stack.ss_flags & ~SS_FLAG_BITS;
         if (key_flag != SS_DISABLE && key_flag != SS_ONSTACK && key_flag != 0) {
@@ -2346,6 +2365,12 @@ handle_sigaltstack(dcontext_t *dcontext, const stack_t *stack, stack_t *old_stac
         LOG(THREAD, LOG_ASYNCH, 2, "Setting app signal stack to " PFX "-" PFX " %d=%s\n",
             local_stack.ss_sp, local_stack.ss_sp + local_stack.ss_size - 1,
             local_stack.ss_flags, (APP_HAS_SIGSTACK(info)) ? "enabled" : "disabled");
+    }
+    if (old_stack != NULL) {
+        if (!safe_write_ex(old_stack, sizeof(*old_stack), &prior_stack, NULL)) {
+            *result = EFAULT;
+            return false;
+        }
     }
     *result = 0;
     return false; /* always cancel syscall */
