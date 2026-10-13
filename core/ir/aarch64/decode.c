@@ -152,7 +152,8 @@ byte *
 decode_raw_cond_branch_zero_target(dcontext_t *dcontext, byte *pc)
 {
     uint enc = *(uint *)pc;
-    return pc + ((enc & 0xffffe0) >> 5 << 2);
+    /* imm19 (bits 23:5) is signed: shift it to the top and back to sign-extend. */
+    return pc + (((int)(enc << 8) >> 13) * 4);
 }
 
 const instr_info_t *

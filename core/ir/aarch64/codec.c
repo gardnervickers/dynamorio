@@ -3847,7 +3847,11 @@ decode_opnd_fpimm8(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 static inline bool
 encode_opnd_fpimm8(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
-    return encode_fpimm8_half(opnd, 16, 5, enc_out);
+    /* The imm8 field and its values are the same at every precision, so use the
+     * single-precision conversion: going through fp16 would require FP16 support
+     * for the v8.0 single/double forms of FMOV.
+     */
+    return encode_fpimm8_single(opnd, 16, 5, enc_out);
 }
 
 /* imm8: an 8 bit uint stitched together from 2 parts of bits 16-18 and 5-9*/

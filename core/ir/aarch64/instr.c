@@ -123,6 +123,8 @@ instr_branch_type(instr_t *cti_instr)
 const char *
 get_opcode_name(int opc)
 {
+    if (opc < 0 || opc > OP_LAST)
+        return "<invalid>";
     return opcode_names[opc];
 }
 
@@ -839,7 +841,14 @@ instr_compute_vector_address(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
         vl_bytes / 8 > sizeof(mc->svep[0]))
         return false;
 
+    /* Gathers/scatters have the governing predicate as src 1; a client-built
+     * instr might not.
+     */
+    if (instr_num_srcs(instr) < 2 || !opnd_is_reg(instr_get_src(instr, 1)))
+        return false;
     const reg_t governing_pred = opnd_get_reg(instr_get_src(instr, 1));
+    if (governing_pred < DR_REG_START_P || governing_pred > DR_REG_STOP_P)
+        return false;
     ASSERT(governing_pred >= DR_REG_START_P && governing_pred <= DR_REG_STOP_P);
     uint64 mask = mc->svep[governing_pred - DR_REG_START_P].u64[0];
 
@@ -915,5 +924,7 @@ instr_get_isa_feature(byte *pc, instr_t *instr)
 const char *
 instr_get_isa_feature_name(uint isa_feature)
 {
+    if (isa_feature >= sizeof(isa_feature_names) / sizeof(isa_feature_names[0]))
+        return "<invalid>";
     return isa_feature_names[isa_feature];
 }

@@ -741,7 +741,10 @@ opnd_create_far_base_disp_ex(reg_id_t seg, reg_id_t base_reg, reg_id_t index_reg
 #elif defined(AARCH64)
     opnd.value.base_disp.pre_index = true;
     opnd.value.base_disp.extend_type = DR_EXTEND_UXTX;
-    opnd.value.base_disp.scaled = false;
+    /* A scaled index is shifted left by log2(scale). */
+    opnd.value.base_disp.scaled = scale > 1;
+    opnd.value.base_disp.scaled_value =
+        scale == 8 ? 3 : (scale == 4 ? 2 : (scale == 2 ? 1 : 0));
 #elif defined(X86)
     opnd.value.base_disp.scale = (byte)scale;
     opnd.value.base_disp.encode_zero_disp = (byte)encode_zero_disp;
@@ -819,6 +822,14 @@ opnd_create_base_disp_aarch64_common(reg_id_t base_reg, reg_id_t index_reg,
     opnd.value.base_disp.element_size = element_size;
     opnd_set_disp_helper(&opnd, disp);
     opnd.aux.flags = flags;
+    /* DR_EXTEND_DEFAULT shares its value with DR_EXTEND_UXTB, which is not a
+     * valid extend for an address index: the default for an index is LSL (UXTX).
+     */
+    if (extend_type == DR_EXTEND_DEFAULT)
+        extend_type = DR_EXTEND_UXTX;
+    opnd.value.base_disp.extend_type = DR_EXTEND_UXTX;
+    opnd.value.base_disp.scaled = false;
+    opnd.value.base_disp.scaled_value = 0;
     if (!opnd_set_index_extend_value(&opnd, extend_type, scaled, shift))
         CLIENT_ASSERT(false, "opnd_create_base_disp_aarch64: invalid extend type");
     return opnd;
@@ -2487,6 +2498,8 @@ get_register_name(reg_id_t reg)
 {
     bool is_global_isa_mode_synthetic =
         dr_get_isa_mode(get_thread_private_dcontext()) == DR_ISA_REGDEPS;
+    if (reg >= DR_REG_AFTER_LAST_VALID_ENUM)
+        return "<invalid>";
     if (is_global_isa_mode_synthetic)
         return d_r_reg_virtual_names[reg];
     return reg_names[reg];
