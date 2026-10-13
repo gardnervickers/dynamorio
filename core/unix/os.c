@@ -5458,6 +5458,9 @@ ignorable_system_call_normalized(int num)
 #    endif
     case SYS_clock_nanosleep:
     case SYS_futex:
+#    ifdef SYS_io_uring_enter
+    case SYS_io_uring_enter:
+#    endif
     /* Used as a lazy trigger. */
     case SYS_rseq:
 #endif
@@ -5664,6 +5667,29 @@ restart_remaining_timeout(os_thread_data_t *ostd, const struct timespec *app_ts,
     return true;
 }
 
+/* Returns whether the syscall about to run may wait with no timeout and has no
+ * temporary signal mask.
+ */
+static bool
+os_syscall_is_unbounded_wait(dcontext_t *dcontext)
+{
+    switch (dcontext->sys_num) {
+    case SYS_futex: {
+        int cmd = (int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK;
+        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
+            sys_param(dcontext, 3) == 0;
+    }
+    case SYS_epoll_pwait: return sys_param(dcontext, 4) == 0 && (int)sys_param(dcontext, 3) < 0;
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2: return sys_param(dcontext, 4) == 0 && sys_param(dcontext, 3) == 0;
+#    endif
+    case SYS_ppoll: return sys_param(dcontext, 3) == 0 && sys_param(dcontext, 2) == 0;
+    case SYS_pselect6: return dcontext->sys_param4 == 0 && sys_param(dcontext, 4) == 0;
+    case SYS_rt_sigtimedwait: return sys_param(dcontext, 2) == 0;
+    default: return false;
+    }
+}
+
 /* For a syscall at our do_syscall gencode that returned -EINTR because our suspend
  * signal interrupted it, returns whether to issue it again, with *x0 the first
  * argument and, if *param > 0, argument *param replaced by *value.  The caller
@@ -5683,6 +5709,13 @@ os_syscall_restart_args(dcontext_t *dcontext, reg_t *x0, int *param, reg_t *valu
     case SYS_pselect6:
         /* The kernel updates ppoll's and pselect6's timeouts in place. */
         return true;
+#    ifdef SYS_io_uring_enter
+    case SYS_io_uring_enter:
+        /* It fails with EINTR only if it submitted nothing.
+         * XXX: an IORING_ENTER_EXT_ARG timeout starts over.
+         */
+        return true;
+#    endif
     case SYS_epoll_pwait: {
         int ms = (int)sys_param(dcontext, 3);
         if (ms <= 0)
@@ -8880,6 +8913,23 @@ pre_system_call(dcontext_t *dcontext)
 
     } /* end switch */
 
+#ifdef LINUX
+    /* A signal that arrived after we left the code cache for this syscall waits
+     * for it to return (handle_system_call() runs non-ignorable syscalls first),
+     * which for a wait without a timeout may be never.  Natively it would have
+     * been delivered first; fail the wait with EINTR instead, as if the signal had
+     * interrupted it, so the signal is delivered now.  Waits with a temporary
+     * mask check for this when installing it.
+     */
+    if (execute_syscall && dcontext->signals_pending > 0 &&
+        os_syscall_is_unbounded_wait(dcontext)) {
+        LOG(THREAD, LOG_SYSCALLS, 2, "signal pending: failing wait %d with EINTR\n",
+            dcontext->sys_num);
+        set_failure_return_val(dcontext, EINTR);
+        DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+        execute_syscall = false;
+    }
+#endif
     dcontext->whereami = old_whereami;
     return execute_syscall;
 }

@@ -2154,9 +2154,12 @@ handle_system_call(dcontext_t *dcontext)
             ASSERT((!is_sigreturn_syscall(dcontext) &&
                     !was_thread_create_syscall(dcontext)) ||
                    !is_ignorable);
-            if (!is_ignorable && dcontext->signals_pending > 0)
+            if (!is_ignorable && dcontext->signals_pending > 0) {
                 dcontext->signals_pending = -1;
-#endif
+                /* Let further instances of the queued signal interrupt the syscall. */
+                signal_unhold_queued_for_syscall(dcontext);
+            }
+#    endif
             enter_fcache(dcontext,
                          (fcache_enter_func_t)
                          /* DEFAULT_ISA_MODE as we want the ISA mode of our gencode */

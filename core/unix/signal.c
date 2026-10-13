@@ -749,7 +749,6 @@ signal_thread_init(dcontext_t *dcontext, void *os_data)
         pend_unit_size, IF_X86_ELSE(AVX_ALIGNMENT, 0),
         false /* cannot have any locking */, false /* -x */, true /* persistent */,
         pend_unit_size * DYNAMO_OPTION(max_pending_signals));
-    info->pending_capacity = DYNAMO_OPTION(max_pending_signals);
 
 #ifdef HAVE_SIGALTSTACK
     /* set up alternate stack
@@ -2793,6 +2792,25 @@ signal_exec_mask(dcontext_t *dcontext)
     kernel_sigset_t mask = info->app_sigblocked;
     kernel_sigdelset(&mask, SUSPEND_SIGNAL);
     sigprocmask_syscall(SIG_SETMASK, &mask, NULL, sizeof(mask));
+}
+
+/* We are about to run a syscall although a signal is queued for delivery
+ * (handle_system_call()): stop holding further instances of queued signals in the
+ * kernel, so one can still interrupt the syscall if it blocks.
+ */
+void
+signal_unhold_queued_for_syscall(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!DYNAMO_OPTION(intercept_all_signals) || info == NULL || IS_CLIENT_THREAD(dcontext))
+        return;
+    kernel_sigset_t kmask;
+    kernel_sigemptyset(&kmask);
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (sig_kernel_blockable(sig) && kernel_sigismember(&info->app_sigblocked, sig))
+            kernel_sigaddset(&kmask, sig);
+    }
+    sigprocmask_syscall(SIG_SETMASK, &kmask, NULL, sizeof(kmask));
 }
 
 /* In a signal handler: sets the mask that the handler's sigreturn restores. */
@@ -5835,11 +5853,11 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             LOG(THREAD, LOG_ASYNCH, 2, "blocked signal %d left pending in the kernel\n",
                 sig);
             kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
-        } else if (!sig_is_real_time(sig) && info->sigpending[sig] != NULL &&
-                   (blocked || kernel_blockable)) {
+        } else if (!sig_is_real_time(sig) && info->sigpending[sig] != NULL && blocked) {
             /* Like the kernel, keep one pending instance of a standard signal.
-             * (Further instances of a kernel-blockable signal normally wait in
-             * the kernel, blocked while we hold this one.)
+             * Unblocked, we keep two (below): the one natively being handled and
+             * one pending.  (Further instances of a kernel-blockable signal
+             * normally wait in the kernel, blocked while we hold one.)
              * For clients, we document that we do not pass to them
              * unless we're prepared to deliver to app.  We would have
              * to change our model to pass them non-final-translated
@@ -5848,11 +5866,10 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
              */
             LOG(THREAD, LOG_ASYNCH, 3,
                 "\tnon-rt signal already in queue, ignoring this one!\n");
-        } else if (info->num_pending >= info->pending_capacity) {
-            /* Our special heap is full and getting a new unit takes locks, which
-             * is unsafe here: receive_pending_signal() grows it ahead of time but
-             * a burst can still fill it.  The kernel can keep a blockable signal
-             * for us until we have delivered some of the queued ones.
+        } else if (info->num_pending >= DYNAMO_OPTION(max_pending_signals)) {
+            /* Our special heap is full, and getting a new unit takes locks, which
+             * is unsafe here (and fails for our large entries).  The kernel can keep
+             * a blockable signal for us until we have delivered queued ones.
              */
             if (kernel_blockable && requeue_signal_in_kernel(sig, &frame->info)) {
                 LOG(THREAD, LOG_ASYNCH, 2,
@@ -5938,7 +5955,9 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 tail = &(*tail)->next;
             *tail = pend;
 
-            /* Further instances wait in the kernel until we deliver this one. */
+            /* Further instances wait in the kernel until we deliver this one
+             * (or enter a syscall first: signal_unhold_queued_for_syscall()).
+             */
             if (kernel_blockable)
                 kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
         }
@@ -7942,27 +7961,6 @@ receive_pending_signal(dcontext_t *dcontext)
     info->accessing_sigpending = true;
     /* barrier to prevent compiler from moving the above write below the loop */
     __asm__ __volatile__("" : : : "memory");
-    if (info->num_pending + 2 >= info->pending_capacity) {
-        /* We're close to the limit: proactively get a new unit while it's safe
-         * to acquire locks.  We do that by pushing over the edge.
-         * record_pending_signal() does not allocate past pending_capacity.
-         */
-        info->multiple_pending_units = true;
-        SYSLOG_INTERNAL_WARNING_ONCE("many pending signals: asking for another "
-                                     "special unit");
-        sigpending_t *list = NULL;
-        for (int i = info->num_pending; i <= info->pending_capacity; i++) {
-            sigpending_t *temp = special_heap_alloc(info->sigheap);
-            temp->next = list;
-            list = temp;
-        }
-        while (list != NULL) {
-            sigpending_t *temp = list;
-            list = list->next;
-            special_heap_free(info->sigheap, temp);
-        }
-        info->pending_capacity += DYNAMO_OPTION(max_pending_signals);
-    }
     for (sig = 1; sig <= MAX_SIGNUM; sig++) {
         if (info->sigpending[sig] != NULL) {
             bool executing = true;
@@ -9362,10 +9360,18 @@ restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
     sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
     reg_t x0, value;
     int param;
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     if (!get_at_syscall(dcontext) ||
         !is_after_syscall_address(dcontext, (cache_pc)sc->SC_XIP) ||
-        (ptr_int_t)sc->SC_RETURN_REG != -EINTR || dcontext->signals_pending > 0 ||
-        !os_syscall_restart_args(dcontext, &x0, &param, &value))
+        (ptr_int_t)sc->SC_RETURN_REG != -EINTR)
+        return;
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (info->sigpending[sig] != NULL &&
+            (info->sigpending[sig]->unblocked_at_receipt ||
+             !kernel_sigismember(&info->app_sigblocked, sig)))
+            return; /* An app signal to deliver ended the syscall. */
+    }
+    if (!os_syscall_restart_args(dcontext, &x0, &param, &value))
         return;
     LOG(THREAD, LOG_ASYNCH, 2, "restarting syscall %d interrupted by our signal\n",
         dcontext->sys_num);
