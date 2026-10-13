@@ -1385,6 +1385,9 @@ mangle_direct_call(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
 /* Insert instructions to perform pointer authentication on the target of a combined
  * branch and authenticate instruction.
  * `instr` must be a direct/indirect branch instruction with pointer authentication.
+ * On entry IBL_TARGET_REG holds the (signed) branch target and the app value of
+ * IBL_TARGET_REG is in IBL_TARGET_SLOT.  On exit IBL_TARGET_REG holds the
+ * authenticated target.
  */
 static void
 insert_authenticate_pointer(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
@@ -1417,48 +1420,89 @@ insert_authenticate_pointer(dcontext_t *dcontext, instrlist_t *ilist, instr_t *i
      * differently so we need to perform the authentication ourselves (see below).
      */
     ASSERT(proc_has_feature(FEATURE_PAUTH));
-    if (proc_has_feature(FEATURE_FPACCOMBINE) || !proc_has_feature(FEATURE_FPAC)) {
-        switch (instr_get_opcode(instr)) {
-        case OP_retaa:
-            PRE(ilist, instr,
-                INSTR_XL8(INSTR_CREATE_autia(dcontext, opnd_create_reg(IBL_TARGET_REG),
-                                             opnd_create_reg(DR_REG_SP)),
-                          instr_get_app_pc(instr)));
-            break;
-        case OP_retab:
-            PRE(ilist, instr,
-                INSTR_XL8(INSTR_CREATE_autib(dcontext, opnd_create_reg(IBL_TARGET_REG),
-                                             opnd_create_reg(DR_REG_SP)),
-                          instr_get_app_pc(instr)));
-            break;
-        case OP_braa:
-        case OP_blraa:
-            PRE(ilist, instr,
-                INSTR_XL8(INSTR_CREATE_autia(dcontext, opnd_create_reg(IBL_TARGET_REG),
-                                             instr_get_src(instr, 1)),
-                          instr_get_app_pc(instr)));
-            break;
-        case OP_brab:
-        case OP_blrab:
-            PRE(ilist, instr,
-                INSTR_XL8(INSTR_CREATE_autib(dcontext, opnd_create_reg(IBL_TARGET_REG),
-                                             instr_get_src(instr, 1)),
-                          instr_get_app_pc(instr)));
-            break;
-        case OP_braaz:
-        case OP_blraaz:
-            PRE(ilist, instr,
-                INSTR_XL8(INSTR_CREATE_autiza(dcontext, opnd_create_reg(IBL_TARGET_REG)),
-                          instr_get_app_pc(instr)));
-            break;
-        case OP_brabz:
-        case OP_blrabz:
-            PRE(ilist, instr,
-                INSTR_XL8(INSTR_CREATE_autizb(dcontext, opnd_create_reg(IBL_TARGET_REG)),
-                          instr_get_app_pc(instr)));
-            break;
-        default: ASSERT_NOT_REACHED();
+    const int opc = instr_get_opcode(instr);
+    bool key_a;
+    reg_id_t modifier_reg = DR_REG_NULL; /* DR_REG_NULL for a zero modifier. */
+    switch (opc) {
+    case OP_retaa:
+        key_a = true;
+        modifier_reg = DR_REG_SP;
+        break;
+    case OP_retab:
+        key_a = false;
+        modifier_reg = DR_REG_SP;
+        break;
+    case OP_braa:
+    case OP_blraa:
+    case OP_brab:
+    case OP_blrab:
+        key_a = (opc == OP_braa || opc == OP_blraa);
+        ASSERT(opnd_is_reg(instr_get_src(instr, 1)));
+        modifier_reg = opnd_get_reg(instr_get_src(instr, 1));
+        break;
+    case OP_braaz:
+    case OP_blraaz: key_a = true; break;
+    case OP_brabz:
+    case OP_blrabz: key_a = false; break;
+    default: ASSERT_NOT_REACHED(); return;
+    }
+
+    /* The modifier must be the app value of the register, but two registers do not
+     * hold their app values here: IBL_TARGET_REG already holds the branch target, and
+     * the stolen register holds DR's TLS base (stolen register mangling is not applied
+     * to indirect branches).
+     *
+     * If the modifier is IBL_TARGET_REG we move the target to a scratch register and
+     * restore the app value of IBL_TARGET_REG to use as the modifier, and move the
+     * authenticated target back at the end.  If the modifier is the stolen register we
+     * load its app value into a scratch register.  In both cases every register is
+     * either holding its app value or is spilled (in a slot the translation code
+     * knows about) at the AUTI* instruction which can fault, so the fault can be
+     * translated.
+     */
+    reg_id_t target_reg = IBL_TARGET_REG;
+    reg_id_t swap_reg = DR_REG_NULL, modifier_scratch = DR_REG_NULL;
+    ushort swap_slot = 0, modifier_slot = 0;
+    bool swap_restore = false, modifier_restore = false;
+    if (modifier_reg == IBL_TARGET_REG) {
+        swap_reg = pick_scratch_reg(dcontext, instr, IBL_TARGET_REG, DR_REG_NULL,
+                                    DR_REG_NULL, false, &swap_slot, &swap_restore);
+        ASSERT(swap_reg != DR_REG_NULL);
+        if (swap_restore)
+            insert_save_to_tls_if_necessary(dcontext, ilist, instr, swap_reg, swap_slot);
+        PRE(ilist, instr,
+            XINST_CREATE_move(dcontext, opnd_create_reg(swap_reg),
+                              opnd_create_reg(IBL_TARGET_REG)));
+        PRE(ilist, instr,
+            instr_create_restore_from_tls(dcontext, IBL_TARGET_REG, IBL_TARGET_SLOT));
+        target_reg = swap_reg;
+    } else if (modifier_reg == dr_reg_stolen) {
+        modifier_scratch =
+            pick_scratch_reg(dcontext, instr, IBL_TARGET_REG, DR_REG_NULL, DR_REG_NULL,
+                             false, &modifier_slot, &modifier_restore);
+        ASSERT(modifier_scratch != DR_REG_NULL);
+        if (modifier_restore) {
+            insert_save_to_tls_if_necessary(dcontext, ilist, instr, modifier_scratch,
+                                            modifier_slot);
         }
+        PRE(ilist, instr,
+            instr_create_restore_from_tls(dcontext, modifier_scratch,
+                                          TLS_REG_STOLEN_SLOT));
+        modifier_reg = modifier_scratch;
+    }
+    opnd_t target = opnd_create_reg(target_reg);
+
+    if (proc_has_feature(FEATURE_FPACCOMBINE) || !proc_has_feature(FEATURE_FPAC)) {
+        instr_t *auth;
+        if (modifier_reg == DR_REG_NULL) {
+            auth = key_a ? INSTR_CREATE_autiza(dcontext, target)
+                         : INSTR_CREATE_autizb(dcontext, target);
+        } else {
+            opnd_t modifier = opnd_create_reg(modifier_reg);
+            auth = key_a ? INSTR_CREATE_autia(dcontext, target, modifier)
+                         : INSTR_CREATE_autib(dcontext, target, modifier);
+        }
+        PRE(ilist, instr, INSTR_XL8(auth, instr_get_app_pc(instr)));
     } else {
         /* If FEAT_FPAC is implemented, auti* instructions will generate a fault when
          * authentication fails, but combined auth+branch instructions won't.
@@ -1466,93 +1510,51 @@ insert_authenticate_pointer(dcontext_t *dcontext, instrlist_t *ilist, instr_t *i
          * the target pointer and comparing that to the original value.
          * If they match the authentication passes. If they don't match the
          * authentication has failed and we need to insert a 2-bit error code into the
-         * address in IBL_TARGET_REG to leave it with a non-canonical value that should
+         * address in target_reg to leave it with a non-canonical value that should
          * fault when the app tries to branch to it.
          *
-         *     mov      scratch, IBL_TARGET_REG
+         *     mov      scratch, target_reg
          *     xpaci    scratch                          ; Remove PAC
          *     paci*    scratch                          ; Re-sign pointer
-         *     sub      scratch, scratch, IBL_TARGET_REG ; Check addresses match
+         *     sub      scratch, scratch, target_reg     ; Check addresses match
          *                                               ; (avoiding CMP so we don't
          *                                               ; clobber the app's flags)
-         *     xpaci    IBL_TARGET_REG                   ; Remove PAC from target address
+         *     xpaci    target_reg                       ; Remove PAC from target address
          *     cbz      end                              ; Skip inserting error code if
          *                                               ; addresses match
          * insert_error_code:
-         *     and      IBL_TARGET_REG, IBL_TARGET_REG, #error_code_mask
-         *     orr      IBL_TARGET_REG, IBL_TARGET_REG, #error_code
+         *     and      target_reg, target_reg, #error_code_mask
+         *     orr      target_reg, target_reg, #error_code
          * end:
          *     ...
          */
-
-        reg_id_t modifier_reg = DR_REG_NULL;
-        switch (instr_get_opcode(instr)) {
-        case OP_braa:
-        case OP_blraa:
-        case OP_brab:
-        case OP_blrab: modifier_reg = opnd_get_reg(instr_get_src(instr, 1));
-        }
-
         ushort slot;
         bool should_restore;
-        reg_id_t scratch = pick_scratch_reg(dcontext, instr, IBL_TARGET_REG, modifier_reg,
-                                            DR_REG_NULL, true, &slot, &should_restore);
+        reg_id_t scratch = pick_scratch_reg(dcontext, instr, target_reg, modifier_reg,
+                                            IBL_TARGET_REG, true, &slot, &should_restore);
+        ASSERT(scratch != DR_REG_NULL);
         if (should_restore)
             insert_save_to_tls_if_necessary(dcontext, ilist, instr, scratch, slot);
 
-        PRE(ilist, instr,
-            XINST_CREATE_move(dcontext, opnd_create_reg(scratch),
-                              opnd_create_reg(IBL_TARGET_REG)));
+        PRE(ilist, instr, XINST_CREATE_move(dcontext, opnd_create_reg(scratch), target));
         PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, opnd_create_reg(scratch)));
 
-        bool key_a;
-        switch (instr_get_opcode(instr)) {
-        case OP_retaa:
-            key_a = true;
+        if (modifier_reg == DR_REG_NULL) {
             PRE(ilist, instr,
-                INSTR_CREATE_pacia(dcontext, opnd_create_reg(scratch),
-                                   opnd_create_reg(DR_REG_SP)));
-            break;
-        case OP_retab:
-            key_a = false;
+                key_a ? INSTR_CREATE_paciza(dcontext, opnd_create_reg(scratch))
+                      : INSTR_CREATE_pacizb(dcontext, opnd_create_reg(scratch)));
+        } else {
+            opnd_t modifier = opnd_create_reg(modifier_reg);
             PRE(ilist, instr,
-                INSTR_CREATE_pacib(dcontext, opnd_create_reg(scratch),
-                                   opnd_create_reg(DR_REG_SP)));
-            break;
-        case OP_braa:
-        case OP_blraa:
-            key_a = true;
-            PRE(ilist, instr,
-                INSTR_CREATE_pacia(dcontext, opnd_create_reg(scratch),
-                                   instr_get_src(instr, 1)));
-            break;
-        case OP_brab:
-        case OP_blrab:
-            key_a = false;
-            PRE(ilist, instr,
-                INSTR_CREATE_pacib(dcontext, opnd_create_reg(scratch),
-                                   instr_get_src(instr, 1)));
-            break;
-        case OP_braaz:
-        case OP_blraaz:
-            key_a = true;
-            PRE(ilist, instr, INSTR_CREATE_paciza(dcontext, opnd_create_reg(scratch)));
-            break;
-        case OP_brabz:
-        case OP_blrabz:
-            key_a = false;
-            PRE(ilist, instr, INSTR_CREATE_pacizb(dcontext, opnd_create_reg(scratch)));
-            break;
-        default:
-            ASSERT_NOT_REACHED();
-            key_a = true; /* Quell compiler maybe-uninitialized warning. */
+                key_a ? INSTR_CREATE_pacia(dcontext, opnd_create_reg(scratch), modifier)
+                      : INSTR_CREATE_pacib(dcontext, opnd_create_reg(scratch), modifier));
         }
 
         PRE(ilist, instr,
             INSTR_CREATE_sub(dcontext, opnd_create_reg(scratch), opnd_create_reg(scratch),
-                             opnd_create_reg(IBL_TARGET_REG)));
+                             target));
 
-        PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, opnd_create_reg(IBL_TARGET_REG)));
+        PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, target));
 
         instr_t *end_label = INSTR_CREATE_label(dcontext);
         PRE(ilist, instr,
@@ -1566,18 +1568,33 @@ insert_authenticate_pointer(dcontext_t *dcontext, instrlist_t *ilist, instr_t *i
          */
         const uint64 error_code = key_a ? 1 : 2;
         PRE(ilist, instr,
-            INSTR_CREATE_and(dcontext, opnd_create_reg(IBL_TARGET_REG),
-                             opnd_create_reg(IBL_TARGET_REG),
-                             OPND_CREATE_INT(~(3ULL << 53))));
+            INSTR_CREATE_and(dcontext, target, target, OPND_CREATE_INT(~(3ULL << 53))));
         PRE(ilist, instr,
-            INSTR_CREATE_orr(dcontext, opnd_create_reg(IBL_TARGET_REG),
-                             opnd_create_reg(IBL_TARGET_REG),
+            INSTR_CREATE_orr(dcontext, target, target,
                              OPND_CREATE_INT(error_code << 53)));
 
         PRE(ilist, instr, end_label);
 
         if (should_restore)
             PRE(ilist, instr, instr_create_restore_from_tls(dcontext, scratch, slot));
+    }
+
+    if (swap_reg != DR_REG_NULL) {
+        /* IBL_TARGET_REG still holds its app value: re-spill it so the translation
+         * code sees it as spilled again before we overwrite it with the target.
+         */
+        PRE(ilist, instr,
+            instr_create_save_to_tls(dcontext, IBL_TARGET_REG, IBL_TARGET_SLOT));
+        PRE(ilist, instr,
+            XINST_CREATE_move(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                              opnd_create_reg(swap_reg)));
+        if (swap_restore)
+            PRE(ilist, instr,
+                instr_create_restore_from_tls(dcontext, swap_reg, swap_slot));
+    }
+    if (modifier_scratch != DR_REG_NULL && modifier_restore) {
+        PRE(ilist, instr,
+            instr_create_restore_from_tls(dcontext, modifier_scratch, modifier_slot));
     }
 }
 #endif
@@ -3370,32 +3387,59 @@ instr_is_ldstex_mangling(dcontext_t *dcontext, instr_t *inst)
 }
 
 #if defined(AARCH64)
-bool
-instr_is_pauth_branch_mangling(dcontext_t *dcontext, instr_t *inst)
+static bool
+is_pauth_mangling_opcode(int opc)
 {
-    /*
-     * Look for a mov to IBL_TARGET_REG followed by an auti* instruction.
-     */
-    if (!instr_is_our_mangling(inst))
-        return false;
-
-    /* mov is an alias of orr so we actually look for OP_orr. */
-    if (!(instr_get_opcode(inst) == OP_orr &&
-          opnd_get_reg(instr_get_dst(inst, 0)) == IBL_TARGET_REG))
-        return false;
-
-    inst = instr_get_next(inst);
-    if (!instr_is_our_mangling(inst))
-        return false;
-
-    const int op = instr_get_opcode(inst);
-    switch (op) {
+    switch (opc) {
     case OP_autia:
     case OP_autib:
     case OP_autiza:
-    case OP_autizb: return true;
+    case OP_autizb:
+    case OP_pacia:
+    case OP_pacib:
+    case OP_paciza:
+    case OP_pacizb:
+    case OP_xpaci: return true;
     default: return false;
     }
+}
+
+/* Returns whether one of the next (or previous, if !forward) few instructions in
+ * the same mangling sequence as inst is a pointer authentication instruction.
+ */
+static bool
+pauth_opcode_nearby(instr_t *inst, bool forward)
+{
+    /* The sequence is short: bound the search. */
+    const int max_distance = 8;
+    app_pc xl8 = instr_get_translation(inst);
+    instr_t *in = inst;
+    for (int i = 0; i < max_distance; i++) {
+        in = forward ? instr_get_next(in) : instr_get_prev(in);
+        if (in == NULL || !instr_is_our_mangling(in) || instr_get_translation(in) != xl8)
+            return false;
+        if (is_pauth_mangling_opcode(instr_get_opcode(in)))
+            return true;
+    }
+    return false;
+}
+
+bool
+instr_is_pauth_branch_mangling(dcontext_t *dcontext, instr_t *inst)
+{
+    /* Look for the pointer authentication instructions inserted by
+     * insert_authenticate_pointer(), and for register moves (mov is an alias of
+     * orr) in the same mangling sequence, which move the branch target to and from
+     * IBL_TARGET_REG and scratch registers.
+     */
+    if (inst == NULL || !instr_is_our_mangling(inst))
+        return false;
+    if (is_pauth_mangling_opcode(instr_get_opcode(inst)))
+        return true;
+    if (instr_get_opcode(inst) != OP_orr || instr_num_dsts(inst) != 1 ||
+        !opnd_is_reg(instr_get_dst(inst, 0)))
+        return false;
+    return pauth_opcode_nearby(inst, true) || pauth_opcode_nearby(inst, false);
 }
 #endif
 
