@@ -483,6 +483,40 @@ copy_and_re_relativize_raw_instr(dcontext_t *dcontext, instr_t *instr, byte *dst
     /* TODO i#4016: re-relativizing is NYI */
     /* OP_ldstex is always relocatable. */
     ASSERT(instr_raw_bits_valid(instr) || instr_get_opcode(instr) == OP_ldstex);
+    if (instr->length == AARCH64_INSTR_SIZE && instr_operands_valid(instr) &&
+        !TESTANY(INSTR_RAW_BITS_ALLOCATED, instr->flags) &&
+        instr_get_opcode(instr) != OP_ldstex) {
+        /* The raw bits of an instruction decoded from app memory still point
+         * there, and a JIT can rewrite the instruction after we decoded it: its
+         * IC IVAU flushes the fragments that exist, not one we are still building.
+         * Copying the new bytes would put an instruction we did not decode, and
+         * so did not mangle, into the cache: e.g., a callee's verified entry NOP,
+         * decoded and elided into its caller's block and then patched to a direct
+         * branch to a stub, became a PC-relative branch from the cache into
+         * unmapped memory.  Copy the bytes only if they still hold the
+         * instruction we decoded; otherwise encode that instruction, which the
+         * thread could have executed had it run before the patch.
+         */
+        uint word = *(volatile uint *)instr->bytes;
+        decode_info_t di;
+        di.check_reachable = false;
+        uint enc = encode_common(final_pc, instr, &di);
+        if (enc != ENCFAIL && enc != word) {
+            /* The encoder may choose another encoding of the same instruction. */
+            instr_t now;
+            instr_init(dcontext, &now);
+            if (decode_from_copy(dcontext, (byte *)&word, instr->bytes, &now) == NULL ||
+                !instr_same(&now, instr)) {
+                LOG(THREAD, LOG_EMIT, 2,
+                    "app instr " PFX " changed after decode: emitting 0x%08x not 0x%08x\n",
+                    instr->bytes, enc, word);
+                word = enc;
+            }
+            instr_free(dcontext, &now);
+        }
+        *(uint *)dst_pc = word;
+        return dst_pc + AARCH64_INSTR_SIZE;
+    }
     memcpy(dst_pc, instr->bytes, instr->length);
     return dst_pc + instr->length;
 }
