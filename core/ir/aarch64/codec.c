@@ -9855,12 +9855,14 @@ static inline uint
 encode_opnds_tbz(byte *pc, instr_t *instr, uint enc, decode_info_t *di)
 {
     uint xt, imm6, off;
+    if (instr_num_dsts(instr) != 0 || instr_num_srcs(instr) != 3 ||
+        !opnd_is_reg(instr_get_src(instr, 1)))
+        return ENCFAIL;
     reg_id_t reg = opnd_get_reg(instr_get_src(instr, 1));
     /* TBZ accepts a x register in all cases, but will decode it
      * to a w register when imm6 is less than 32 */
     bool is_x_register = reg >= DR_REG_X0 && reg <= DR_REG_X30;
-    if (instr_num_dsts(instr) == 0 && instr_num_srcs(instr) == 3 &&
-        encode_pc_off(&off, 14, pc, instr, instr_get_src(instr, 0), di) &&
+    if (encode_pc_off(&off, 14, pc, instr, instr_get_src(instr, 0), di) &&
         encode_opnd_int(0, 6, false, 0, 0, instr_get_src(instr, 2), &imm6) &&
         encode_opnd_wxn((imm6 > 31) || is_x_register, false, 0, instr_get_src(instr, 1),
                         &xt))
