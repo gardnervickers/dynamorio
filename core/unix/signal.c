@@ -7624,6 +7624,21 @@ execute_default_action(dcontext_t *dcontext, int sig, sigframe_rt_t *frame,
      * If called from execute_handler_from_dispatch(), we need to generate
      * the signal ourselves.
      */
+    if (default_action[sig] != DEFAULT_IGNORE && !forged &&
+        get_process_id() == 1 /* init of its PID namespace */ &&
+        !signal_is_fault(dcontext, sig, pc, (byte *)sc->SC_XSP, &frame->info)) {
+        /* The kernel drops a signal whose action is the default for the init process
+         * of a PID namespace (SIGNAL_UNKILLABLE); only SIGKILL and SIGSTOP from an
+         * ancestor namespace, which we never see, and faults it forces still act.
+         * Our handler made the kernel deliver this one to us, and terminating via
+         * SYS_kill would be dropped and leave this thread spinning in
+         * unexpected_return().  Drop it like the kernel does.
+         */
+        LOG(THREAD, LOG_ASYNCH, 1,
+            "dropping signal %d with default action: process is a PID namespace init\n",
+            sig);
+        return true;
+    }
     if (default_action[sig] != DEFAULT_IGNORE) {
         DEBUG_DECLARE(bool ok =)
         set_default_signal_action(sig);
