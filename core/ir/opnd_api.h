@@ -225,6 +225,19 @@ enum {
     OPSZ_256,  /**< 256 bytes. Needed for RISC-V vector extension with LMUL. */
     OPSZ_192,  /**< 192 bytes. The size of 3 512-bit SVE Z registers. */
     OPSZ_addr, /**< OPSZ_4x8 but varies by the address prefix, not the data prefix. */
+    /* The following sizes complete the set of SVE register sizes for every
+     * architectural vector length (128 to 2048 bits in steps of 128).
+     */
+    OPSZ_18,  /**< 18 bytes. The size of an SVE P register at a 1152-bit VL. */
+    OPSZ_22,  /**< 22 bytes. The size of an SVE P register at a 1408-bit VL. */
+    OPSZ_26,  /**< 26 bytes. The size of an SVE P register at a 1664-bit VL. */
+    OPSZ_30,  /**< 30 bytes. The size of an SVE P register at a 1920-bit VL. */
+    OPSZ_144, /**< 144 bytes. The size of an SVE Z register at a 1152-bit VL. */
+    OPSZ_160, /**< 160 bytes. The size of an SVE Z register at a 1280-bit VL. */
+    OPSZ_176, /**< 176 bytes. The size of an SVE Z register at a 1408-bit VL. */
+    OPSZ_208, /**< 208 bytes. The size of an SVE Z register at a 1664-bit VL. */
+    OPSZ_224, /**< 224 bytes. The size of an SVE Z register at a 1792-bit VL. */
+    OPSZ_240, /**< 240 bytes. The size of an SVE Z register at a 1920-bit VL. */
     /* Add new size here.  Also update size_names[] in decode_shared.c along with
      * the size routines in opnd_shared.c.
      */

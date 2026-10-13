@@ -126,6 +126,10 @@ clients.
 
 The changes between version \DR_VERSION and 11.3.0 include the following compatibility
 changes:
+ - Added #OPSZ_18, #OPSZ_22, #OPSZ_26, #OPSZ_30, #OPSZ_144, #OPSZ_160, #OPSZ_176,
+   #OPSZ_208, #OPSZ_224 and #OPSZ_240 at the end of the OPSZ_ enum, so that AArch64
+   SVE Z and P registers and their memory operands have a size at every vector length
+   accepted by dr_set_vector_length(), including those that are not a power of 2.
  - Added AArch64 instr_get_isa_feature() and instr_get_isa_feature_name() APIs.
  - No compatibility changes yet.
 

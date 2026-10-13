@@ -1982,10 +1982,14 @@ opnd_size_in_bytes(opnd_size_t size)
     case OPSZ_14: return 14;
     case OPSZ_15_of_16:
     case OPSZ_15: return 15;
+    case OPSZ_18: return 18;
     case OPSZ_20: return 20;
+    case OPSZ_22: return 22;
     case OPSZ_24: return 24;
+    case OPSZ_26: return 26;
     case OPSZ_28_short14: /* default size */
     case OPSZ_28: return 28;
+    case OPSZ_30: return 30;
     case OPSZ_32:
     case OPSZ_32_short16: /* default size */ return 32;
     case OPSZ_36: return 36;
@@ -2014,7 +2018,13 @@ opnd_size_in_bytes(opnd_size_t size)
     case OPSZ_120: return 120;
     case OPSZ_124: return 124;
     case OPSZ_128: return 128;
+    case OPSZ_144: return 144;
+    case OPSZ_160: return 160;
+    case OPSZ_176: return 176;
     case OPSZ_192: return 192;
+    case OPSZ_208: return 208;
+    case OPSZ_224: return 224;
+    case OPSZ_240: return 240;
     case OPSZ_256: return 256;
     case OPSZ_512: return 512;
     case OPSZ_VAR_REGLIST: return 0; /* varies to match reglist operand */
@@ -2063,9 +2073,13 @@ opnd_size_from_bytes(uint bytes)
     case 14: return OPSZ_14;
     case 15: return OPSZ_15;
     case 16: return OPSZ_16;
+    case 18: return OPSZ_18;
     case 20: return OPSZ_20;
+    case 22: return OPSZ_22;
     case 24: return OPSZ_24;
+    case 26: return OPSZ_26;
     case 28: return OPSZ_28;
+    case 30: return OPSZ_30;
     case 32: return OPSZ_32;
     case 36: return OPSZ_36;
     case 40: return OPSZ_40;
@@ -2092,7 +2106,13 @@ opnd_size_from_bytes(uint bytes)
     case 120: return OPSZ_120;
     case 124: return OPSZ_124;
     case 128: return OPSZ_128;
+    case 144: return OPSZ_144;
+    case 160: return OPSZ_160;
+    case 176: return OPSZ_176;
     case 192: return OPSZ_192;
+    case 208: return OPSZ_208;
+    case 224: return OPSZ_224;
+    case 240: return OPSZ_240;
     case 256: return OPSZ_256;
     case 512: return OPSZ_512;
     default: return OPSZ_NA;

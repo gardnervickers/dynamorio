@@ -224,9 +224,13 @@ opnd_size_suffix_dr(opnd_size_t opnd_sz)
     case 14: return "14byte";
     case 15: return "15byte";
     case 16: return "16byte";
+    case 18: return "18byte";
     case 20: return "20byte";
+    case 22: return "22byte";
     case 24: return "24byte";
+    case 26: return "26byte";
     case 28: return "28byte";
+    case 30: return "30byte";
     case 32: return "32byte";
     case 36: return "36byte";
     case 40: return "40byte";
@@ -253,6 +257,14 @@ opnd_size_suffix_dr(opnd_size_t opnd_sz)
     case 120: return "120byte";
     case 124: return "124byte";
     case 128: return "128byte";
+    case 144: return "144byte";
+    case 160: return "160byte";
+    case 176: return "176byte";
+    case 192: return "192byte";
+    case 208: return "208byte";
+    case 224: return "224byte";
+    case 240: return "240byte";
+    case 256: return "256byte";
     case 512: return "512byte";
     }
     return "";
