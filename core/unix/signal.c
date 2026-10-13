@@ -1036,11 +1036,16 @@ get_clone_record_isa_mode(void *record)
 void
 set_thread_register_from_clone_record(void *record)
 {
-    /* If record->app_lib_tls_base is not NULL, it means the parent
-     * thread did not setup TLS for the child, and we need clear the
-     * thread register.
+    /* Without CLONE_SETTLS the child starts with the parent's thread register,
+     * whose DR slot points to the parent's TLS: clear it so that this thread has
+     * no dcontext until os_tls_init() gives it its own.  We cannot test
+     * record->app_lib_tls_base for this: it is NULL when the app never set a
+     * thread register (e.g., Go without cgo), and then the inherited register
+     * is the parent's private-library TLS, which we keep in place for such apps.
+     * A child using that register took the parent's dcontext, signal state and
+     * locks as its own during dynamo_thread_init().
      */
-    if (((clone_record_t *)record)->app_lib_tls_base != NULL)
+    if (!TESTANY(CLONE_SETTLS, ((clone_record_t *)record)->clone_flags))
         write_thread_register(NULL);
 }
 
