@@ -2823,6 +2823,8 @@ os_fork_init(dcontext_t *dcontext)
     d_r_mutex_fork_reset(&all_threads_synch_lock);
     d_r_mutex_fork_reset(&thread_initexit_lock);
 
+    signal_fork_clear_sighand(dcontext);
+
     os_fork_post(dcontext, false /*!parent*/);
 
     /* re-populate cached data that contains pid */

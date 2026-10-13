@@ -1513,6 +1513,37 @@ signal_fork_forget_children(dcontext_t *dcontext)
     info->num_unstarted_children = 0;
 }
 
+/* Called in a fork child before anything else in dynamorio_fork_init(): see
+ * os_fork_init().
+ */
+void
+signal_fork_clear_sighand(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!info->fork_clear_sighand)
+        return;
+    /* CLONE_CLEAR_SIGHAND: the kernel reset every handler, ours included, to
+     * SIG_DFL (ignored signals stay ignored). Do the same to the app's handlers
+     * and re-arm ours for the signals we intercept. This must come first: until
+     * then a fault in DR, which handles some of its own faults, would kill us, and
+     * the parent's other threads' cleanup in dynamorio_fork_init() checks that
+     * our SIGSEGV handler is in place.
+     */
+    info->fork_clear_sighand = false;
+    for (int i = 1; i <= MAX_SIGNUM; i++) {
+        kernel_sigaction_t *app = info->sighand->action[i];
+        if (app != NULL && app->handler != (handler_t)SIG_IGN) {
+            handler_free(dcontext, app, sizeof(kernel_sigaction_t));
+            info->sighand->action[i] = NULL;
+        }
+        if (info->sighand->we_intercept[i]) {
+            kernel_sigaction_t act;
+            set_our_handler_sigact(&act, i);
+            sigaction_syscall(i, &act, NULL);
+        }
+    }
+}
+
 void
 signal_fork_init(dcontext_t *dcontext)
 {
@@ -1573,25 +1604,7 @@ signal_fork_init(dcontext_t *dcontext)
     }
     if (info->num_pending > 0)
         check_signals_pending(dcontext, info);
-    if (info->fork_clear_sighand) {
-        /* CLONE_CLEAR_SIGHAND: the kernel reset every handler, ours included, to
-         * SIG_DFL (ignored signals stay ignored). Do the same to the app's
-         * handlers and re-arm ours for the signals we intercept.
-         */
-        info->fork_clear_sighand = false;
-        for (i = 1; i <= MAX_SIGNUM; i++) {
-            kernel_sigaction_t *app = info->sighand->action[i];
-            if (app != NULL && app->handler != (handler_t)SIG_IGN) {
-                handler_free(dcontext, app, sizeof(kernel_sigaction_t));
-                info->sighand->action[i] = NULL;
-            }
-            if (info->sighand->we_intercept[i]) {
-                kernel_sigaction_t act;
-                set_our_handler_sigact(&act, i);
-                sigaction_syscall(i, &act, NULL);
-            }
-        }
-    }
+    ASSERT(!info->fork_clear_sighand);
     if (INTERNAL_OPTION(profile_pcs)) {
         pcprofile_fork_init(dcontext);
     }
