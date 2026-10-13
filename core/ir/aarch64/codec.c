@@ -950,8 +950,11 @@ encode_fpimm8_half(opnd_t opnd, uint abc_offset, uint defgh_offset, OUT uint *en
      * and checking the decoded value against the original value.
      */
     opnd_t decoded_value;
+    /* Compare against the original operand, not its fp16 rounding (fpv.f): an
+     * inexact value must fail rather than encode its nearest fp16 neighbour.
+     */
     if (!decode_fpimm8_half(a, b, c, defgh, &decoded_value) ||
-        (opnd_get_immed_float(decoded_value) != fpv.f)) {
+        (opnd_get_immed_float(decoded_value) != opnd_get_immed_float(opnd))) {
         return false;
     }
 
@@ -2136,9 +2139,13 @@ encode_opnd_zero_fp_const(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint 
     if (!opnd_is_immed_float(opnd))
         return false;
 
-    if (opnd_get_immed_float(opnd) == 0)
-        return true;
-    return false;
+    /* +0.0 only: -0.0 compares equal to 0 but is a different value. */
+    union {
+        float f;
+        uint u;
+    } val;
+    val.f = opnd_get_immed_float(opnd);
+    return val.u == 0;
 }
 
 /* nzcv: flag bit specifier for conditional compare */
@@ -2552,10 +2559,17 @@ encode_float_const_pair(uint pos, float first, float second, opnd_t opnd,
     if (!opnd_is_immed_float(opnd))
         return false;
 
-    const float value = opnd_get_immed_float(opnd);
-    IF_RETURN_FALSE((value != first) && (value != second))
+    /* Compare bit patterns: -0.0 == 0.0 but is not the constant 0.0. */
+    union {
+        float f;
+        uint u;
+    } value, a, b;
+    value.f = opnd_get_immed_float(opnd);
+    a.f = first;
+    b.f = second;
+    IF_RETURN_FALSE((value.u != a.u) && (value.u != b.u))
 
-    *enc_out = (value == first ? 0 : 1) << pos;
+    *enc_out = (value.u == a.u ? 0 : 1) << pos;
     return true;
 }
 
@@ -3045,6 +3059,9 @@ encode_opnd_cmode4_s_sz_msl(uint enc, int opcode, byte *pc, opnd_t opnd,
     int shift = (int)(sz_shft & 0xffffffff);
     if (!TEST(1U << CMODE_MSL_BIT, shift)) // MSL bit should be set
         return false;
+    /* Nothing but the MSL bit and the shift amount. */
+    if ((shift & ~((1 << CMODE_MSL_BIT) | 0xff)) != 0)
+        return false;
     shift &= 0xff;
     const int size = (int)(sz_shft >> 32);
 
@@ -3221,7 +3238,8 @@ encode_opnd_cmode_h_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *en
         return false;
 
     const int64 sz_shft = opnd_get_immed_int(opnd);
-    const int shift = (int)(sz_shft & 0xFF);
+    /* The low word is the shift amount alone (no MSL bit): don't mask it. */
+    const int shift = (int)(sz_shft & 0xffffffff);
     int size = (int)(sz_shft >> 32);
 
     if (size != 16)
@@ -3653,8 +3671,9 @@ encode_opnd_imm13_const(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *e
      * encoding input, so we need to add in the repeating subfields we removed in the
      * decoder.
      */
+    /* The immediate's size is the element size: 8, 16, 32 or 64 bits. */
     const int width = opnd_size_in_bits(opnd_get_size(opnd));
-    if (width == 0 || width > 64 || 64 % width != 0)
+    if (width != 8 && width != 16 && width != 32 && width != 64)
         return false;
 
     if (width != 64) {
@@ -3994,13 +4013,13 @@ decode_opnd_imm4_16p1(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 static inline bool
 encode_opnd_imm4_16p1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
-    ptr_uint_t val;
     if (!opnd_is_immed_int(opnd))
         return false;
-    val = opnd_get_immed_int(opnd) - 1;
-    if (val < 0 || val > ((uint)1 << 4))
+    /* The field holds the value minus 1: 1-16.  Check before subtracting. */
+    const ptr_int_t val = opnd_get_immed_int(opnd);
+    if (val < 1 || val > 16)
         return false;
-    *enc_out = val << 16;
+    *enc_out = (uint)(val - 1) << 16;
     return true;
 }
 
@@ -6333,17 +6352,19 @@ immhb_shf_encode(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out,
     shift_amount = opnd_get_immed_int(opnd);
 
     uint shift_encoding, max_shift;
-    if (min_shift == 0) {
-        shift_encoding = shift_amount + esize;
+    if (min_shift == 0)
         max_shift = esize - 1;
-    } else if (min_shift == 1) {
-        shift_encoding = esize * 2 - shift_amount;
+    else if (min_shift == 1)
         max_shift = esize;
-    } else
+    else
         return false;
-
+    /* Range-check first: the computations below would overflow otherwise. */
     if (shift_amount < min_shift || shift_amount > max_shift)
         return false;
+    if (min_shift == 0)
+        shift_encoding = shift_amount + esize;
+    else
+        shift_encoding = esize * 2 - shift_amount;
 
     *enc_out = (shift_encoding << 16);
 
@@ -8140,6 +8161,9 @@ encode_opnd_mem7_tag(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_
     int disp;
     if (!extract_memtag_disp(opnd, index_type, &disp))
         return false;
+    /* imm7 is narrower than the imm9 extract_memtag_disp() allows for. */
+    if (disp < -64 || disp > 63)
+        return false;
 
     *enc_out |= BITS((uint)disp, 6, 0) << 15;
     return true;
@@ -9751,7 +9775,12 @@ encode_opnds_logic_imm(byte *pc, instr_t *instr, uint enc, decode_info_t *di)
         if (!opnd_is_immed_int(opnd_enc))
             return ENCFAIL;
         imm_enc = opnd_get_immed_int(opnd_enc);
-        if (imm_enc < 0 || imm_enc > 0x1fff || decode_bitmask(imm_enc) != imm_val)
+        /* As in decode_opnds_logic_imm(): reserved fields decode to 0, and a W
+         * register can't use N=1 (a 64-bit element).
+         */
+        if (imm_enc < 0 || imm_enc > 0x1fff || imm_val == 0 ||
+            (!TESTANY(1U << 31, rd) && TESTANY(1U << 12, imm_enc)) ||
+            decode_bitmask(imm_enc) != imm_val)
             return ENCFAIL;
         return (enc | rd | rn | (uint)imm_enc << 10);
     } else {
