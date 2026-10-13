@@ -1681,6 +1681,14 @@ synch_with_all_exit:
      * for THREAD_SYNCH_*_CLEAN where tsd is freed.
      */
     ASSERT(synch_array != NULL);
+    /* A thread we asked to wait for us but did not synch with, as we gave up
+     * after max_loops, must not stay asked: nothing else would undo it, and it would
+     * wait at its next safe spot for good.  (The abort path has undone these.)
+     */
+    for (i = 0; i < num_threads; i++) {
+        if (threads[i]->id != my_id && synch_array[i] == SYNCH_WITH_ALL_NOTIFIED)
+            adjust_wait_at_safe_spot(threads[i]->dcontext, -1);
+    }
     if (!THREAD_SYNCH_IS_CLEANED(desired_synch_state)) { /* else unsafe to access tsd */
         for (i = 0; i < num_threads; i++) {
             if (threads[i]->id != my_id) {
@@ -1747,6 +1755,7 @@ synch_with_all_abort:
                 synch_array[i] = SYNCH_WITH_ALL_NEW;
             } else if (synch_array[i] == SYNCH_WITH_ALL_NOTIFIED) {
                 adjust_wait_at_safe_spot(threads[i]->dcontext, -1);
+                synch_array[i] = SYNCH_WITH_ALL_NEW;
             }
         }
     }
