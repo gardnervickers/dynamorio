@@ -395,6 +395,9 @@ sig_kernel_blockable(int sig);
 static bool
 requeue_signal_to_process(int sig, kernel_siginfo_t *siginfo);
 
+static void
+set_our_kernel_sigact(thread_sig_info_t *info, int sig, kernel_sigaction_t *act);
+
 int
 sigaction_syscall(int sig, kernel_sigaction_t *act, kernel_sigaction_t *oact)
 {
@@ -1544,7 +1547,7 @@ signal_fork_clear_sighand(dcontext_t *dcontext)
         }
         if (info->sighand->we_intercept[i]) {
             kernel_sigaction_t act;
-            set_our_handler_sigact(&act, i);
+            set_our_kernel_sigact(info, i, &act);
             sigaction_syscall(i, &act, NULL);
         }
     }
