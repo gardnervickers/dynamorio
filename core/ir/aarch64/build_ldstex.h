@@ -39,4 +39,9 @@ decode_with_ldstex(dcontext_t *dcontext, byte *pc, instr_t *instr);
 byte *
 decode_cti_with_ldstex(dcontext_t *dcontext, byte *pc, instr_t *instr);
 
+/* Like decode_with_ldstex() but decodes a copy at pc of the code at orig_pc. */
+byte *
+decode_from_copy_with_ldstex(dcontext_t *dcontext, byte *pc, byte *orig_pc,
+                             instr_t *instr);
+
 #endif /* BUILD_LDSTEX_H */

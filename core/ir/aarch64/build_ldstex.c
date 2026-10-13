@@ -278,3 +278,10 @@ decode_cti_with_ldstex(dcontext_t *dcontext, byte *pc, instr_t *instr)
 {
     return decode_with_ldstex(dcontext, pc, instr);
 }
+
+byte *
+decode_from_copy_with_ldstex(dcontext_t *dcontext, byte *pc, byte *orig_pc,
+                             instr_t *instr)
+{
+    return decode_common_with_ldstex(dcontext, pc, orig_pc, instr);
+}

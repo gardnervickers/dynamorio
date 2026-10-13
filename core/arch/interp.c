@@ -3393,17 +3393,47 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             }
 
             bb->instr_start = bb->cur_pc;
+#ifdef AARCH64
+            /* When recreating a selfmod fragment we decode its copy of the app code
+             * (see recreate_bb_ilist()): PC-relative operands such as literal loads
+             * and ADR must still refer to the app pc, or their mangling differs in
+             * length from the emitted fragment and every later cache pc translates
+             * to the wrong app pc.
+             */
+            byte *orig_pc = bb->pretend_pc == NULL
+                ? bb->cur_pc
+                : bb->pretend_pc + (bb->cur_pc - bb->start_pc);
+#endif
             if (bb->full_decode) {
                 /* only going through this do loop once! */
-                bb->cur_pc = IF_AARCH64_ELSE(decode_with_ldstex,
-                                             decode)(dcontext, bb->cur_pc, bb->instr);
+                bb->cur_pc =
+                    IF_AARCH64_ELSE(decode_from_copy_with_ldstex(dcontext, bb->cur_pc,
+                                                                 orig_pc, bb->instr),
+                                    decode(dcontext, bb->cur_pc, bb->instr));
+#ifdef AARCH64
+                /* Decoding from a copy invalidates the raw bits, but mangling (e.g.,
+                 * of a syscall) expects them: keep pointing at the copy, as before.
+                 */
+                if (bb->pretend_pc != NULL) {
+                    instr_set_raw_bits(bb->instr, bb->instr_start,
+                                       (uint)(bb->cur_pc - bb->instr_start));
+                }
+#endif
                 if (bb->record_translation)
                     instr_set_translation(bb->instr, bb->instr_start);
             } else {
                 /* must reset, may go through loop multiple times */
                 instr_reset(dcontext, bb->instr);
-                bb->cur_pc = IF_AARCH64_ELSE(decode_cti_with_ldstex,
-                                             decode_cti)(dcontext, bb->cur_pc, bb->instr);
+                bb->cur_pc =
+                    IF_AARCH64_ELSE(decode_from_copy_with_ldstex(dcontext, bb->cur_pc,
+                                                                 orig_pc, bb->instr),
+                                    decode_cti(dcontext, bb->cur_pc, bb->instr));
+#ifdef AARCH64
+                if (bb->pretend_pc != NULL) {
+                    instr_set_raw_bits(bb->instr, bb->instr_start,
+                                       (uint)(bb->cur_pc - bb->instr_start));
+                }
+#endif
 
 #if defined(ANNOTATIONS) && !(defined(X64) && defined(WINDOWS))
                 /* Quickly check whether this may be a Valgrind annotation. */
