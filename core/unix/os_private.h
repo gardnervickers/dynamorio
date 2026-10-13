@@ -213,6 +213,16 @@ typedef struct _os_thread_data_t {
      */
     void *inherited_app_lib_tls_base;
 #endif
+#ifdef LINUX
+    /* For restarting a syscall that our suspend signal interrupted
+     * (os_syscall_restart_args()): when a timed wait began, the
+     * remaining timeout we pass on a restart, and the parameter it replaces.
+     */
+    uint64 syscall_start_ns;
+    struct timespec syscall_restart_timeout;
+    int syscall_restart_param;
+    reg_t syscall_restart_app_value;
+#endif
 #ifdef X86
     void *app_thread_areas;              /* data structure for app's thread area info */
     struct _os_local_state_t *clone_tls; /* i#2089: a copy for children to inherit */
@@ -399,6 +409,12 @@ handle_post_sigsuspend(dcontext_t *dcontext);
 
 void
 signal_sync_kernel_mask(dcontext_t *dcontext);
+
+bool
+os_syscall_restart_args(dcontext_t *dcontext, reg_t *x0, int *param, reg_t *value);
+
+void
+os_syscall_restart_post(dcontext_t *dcontext);
 
 bool
 handle_pre_sigtimedwait(dcontext_t *dcontext, kernel_sigset_t *set,

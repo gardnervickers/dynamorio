@@ -348,6 +348,11 @@ static bool
 handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
                       kernel_ucontext_t *ucxt, sigframe_rt_t *frame);
 
+#ifdef LINUX
+static void
+restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt);
+#endif
+
 static bool
 handle_nudge_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
                     kernel_ucontext_t *ucxt);
@@ -5401,14 +5406,27 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
     if (get_at_syscall(dcontext))
         syslen = syscall_instr_length(dr_get_isa_mode(dcontext));
 
-    if (info->sighand->action[sig] != NULL &&
-        info->sighand->action[sig]->handler == (handler_t)SIG_IGN
+    if (((info->sighand->action[sig] != NULL &&
+          info->sighand->action[sig]->handler == (handler_t)SIG_IGN) ||
+         /* The kernel discards these too unless they are blocked (and blocked
+          * ones we leave pending in the kernel).
+          */
+         (!blocked && sig_kernel_blockable(sig) &&
+          default_action[sig] == DEFAULT_IGNORE &&
+          (info->sighand->action[sig] == NULL ||
+           info->sighand->action[sig]->handler == (handler_t)SIG_DFL)))
         /* If a client registered a handler, put this in the queue.
          * Races between registering, queueing, and delivering are fine.
          */
         && !dr_signal_hook_exists()) {
         LOG(THREAD, LOG_ASYNCH, 3,
-            "record_pending_signal (%d at pc " PFX "): action is SIG_IGN!\n", sig, pc);
+            "record_pending_signal (%d at pc " PFX "): action is to ignore\n", sig, pc);
+#ifdef LINUX
+        /* Natively an ignored signal does not interrupt a syscall: our handler
+         * did, so issue it again.
+         */
+        restart_syscall_interrupted_by_us(dcontext, ucxt);
+#endif
         ostd->processing_signal--;
         return;
     } else if (blocked) {
@@ -9276,6 +9294,36 @@ is_signal_for_us(kernel_siginfo_t *siginfo, int sig_expecting)
     return true;
 }
 
+#ifdef LINUX
+/* Our suspend signal interrupted a syscall at do_syscall that then failed with
+ * EINTR because a handler ran, where without our signal it would still be
+ * waiting: issue it again (os_syscall_restart_args()).  If an app signal is
+ * waiting for delivery, it ended the syscall and the EINTR stands.
+ */
+static void
+restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
+{
+#    ifdef AARCH64 /* XXX: NYI elsewhere (other argument registers). */
+    sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+    reg_t x0, value;
+    int param;
+    if (!get_at_syscall(dcontext) ||
+        !is_after_syscall_address(dcontext, (cache_pc)sc->SC_XIP) ||
+        (ptr_int_t)sc->SC_RETURN_REG != -EINTR || dcontext->signals_pending > 0 ||
+        !os_syscall_restart_args(dcontext, &x0, &param, &value))
+        return;
+    LOG(THREAD, LOG_ASYNCH, 2, "restarting syscall %d interrupted by our signal\n",
+        dcontext->sys_num);
+    sc->SC_RETURN_REG = x0;
+    /* A stop and continue may have turned the syscall into restart_syscall. */
+    sc->SC_SYSNUM_REG = dcontext->sys_num;
+    if (param > 0)
+        sc->regs[param] = value;
+    sc->SC_XIP -= syscall_instr_length(dr_get_isa_mode(dcontext));
+#    endif
+}
+#endif
+
 /* Returns whether to pass on to app */
 static bool
 handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
@@ -9356,6 +9404,13 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
      */
     dr_where_am_i_t prior_whereami = dcontext->whereami;
     dcontext->whereami = DR_WHERE_SIGNAL_HANDLER;
+
+#ifdef LINUX
+    /* Before anyone reads the context: the synch-all sees the thread back at its
+     * syscall.
+     */
+    restart_syscall_interrupted_by_us(dcontext, ucxt);
+#endif
 
     sig_full_initialize(&sc_full, ucxt);
     ostd->suspended_sigcxt = &sc_full;

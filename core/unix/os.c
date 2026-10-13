@@ -5413,6 +5413,14 @@ ignorable_system_call_normalized(int num)
 #    ifdef SYS_epoll_pwait2
     case SYS_epoll_pwait2:
 #    endif
+    /* Timed waits we restart after our suspend signal interrupts them
+     * (os_syscall_restart_args()).
+     */
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep:
+#    endif
+    case SYS_clock_nanosleep:
+    case SYS_futex:
     /* Used as a lazy trigger. */
     case SYS_rseq:
 #endif
@@ -5530,6 +5538,202 @@ set_syscall_param(dcontext_t *dcontext, int param_num, reg_t new_value)
 {
     *sys_param_addr(dcontext, param_num) = new_value;
 }
+
+#ifdef LINUX
+/* Restarting syscalls that our suspend signal interrupted.
+ *
+ * A synch-all interrupts every thread with our suspend signal, including threads
+ * blocked in a syscall.  As a handler runs, the kernel does not restart the waits
+ * that it restarts after a stop or an ignored signal (those returning
+ * -ERESTARTNOHAND or -ERESTART_RESTARTBLOCK: sigsuspend, ppoll, pselect6, epoll,
+ * nanosleep, clock_nanosleep, timed futex waits) nor rt_sigtimedwait, which fail
+ * with EINTR instead.  The app never sees our signal, so it must not see that
+ * EINTR either: os_syscall_restart_args() gives the arguments to issue such a
+ * syscall again with, adjusting a relative timeout by the time already waited
+ * (syscall_start_ns, from os_syscall_restart_pre()).
+ */
+#    define RESTART_FUTEX_WAIT 0
+#    define RESTART_FUTEX_LOCK_PI 6
+#    define RESTART_FUTEX_WAIT_BITSET 9
+#    define RESTART_FUTEX_WAIT_REQUEUE_PI 11
+#    define RESTART_FUTEX_LOCK_PI2 13
+#    define RESTART_FUTEX_CMD_MASK 0x7f
+#    define RESTART_TIMER_ABSTIME 1
+
+static uint64
+restart_clock_ns(void)
+{
+    struct timespec ts;
+    if (dynamorio_syscall(SYS_clock_gettime, 2, 1 /*CLOCK_MONOTONIC*/, &ts) != 0)
+        return 0;
+    return (uint64)ts.tv_sec * 1000000000ULL + (uint64)ts.tv_nsec;
+}
+
+/* Returns whether a clock measures elapsed time like CLOCK_MONOTONIC does. */
+static bool
+restart_clock_is_wall(int clock)
+{
+    return clock == 0 /*CLOCK_REALTIME*/ || clock == 1 /*CLOCK_MONOTONIC*/ ||
+        clock == 7 /*CLOCK_BOOTTIME*/ || clock == 8 /*CLOCK_REALTIME_ALARM*/ ||
+        clock == 9 /*CLOCK_BOOTTIME_ALARM*/ || clock == 11 /*CLOCK_TAI*/;
+}
+
+/* Called before a syscall: notes when a wait with a relative timeout starts. */
+static void
+os_syscall_restart_pre(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    bool relative = false;
+    ostd->syscall_restart_param = -1;
+    switch (dcontext->sys_num) {
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep: relative = true; break;
+#    endif
+    case SYS_clock_nanosleep:
+        relative = !TESTANY(RESTART_TIMER_ABSTIME, (int)sys_param(dcontext, 1));
+        break;
+    case SYS_futex:
+        relative = ((int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK) ==
+                RESTART_FUTEX_WAIT &&
+            sys_param(dcontext, 3) != 0;
+        break;
+    case SYS_epoll_pwait: relative = (int)sys_param(dcontext, 3) > 0; break;
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2: relative = sys_param(dcontext, 3) != 0; break;
+#    endif
+    case SYS_rt_sigtimedwait: relative = sys_param(dcontext, 2) != 0; break;
+    default: break;
+    }
+    if (relative)
+        ostd->syscall_start_ns = restart_clock_ns();
+}
+
+/* Sets *out to what is left of a relative timeout ts (app memory) begun at
+ * syscall_start_ns; zero once it has expired.
+ */
+static bool
+restart_remaining_timeout(os_thread_data_t *ostd, const struct timespec *app_ts,
+                          struct timespec *out)
+{
+    struct timespec ts;
+    if (!d_r_safe_read(app_ts, sizeof(ts), &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0)
+        return false;
+    uint64 total = (uint64)ts.tv_sec * 1000000000ULL + (uint64)ts.tv_nsec;
+    uint64 now = restart_clock_ns();
+    uint64 elapsed = now > ostd->syscall_start_ns ? now - ostd->syscall_start_ns : 0;
+    uint64 left = total > elapsed ? total - elapsed : 0;
+    out->tv_sec = (time_t)(left / 1000000000ULL);
+    out->tv_nsec = (long)(left % 1000000000ULL);
+    return true;
+}
+
+/* For a syscall at our do_syscall gencode that returned -EINTR because our suspend
+ * signal interrupted it, returns whether to issue it again, with *x0 the first
+ * argument and, if *param > 0, argument *param replaced by *value.  The caller
+ * points the context back at the syscall instruction.  Called in our signal
+ * handler.
+ */
+bool
+os_syscall_restart_args(dcontext_t *dcontext, reg_t *x0, int *param, reg_t *value)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    struct timespec *buf = &ostd->syscall_restart_timeout;
+    *x0 = sys_param(dcontext, 0);
+    *param = -1;
+    switch (dcontext->sys_num) {
+    case SYS_rt_sigsuspend:
+    case SYS_ppoll:
+    case SYS_pselect6:
+        /* The kernel updates ppoll's and pselect6's timeouts in place. */
+        return true;
+    case SYS_epoll_pwait: {
+        int ms = (int)sys_param(dcontext, 3);
+        if (ms <= 0)
+            return true;
+        uint64 now = restart_clock_ns();
+        uint64 elapsed = now > ostd->syscall_start_ns ? now - ostd->syscall_start_ns : 0;
+        uint64 total = (uint64)ms * 1000000ULL;
+        *param = 3;
+        /* Round up, as the kernel does. */
+        *value = total > elapsed ? (reg_t)((total - elapsed + 999999) / 1000000) : 0;
+        break;
+    }
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+        if (sys_param(dcontext, 3) == 0)
+            return true;
+        if (!restart_remaining_timeout(ostd, (struct timespec *)sys_param(dcontext, 3),
+                                       buf))
+            return false;
+        *param = 3;
+        *value = (reg_t)buf;
+        break;
+#    endif
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep:
+        if (!restart_remaining_timeout(ostd, (struct timespec *)sys_param(dcontext, 0),
+                                       buf))
+            return false;
+        *x0 = (reg_t)buf;
+        return true;
+#    endif
+    case SYS_clock_nanosleep:
+        if (TESTANY(RESTART_TIMER_ABSTIME, (int)sys_param(dcontext, 1)) ||
+            !restart_clock_is_wall((int)sys_param(dcontext, 0)))
+            return true;
+        if (!restart_remaining_timeout(ostd, (struct timespec *)sys_param(dcontext, 2),
+                                       buf))
+            return false;
+        *param = 2;
+        *value = (reg_t)buf;
+        break;
+    case SYS_futex: {
+        int cmd = (int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK;
+        if (cmd == RESTART_FUTEX_WAIT_BITSET || cmd == RESTART_FUTEX_WAIT_REQUEUE_PI ||
+            cmd == RESTART_FUTEX_LOCK_PI || cmd == RESTART_FUTEX_LOCK_PI2)
+            return true; /* Absolute timeouts. */
+        if (cmd != RESTART_FUTEX_WAIT)
+            return false;
+        if (sys_param(dcontext, 3) == 0)
+            return true;
+        if (!restart_remaining_timeout(ostd, (struct timespec *)sys_param(dcontext, 3),
+                                       buf))
+            return false;
+        *param = 3;
+        *value = (reg_t)buf;
+        break;
+    }
+    case SYS_rt_sigtimedwait:
+        if (sys_param(dcontext, 2) == 0)
+            return true;
+        if (!restart_remaining_timeout(ostd, (struct timespec *)sys_param(dcontext, 2),
+                                       buf))
+            return false;
+        *param = 2;
+        *value = (reg_t)buf;
+        break;
+    default: return false;
+    }
+    if (*param > 0 && ostd->syscall_restart_param < 0) {
+        /* The kernel keeps the register we change; put back the app's value. */
+        ostd->syscall_restart_param = *param;
+        ostd->syscall_restart_app_value = sys_param(dcontext, *param);
+    }
+    return true;
+}
+
+/* After a syscall: undoes a parameter change made to restart it. */
+void
+os_syscall_restart_post(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (ostd->syscall_restart_param > 0) {
+        set_syscall_param(dcontext, ostd->syscall_restart_param,
+                          ostd->syscall_restart_app_value);
+        ostd->syscall_restart_param = -1;
+    }
+}
+#endif /* LINUX */
 
 static inline bool
 syscall_successful(priv_mcontext_t *mc, int normalized_sysnum)
@@ -7295,6 +7499,8 @@ pre_system_call(dcontext_t *dcontext)
     }
 #endif
 
+    IF_LINUX(os_syscall_restart_pre(dcontext));
+
     switch (dcontext->sys_num) {
 
     case SYSNUM_EXIT_PROCESS:
@@ -9016,6 +9222,8 @@ post_system_call(dcontext_t *dcontext)
 
     old_whereami = dcontext->whereami;
     dcontext->whereami = DR_WHERE_SYSCALL_HANDLER;
+
+    IF_LINUX(os_syscall_restart_post(dcontext));
 
 #if defined(LINUX) && defined(X86)
     /* PR 313715: restore xbp since for some vsyscall sequences that use
