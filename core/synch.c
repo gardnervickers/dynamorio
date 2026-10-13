@@ -1066,6 +1066,11 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
                 STATS_INC(synch_yields_for_exiting_thread);
             }
         });
+        if (trec != NULL && first_loop) {
+            /* Before any break below: the exit path undoes this. */
+            adjust_wait_at_safe_spot(trec->dcontext, 1);
+            first_loop = false;
+        }
 #ifdef UNIX
         if (trec != NULL && trec->execve) {
             /* i#237/PR 498284: clean up vfork "threads" that invoked execve.
@@ -1077,10 +1082,6 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
         }
 #endif
         if (trec != NULL) {
-            if (first_loop) {
-                adjust_wait_at_safe_spot(trec->dcontext, 1);
-                first_loop = false;
-            }
 #ifdef UNIX
             /* A vfork parent cannot be suspended until its child execs or exits,
              * which may wait on this very synch: count it as synched unless it
@@ -1807,6 +1808,18 @@ end_synch_with_all_threads(thread_record_t **threads, uint num_threads, bool res
 void
 translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t synch_state)
 {
+#ifdef UNIX
+    if (tr->execve) {
+        /* i#237: synch_with_thread() counts a vfork child that has invoked execve
+         * as synched without suspending it (a signal could kill the new image), so
+         * it has no context to translate, and it runs no code from the cache
+         * unless its execve fails.
+         */
+        LOG(THREAD_GET, LOG_SYNCH, 2,
+            "translate_from_synchall_to_dispatch: " TIDFMT " is in execve\n", tr->id);
+        return;
+    }
+#endif
     /* we do not have to align priv_mcontext_t */
     priv_mcontext_t *mc = global_heap_alloc(sizeof(*mc) HEAPACCT(ACCT_OTHER));
     bool free_cxt = true;

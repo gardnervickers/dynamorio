@@ -3997,6 +3997,13 @@ os_thread_resume(thread_record_t *tr)
         d_r_mutex_unlock(&ostd->suspend_lock);
         return true;
     }
+    if (ostd->suspend_count == 0 && tr->execve) {
+        /* synch_with_thread() counted this vfork child, in execve, as synched
+         * without suspending it.
+         */
+        d_r_mutex_unlock(&ostd->suspend_lock);
+        return true;
+    }
     ASSERT(ostd->suspend_count > 0);
     /* PR 479750: if do get here and target is not suspended then abort
      * to avoid possible deadlocks
