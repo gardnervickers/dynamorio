@@ -2037,6 +2037,8 @@ signal_reinstate_handlers(dcontext_t *dcontext, bool ignore_alarm)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     int i;
+    kernel_sigset_t cur_mask;
+    sigprocmask_syscall(SIG_SETMASK, NULL, &cur_mask, sizeof(cur_mask));
     for (i = 1; i <= MAX_SIGNUM; i++) {
         bool skip = false;
         if (!info->sighand->we_intercept[i]) {
@@ -2057,7 +2059,13 @@ signal_reinstate_handlers(dcontext_t *dcontext, bool ignore_alarm)
         }
         if (skip)
             continue;
-        if (sig_is_alarm_signal(i) && ignore_alarm) {
+        /* We ignore all delayable and not just sig_is_alarm_signal() to avoid
+         * as many signal-during-init issues as possible.
+         * Not the blocked ones, though: they cannot arrive during init, and
+         * ignoring a signal discards its pending instances, such as those the
+         * app had blocked and pending when it called execve.
+         */
+        if (can_always_delay[i] && ignore_alarm && !kernel_sigismember(&cur_mask, i)) {
             LOG(THREAD, LOG_ASYNCH, 2, "\tignoring %d initially\n", i);
             intercept_signal_ignore_initially(dcontext, info, i);
         } else {
@@ -2596,19 +2604,25 @@ signal_swap_mask(dcontext_t *dcontext, bool to_app)
                 ATOMIC_INC(int, info->sighand->threads_unmasked[i]);
         }
         d_r_mutex_lock(&info->sigblocked_lock);
-        if (info->app_sigblocked_inherited) {
+        if (info->app_sigblocked_inherited && DYNAMO_OPTION(intercept_all_signals) &&
+            !IS_CLIENT_THREAD(dcontext)) {
             /* A new thread: keep the mask signal_thread_inherit() took from its
-             * parent, plus anything the kernel mask really blocks.
+             * parent's app mask. The kernel mask it inherited is close but not
+             * the same: it lacks app-blocked signals we never block in the kernel
+             * and holds signals we had queued for the parent.
+             * signal_sync_kernel_mask() below derives the kernel mask from it.
              */
-            kernel_sigset_t kernel_blocked;
-            unblock_all_signals(&kernel_blocked);
-            for (int i = 1; i <= MAX_SIGNUM; i++) {
-                if (kernel_sigismember(&kernel_blocked, i))
-                    kernel_sigaddset(&info->app_sigblocked, i);
-            }
-            info->app_sigblocked_inherited = false;
+        } else if (DYNAMO_OPTION(intercept_all_signals) && !IS_CLIENT_THREAD(dcontext)) {
+            /* Read the app's mask without unblocking anything: signals the app
+             * blocks stay pending in the kernel (signal_sync_kernel_mask() below
+             * unblocks the rest), where unblocking them all for a moment would hand
+             * those already pending, e.g. across an execve, to us.
+             */
+            sigprocmask_syscall(SIG_SETMASK, NULL, &info->app_sigblocked,
+                                sizeof(info->app_sigblocked));
         } else
             unblock_all_signals(&info->app_sigblocked);
+        info->app_sigblocked_inherited = false;
         d_r_mutex_unlock(&info->sigblocked_lock);
         for (int i = 1; i <= MAX_SIGNUM; i++) {
             if (!EMULATE_SIGMASK(info, i))
