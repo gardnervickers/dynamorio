@@ -991,6 +991,17 @@ d_r_os_init(void)
      */
     suspend_signum = IF_MACOS_ELSE(SIGFPE, NUDGESIG_SIGNUM);
 #ifdef LINUX
+    /* A standard signal does not queue: while one instance is pending the kernel
+     * drops another of the same number.  Sharing SIGILL with an app that sends it
+     * (sigqueue, tgkill) thus lost either the app's signal or our suspend, and a
+     * lost suspend hangs the synch-all waiting for it.  A realtime signal queues
+     * every instance, and we still tell ours apart from the app's by the si_errno
+     * payload of the SI_QUEUE siginfo (is_signal_for_us()).  We take the last one,
+     * which libc leaves to the app and which apps rarely use.  Nudges keep
+     * NUDGESIG_SIGNUM.
+     */
+    if (is_sigqueue_supported())
+        suspend_signum = MAX_SIGNUM;
     if (!IS_STRING_OPTION_EMPTY(xarch_root)) {
         /* We assume we're under QEMU. */
         LOG(GLOBAL, LOG_TOP | LOG_ASYNCH, 1, "switching suspend signal to SIGSTKFLT\n");
@@ -3846,6 +3857,10 @@ send_suspend_signal(thread_record_t *tr, pid_t pid, thread_id_t tid)
     kernel_siginfo_t info;
     if (!create_nudge_signal_payload(&info, 0, NUDGE_IS_SUSPEND, 0, 0))
         return false;
+    /* The payload is laid out for NUDGESIG_SIGNUM; is_signal_for_us() matches the
+     * number too.
+     */
+    info.si_signo = SUSPEND_SIGNAL;
     ptr_int_t res =
         dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, pid, tid, SUSPEND_SIGNAL, &info);
     return (res >= 0);
