@@ -3268,7 +3268,11 @@ create_ld_from_ldex(dcontext_t *dcontext, instr_t *ldex)
     case OP_ldaxp:
         /* There is no OP_ldap so we engage the monitor.  Should we add CLREX? */
         return INSTR_CREATE_ldaxp(dcontext, regop, instr_get_dst(ldex, 1), memop);
-    case OP_ldxp: return INSTR_CREATE_ldp(dcontext, regop, instr_get_dst(ldex, 1), memop);
+    case OP_ldxp:
+        /* An exclusive pair must be aligned to its total size, which no plain pair
+         * load checks, so we keep the exclusive like OP_ldaxp above.
+         */
+        return INSTR_CREATE_ldxp(dcontext, regop, instr_get_dst(ldex, 1), memop);
     case OP_ldaxr: return INSTR_CREATE_ldar(dcontext, regop, memop);
     case OP_ldxr: return INSTR_CREATE_ldr(dcontext, regop, memop);
     case OP_ldaxrb: return INSTR_CREATE_ldarb(dcontext, regop, memop);
@@ -3811,6 +3815,20 @@ mangle_exclusive_load(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     }
     /* Replace the exclusive load with a non-exclusive version. */
     instr_t *ld_nonex = create_ld_from_ldex(dcontext, instr);
+#ifdef AARCH64
+    if (instr_num_dsts(instr) == 1) {
+        /* An exclusive load raises an alignment fault for a misaligned address,
+         * which a plain load does not: first load exclusively into the zero
+         * register to raise that fault for the app instr.
+         */
+        instr_t *check = instr_clone(dcontext, instr);
+        opnd_t dst = instr_get_dst(check, 0);
+        instr_set_dst(
+            check, 0,
+            opnd_create_reg(opnd_get_size(dst) == OPSZ_8 ? DR_REG_XZR : DR_REG_WZR));
+        PRE(ilist, instr, check);
+    }
+#endif
     instrlist_preinsert(ilist, instr, ld_nonex);
     if (stolen_swap_reg != DR_REG_NULL) {
         if (instr_writes_to_reg(instr, stolen_swap_reg, DR_QUERY_INCLUDE_COND_DSTS)) {
