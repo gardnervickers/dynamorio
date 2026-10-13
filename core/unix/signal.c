@@ -2780,6 +2780,21 @@ signal_sync_kernel_mask(dcontext_t *dcontext)
     sigprocmask_syscall(SIG_SETMASK, &kmask, NULL, sizeof(kmask));
 }
 
+/* Just before execve: the new image starts with the app's mask, as natively, and
+ * not with the signals we were holding blocked (except our suspend signal, which a
+ * synch-all must still be able to send us until the execve completes).
+ */
+void
+signal_exec_mask(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!DYNAMO_OPTION(intercept_all_signals) || info == NULL)
+        return;
+    kernel_sigset_t mask = info->app_sigblocked;
+    kernel_sigdelset(&mask, SUSPEND_SIGNAL);
+    sigprocmask_syscall(SIG_SETMASK, &mask, NULL, sizeof(mask));
+}
+
 /* In a signal handler: sets the mask that the handler's sigreturn restores. */
 static void
 set_frame_kernel_sigmask(thread_sig_info_t *info, kernel_ucontext_t *ucxt)

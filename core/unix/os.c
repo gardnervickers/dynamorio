@@ -7957,7 +7957,8 @@ pre_system_call(dcontext_t *dcontext)
         if (ret != 0) {
             execute_syscall = false;
             set_failure_return_val(dcontext, ret);
-        }
+        } else
+            signal_exec_mask(dcontext);
         break;
     }
 
@@ -9713,6 +9714,7 @@ post_system_call(dcontext_t *dcontext)
         ASSERT(result < 0);
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: execve failed\n");
         handle_execve_post(dcontext);
+        signal_sync_kernel_mask(dcontext);
         /* Don't 'break' as we have an ASSERT(success) just below
          * the switch(). */
         goto exit_post_system_call;

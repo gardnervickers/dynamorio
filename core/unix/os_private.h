@@ -418,6 +418,9 @@ handle_post_sigsuspend(dcontext_t *dcontext);
 void
 signal_sync_kernel_mask(dcontext_t *dcontext);
 
+void
+signal_exec_mask(dcontext_t *dcontext);
+
 bool
 os_syscall_restart_args(dcontext_t *dcontext, reg_t *x0, int *param, reg_t *value);
 
