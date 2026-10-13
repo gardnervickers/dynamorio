@@ -2155,9 +2155,14 @@ handle_system_call(dcontext_t *dcontext)
                     !was_thread_create_syscall(dcontext)) ||
                    !is_ignorable);
             if (!is_ignorable && dcontext->signals_pending > 0) {
+                /* A wait that may block indefinitely would hold the signal back
+                 * for that long, with further instances blocked in the kernel while
+                 * we hold this one.  Its pre-syscall handling is safe to repeat, so
+                 * deliver the signal first, as natively, and issue it again after.
+                 */
+                if (IF_LINUX_ELSE(os_syscall_is_unbounded_wait(dcontext), false))
+                    break;
                 dcontext->signals_pending = -1;
-                /* Let further instances of the queued signal interrupt the syscall. */
-                signal_unhold_queued_for_syscall(dcontext);
             }
 #    endif
             enter_fcache(dcontext,
@@ -2181,9 +2186,10 @@ handle_system_call(dcontext_t *dcontext)
             set_at_syscall(dcontext, false);
             dcontext->next_tag = saved_next_tag;
             set_next_tag_to_prior_syscall(dcontext);
-            /* This only happens for ignorable syscalls so there is no pre-syscall
-             * handling to undo or worry about dupilcating when we re-attempt to
-             * execute it after the app's signal handler.
+            /* This only happens for ignorable syscalls and the waits of
+             * os_syscall_is_unbounded_wait(), so there is no pre-syscall handling to
+             * undo or worry about duplicating when we re-attempt to execute it after
+             * the app's signal handler.
              */
             LOG(THREAD, LOG_DISPATCH, 2,
                 "Signal arrived in DR: aborting ignorable syscall enter; interrupted " PFX

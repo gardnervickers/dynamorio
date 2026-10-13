@@ -2808,25 +2808,6 @@ signal_exec_mask(dcontext_t *dcontext)
     sigprocmask_syscall(SIG_SETMASK, &mask, NULL, sizeof(mask));
 }
 
-/* We are about to run a syscall although a signal is queued for delivery
- * (handle_system_call()): stop holding further instances of queued signals in the
- * kernel, so one can still interrupt the syscall if it blocks.
- */
-void
-signal_unhold_queued_for_syscall(dcontext_t *dcontext)
-{
-    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    if (!DYNAMO_OPTION(intercept_all_signals) || info == NULL || IS_CLIENT_THREAD(dcontext))
-        return;
-    kernel_sigset_t kmask;
-    kernel_sigemptyset(&kmask);
-    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (sig_kernel_blockable(sig) && kernel_sigismember(&info->app_sigblocked, sig))
-            kernel_sigaddset(&kmask, sig);
-    }
-    sigprocmask_syscall(SIG_SETMASK, &kmask, NULL, sizeof(kmask));
-}
-
 /* In a signal handler: sets the mask that the handler's sigreturn restores. */
 static void
 set_frame_kernel_sigmask(thread_sig_info_t *info, kernel_ucontext_t *ucxt)
@@ -5969,9 +5950,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 tail = &(*tail)->next;
             *tail = pend;
 
-            /* Further instances wait in the kernel until we deliver this one
-             * (or enter a syscall first: signal_unhold_queued_for_syscall()).
-             */
+            /* Further instances wait in the kernel until we deliver this one. */
             if (kernel_blockable)
                 kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
         }

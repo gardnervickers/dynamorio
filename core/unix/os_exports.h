@@ -481,8 +481,8 @@ typedef struct _kernel_sigset_t {
 
 void
 receive_pending_signal(dcontext_t *dcontext);
-void
-signal_unhold_queued_for_syscall(dcontext_t *dcontext);
+bool
+os_syscall_is_unbounded_wait(dcontext_t *dcontext);
 bool
 is_signal_restorer_code(byte *pc, size_t *len);
 bool

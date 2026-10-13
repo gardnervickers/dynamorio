@@ -5668,9 +5668,10 @@ restart_remaining_timeout(os_thread_data_t *ostd, const struct timespec *app_ts,
 }
 
 /* Returns whether the syscall about to run may wait with no timeout and has no
- * temporary signal mask.
+ * temporary signal mask or other pre-syscall handling that could not be repeated
+ * (handle_system_call()).
  */
-static bool
+bool
 os_syscall_is_unbounded_wait(dcontext_t *dcontext)
 {
     switch (dcontext->sys_num) {
@@ -5685,7 +5686,6 @@ os_syscall_is_unbounded_wait(dcontext_t *dcontext)
 #    endif
     case SYS_ppoll: return sys_param(dcontext, 3) == 0 && sys_param(dcontext, 2) == 0;
     case SYS_pselect6: return dcontext->sys_param4 == 0 && sys_param(dcontext, 4) == 0;
-    case SYS_rt_sigtimedwait: return sys_param(dcontext, 2) == 0;
     default: return false;
     }
 }
@@ -8913,23 +8913,6 @@ pre_system_call(dcontext_t *dcontext)
 
     } /* end switch */
 
-#ifdef LINUX
-    /* A signal that arrived after we left the code cache for this syscall waits
-     * for it to return (handle_system_call() runs non-ignorable syscalls first),
-     * which for a wait without a timeout may be never.  Natively it would have
-     * been delivered first; fail the wait with EINTR instead, as if the signal had
-     * interrupted it, so the signal is delivered now.  Waits with a temporary
-     * mask check for this when installing it.
-     */
-    if (execute_syscall && dcontext->signals_pending > 0 &&
-        os_syscall_is_unbounded_wait(dcontext)) {
-        LOG(THREAD, LOG_SYSCALLS, 2, "signal pending: failing wait %d with EINTR\n",
-            dcontext->sys_num);
-        set_failure_return_val(dcontext, EINTR);
-        DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-        execute_syscall = false;
-    }
-#endif
     dcontext->whereami = old_whereami;
     return execute_syscall;
 }
