@@ -204,10 +204,10 @@
 0x101110xx0xxxxx100011xxxxxxxxxx  n   579  RDM   sqrdmlsh       dq0 : dq0 dq5 dq16 hs_sz
 01111110010xxxxx100011xxxxxxxxxx  n   579  RDM   sqrdmlsh        h0 : h0 h5 h16
 01111110100xxxxx100011xxxxxxxxxx  n   579  RDM   sqrdmlsh        s0 : s0 s5 s16
-10001000100^^^^^0^^^^^xxxxxxxxxx  n   583  LOR      stllr        w0 : mem0
-11001000100^^^^^0^^^^^xxxxxxxxxx  n   583  LOR      stllr        x0 : mem0
-00001000100^^^^^0^^^^^xxxxxxxxxx  n   584  LOR     stllrb        w0 : mem0
-01001000100^^^^^0^^^^^xxxxxxxxxx  n   585  LOR     stllrh        w0 : mem0
+10001000100^^^^^0^^^^^xxxxxxxxxx  n   583  LOR      stllr      mem0 : w0
+11001000100^^^^^0^^^^^xxxxxxxxxx  n   583  LOR      stllr      mem0 : x0
+00001000100^^^^^0^^^^^xxxxxxxxxx  n   584  LOR     stllrb      mem0 : w0
+01001000100^^^^^0^^^^^xxxxxxxxxx  n   585  LOR     stllrh      mem0 : w0
 10111000001xxxxx100000xxxxxxxxxx  n   476  LSE        swp   w0 mem0 : w16 mem0
 11111000001xxxxx100000xxxxxxxxxx  n   476  LSE        swp   x0 mem0 : x16 mem0
 10111000101xxxxx100000xxxxxxxxxx  n   477  LSE       swpa   w0 mem0 : w16 mem0

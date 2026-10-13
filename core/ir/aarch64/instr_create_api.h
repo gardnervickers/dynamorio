@@ -4494,10 +4494,12 @@
  *    STLLR   <Xt>, [<Xn|SP>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rt   The first destination register. Can be W (Word, 32 bits) or X (Extended, 64
- * bits) \param Rn   The second source register. Can be X (Extended, 64 bits)
+ * \param Rt   The source register. Can be W (Word, 32 bits) or X (Extended, 64
+ *             bits)
+ * \param Rn   The destination memory operand, whose base register is X (Extended,
+ *             64 bits) or SP.
  */
-#define INSTR_CREATE_stllr(dc, Rt, Rn) instr_create_1dst_1src(dc, OP_stllr, Rt, Rn)
+#define INSTR_CREATE_stllr(dc, Rt, Rn) instr_create_1dst_1src(dc, OP_stllr, Rn, Rt)
 
 /**
  * Creates a STLLRB instruction.
@@ -4507,10 +4509,11 @@
  *    STLLRB  <Wt>, [<Xn|SP>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rt   The first destination register, W (Word, 32 bits)
- * \param Rn   The second source register, X (Extended, 64 bits)
+ * \param Rt   The source register. W (Word, 32 bits)
+ * \param Rn   The destination memory operand, whose base register is X (Extended,
+ *             64 bits) or SP.
  */
-#define INSTR_CREATE_stllrb(dc, Rt, Rn) instr_create_1dst_1src(dc, OP_stllrb, Rt, Rn)
+#define INSTR_CREATE_stllrb(dc, Rt, Rn) instr_create_1dst_1src(dc, OP_stllrb, Rn, Rt)
 
 /**
  * Creates a STLLRH instruction.
@@ -4520,10 +4523,11 @@
  *    STLLRH  <Wt>, [<Xn|SP>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rt   The first destination register, W (Word, 32 bits)
- * \param Rn   The second source register, X (Extended, 64 bits)
+ * \param Rt   The source register. W (Word, 32 bits)
+ * \param Rn   The destination memory operand, whose base register is X (Extended,
+ *             64 bits) or SP.
  */
-#define INSTR_CREATE_stllrh(dc, Rt, Rn) instr_create_1dst_1src(dc, OP_stllrh, Rt, Rn)
+#define INSTR_CREATE_stllrh(dc, Rt, Rn) instr_create_1dst_1src(dc, OP_stllrh, Rn, Rt)
 
 /**
  * Creates a LDAPR load-acquire instruction.
