@@ -3099,7 +3099,43 @@ mangle_ctr_read(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
         // execute the OP_ic_ivau instruction that DynamoRIO currently relies
         // on for detecting code modifications.
         const int CTR_EL0_DIC_BIT = 29;
-        reg_t reg = opnd_get_reg(instr_get_dst(instr, 0));
+        reg_id_t reg = opnd_get_reg(instr_get_dst(instr, 0));
+        /* A read into XZR discards the value so there is nothing to clear, and
+         * AND (immediate) cannot write XZR: Rd == 31 encodes SP there.
+         */
+        if (reg == DR_REG_XZR)
+            return;
+        if (reg == dr_reg_stolen) {
+            /* The stolen register holds DR's TLS base: the app value is written to
+             * TLS_REG_STOLEN_SLOT by the stolen register mangling of this MRS, which
+             * is inserted before the instructions we add here.  Clear the bit in the
+             * TLS slot using a scratch register.
+             */
+            ushort slot;
+            bool should_restore;
+            reg_id_t scratch =
+                pick_scratch_reg(dcontext, instr, DR_REG_NULL, DR_REG_NULL, DR_REG_NULL,
+                                 false, &slot, &should_restore);
+            ASSERT(scratch != DR_REG_NULL);
+            instr_t *seq[] = {
+                should_restore ? instr_create_save_to_tls(dcontext, scratch, slot) : NULL,
+                instr_create_restore_from_tls(dcontext, scratch, TLS_REG_STOLEN_SLOT),
+                INSTR_CREATE_and(dcontext, opnd_create_reg(scratch),
+                                 opnd_create_reg(scratch),
+                                 OPND_CREATE_INT64(~(1UL << CTR_EL0_DIC_BIT))),
+                instr_create_save_to_tls(dcontext, scratch, TLS_REG_STOLEN_SLOT),
+                should_restore ? instr_create_restore_from_tls(dcontext, scratch, slot)
+                               : NULL,
+            };
+            instr_t *prev = instr;
+            for (int i = 0; i < BUFFER_SIZE_ELEMENTS(seq); i++) {
+                if (seq[i] == NULL)
+                    continue;
+                POST(ilist, prev, seq[i]);
+                prev = seq[i];
+            }
+            return;
+        }
         POST(ilist, instr,
              INSTR_CREATE_and(dcontext, opnd_create_reg(reg), opnd_create_reg(reg),
                               OPND_CREATE_INT64(~(1UL << CTR_EL0_DIC_BIT))));
