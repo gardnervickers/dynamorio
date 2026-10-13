@@ -936,6 +936,8 @@ set_clone_record_fields(void *record, reg_t app_thread_xsp, app_pc continuation_
     rec->continuation_pc = continuation_pc;
     rec->clone_sysnum = clone_sysnum;
     rec->clone_flags = clone_flags;
+    /* A client thread does not inherit its creator's app mask (i#2337). */
+    kernel_sigemptyset(&rec->info.app_sigblocked);
 }
 
 /* i#149/PR 403015: The clone record is passed to the new thread by placing it
@@ -1175,6 +1177,14 @@ signal_thread_inherit(dcontext_t *dcontext, void *clone_record)
             record->clone_flags = CLONE_VFORK | CLONE_VM | SIGCHLD;
         }
 #endif
+
+        /* The child starts with its parent's blocked signals. DR emulates the
+         * app's mask, so the kernel mask the child inherited is DR's: take the
+         * parent's app mask as of the clone instead. Set it before the
+         * threads_unmasked counts below; signal_swap_mask() keeps it.
+         */
+        info->app_sigblocked = record->info.app_sigblocked;
+        info->app_sigblocked_inherited = true;
 
         /* Handlers are either inherited or shared. */
         if (TEST(CLONE_SIGHAND, record->clone_flags)) {
@@ -2547,7 +2557,19 @@ signal_swap_mask(dcontext_t *dcontext, bool to_app)
                 ATOMIC_INC(int, info->sighand->threads_unmasked[i]);
         }
         d_r_mutex_lock(&info->sigblocked_lock);
-        unblock_all_signals(&info->app_sigblocked);
+        if (info->app_sigblocked_inherited) {
+            /* A new thread: keep the mask signal_thread_inherit() took from its
+             * parent, plus anything the kernel mask really blocks.
+             */
+            kernel_sigset_t kernel_blocked;
+            unblock_all_signals(&kernel_blocked);
+            for (int i = 1; i <= MAX_SIGNUM; i++) {
+                if (kernel_sigismember(&kernel_blocked, i))
+                    kernel_sigaddset(&info->app_sigblocked, i);
+            }
+            info->app_sigblocked_inherited = false;
+        } else
+            unblock_all_signals(&info->app_sigblocked);
         d_r_mutex_unlock(&info->sigblocked_lock);
         for (int i = 1; i <= MAX_SIGNUM; i++) {
             if (!EMULATE_SIGMASK(info, i))

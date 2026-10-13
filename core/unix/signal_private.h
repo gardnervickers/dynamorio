@@ -492,6 +492,11 @@ typedef struct _thread_sig_info_t {
      */
     kernel_sigset_t app_sigblocked;
     mutex_t sigblocked_lock;
+    /* Set by signal_thread_inherit() when app_sigblocked holds the mask this new
+     * thread inherited from its parent's clone, which signal_swap_mask() must keep
+     * when it takes the thread's kernel mask (DR's, not the app's) as the app's.
+     */
+    bool app_sigblocked_inherited;
     /* This is a not-guaranteed-accurate indicator of whether we're inside an
      * app signal handler.  We can't know for sure when a handler ends if the
      * app exits with a longjmp instead of siglongjmp.
