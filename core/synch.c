@@ -153,6 +153,19 @@ synch_init(void)
 {
 }
 
+#ifdef UNIX
+/* In a fork child, where only the forking thread exists. */
+void
+synch_fork_init(void)
+{
+    /* The forking thread itself or another thread may have been waiting for
+     * all_threads_synch_lock: none is here, and a stale count would make each of
+     * our synch-alls defer to it for SYNCH_ALL_DEFER_MAX waits.
+     */
+    synch_all_waiters = 0;
+}
+#endif
+
 void
 synch_exit(void)
 {

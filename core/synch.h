@@ -139,6 +139,11 @@ synch_init(void);
 void
 synch_exit(void);
 
+#ifdef UNIX
+void
+synch_fork_init(void);
+#endif
+
 void
 synch_thread_init(dcontext_t *dcontext);
 
