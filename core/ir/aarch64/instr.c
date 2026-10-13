@@ -472,6 +472,40 @@ instr_predicate_is_cond(dr_pred_type_t pred)
     return pred != DR_PRED_NONE && pred != DR_PRED_AL && pred != DR_PRED_NV;
 }
 
+DR_API
+dr_pred_trigger_t
+instr_predicate_triggered(instr_t *instr, dr_mcontext_t *mc)
+{
+    dr_pred_type_t pred = instr_get_predicate(instr);
+    bool n = TESTANY(EFLAGS_N, mc->nzcv), z = TESTANY(EFLAGS_Z, mc->nzcv);
+    bool c = TESTANY(EFLAGS_C, mc->nzcv), v = TESTANY(EFLAGS_V, mc->nzcv);
+    bool match;
+    switch (pred) {
+    case DR_PRED_NONE: return DR_PRED_TRIGGER_NOPRED;
+    case DR_PRED_EQ: match = z; break;
+    case DR_PRED_NE: match = !z; break;
+    case DR_PRED_CS: match = c; break;
+    case DR_PRED_CC: match = !c; break;
+    case DR_PRED_MI: match = n; break;
+    case DR_PRED_PL: match = !n; break;
+    case DR_PRED_VS: match = v; break;
+    case DR_PRED_VC: match = !v; break;
+    case DR_PRED_HI: match = c && !z; break;
+    case DR_PRED_LS: match = !c || z; break;
+    case DR_PRED_GE: match = n == v; break;
+    case DR_PRED_LT: match = n != v; break;
+    case DR_PRED_GT: match = !z && n == v; break;
+    case DR_PRED_LE: match = z || n != v; break;
+    /* On AArch64 NV (0b1111) means always, like AL. */
+    case DR_PRED_AL:
+    case DR_PRED_NV: match = true; break;
+    /* SVE governing predicates depend on P registers, not the flags. */
+    case DR_PRED_MASKED: return DR_PRED_TRIGGER_UNKNOWN;
+    default: CLIENT_ASSERT(false, "invalid predicate"); return DR_PRED_TRIGGER_INVALID;
+    }
+    return match ? DR_PRED_TRIGGER_MATCH : DR_PRED_TRIGGER_MISMATCH;
+}
+
 bool
 reg_is_gpr(reg_id_t reg)
 {
