@@ -378,8 +378,7 @@ x001111001111000000000xxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : d5
 0x0011101x100001101110xxxxxxxxxx  n   125  BASE     fcvtzs            dq0 : dq5 sd_sz_q
 x001111000011000xxxxxxxxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : s5 scale
 x001111001011000xxxxxxxxxxxxxxxx  n   125  BASE     fcvtzs            wx0 : d5 scale
-01011111001xxxxx111111xxxxxxxxxx  n   125  BASE     fcvtzs             s0 : s5 immhb_fxp
-0101111101xxxxxx111111xxxxxxxxxx  n   125  BASE     fcvtzs             d0 : d5 immhb_fxp
+010111110xxxxxxx111111xxxxxxxxxx  n   125  BASE     fcvtzs  bhsd_immh_reg0 : bhsd_immh_reg5 immhb_fxp
 x001111000111001000000xxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : s5
 x001111001111001000000xxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5
 0111111010100001101110xxxxxxxxxx  n   126  BASE     fcvtzu             s0 : s5
@@ -387,8 +386,7 @@ x001111001111001000000xxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5
 0x1011101x100001101110xxxxxxxxxx  n   126  BASE     fcvtzu            dq0 : dq5 sd_sz_q
 x001111000011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : s5 scale
 x001111001011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5 scale
-01111111001xxxxx111111xxxxxxxxxx  n   126  BASE     fcvtzu             s0 : s5 immhb_fxp
-0111111101xxxxxx111111xxxxxxxxxx  n   126  BASE     fcvtzu             d0 : d5 immhb_fxp
+011111110xxxxxxx111111xxxxxxxxxx  n   126  BASE     fcvtzu  bhsd_immh_reg0 : bhsd_immh_reg5 immhb_fxp
 0x1011100x1xxxxx111111xxxxxxxxxx  n   127  BASE       fdiv            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx000110xxxxxxxxxx  n   127  BASE       fdiv     float_reg0 : float_reg5 float_reg16
 00011111xx0xxxxx0xxxxxxxxxxxxxxx  n   128  BASE      fmadd     float_reg0 : float_reg5 float_reg16 float_reg10
@@ -766,8 +764,7 @@ x001111001100010000000xxxxxxxxxx  n   362  BASE      scvtf             d0 : wx5
 0x0011100x100001110110xxxxxxxxxx  n   362  BASE      scvtf            dq0 : dq5 sd_sz_q
 x001111000000010xxxxxxxxxxxxxxxx  n   362  BASE      scvtf             s0 : wx5 scale
 x001111001000010xxxxxxxxxxxxxxxx  n   362  BASE      scvtf             d0 : wx5 scale
-01011111001xxxxx111001xxxxxxxxxx  n   362  BASE      scvtf             s0 : s5 immhb_fxp
-0101111101xxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf             d0 : d5 immhb_fxp
+010111110xxxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf  bhsd_immh_reg0 : bhsd_immh_reg5 immhb_fxp
 0x0011110xxxxxxx111001xxxxxxxxxx  n   362  BASE      scvtf            dq0 : dq5 immhb_fxp bhsd_immh_sz_q
 x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 wx16
 11010101000000110010000010011111  n   365  BASE        sev                :
