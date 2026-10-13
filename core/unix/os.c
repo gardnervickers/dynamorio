@@ -7436,6 +7436,39 @@ os_vfork_post(dcontext_t *dcontext)
     set_synch_state(dcontext, THREAD_SYNCH_NONE);
 }
 
+/* The kernel rejected a thread-creating clone (pthread_create can hit EAGAIN under
+ * a pids limit, for instance): no child runs new_thread_setup(), so undo what
+ * handle_clone_pre() did for it. Otherwise the leaked uninit_thread_count makes
+ * every later synch-all (a code flush, a fork, the exit) wait forever for a thread
+ * that will never initialize, and the clone record's dstack leaks.
+ */
+static void
+os_thread_create_failed(dcontext_t *dcontext)
+{
+    uint64 flags;
+    byte *dstack;
+    if (dcontext->sys_num == SYS_clone3) {
+        /* create_clone_record() pointed DR's copy of the clone args, still
+         * in sys_param1, at the dstack.
+         */
+        clone3_syscall_args_t *dr_clone_args =
+            (clone3_syscall_args_t *)dcontext->sys_param1;
+        flags = get_stored_clone3_flags(dcontext);
+        dstack = (byte *)(ptr_uint_t)dr_clone_args->stack + DYNAMORIO_STACK_SIZE;
+    } else {
+        /* The stack parameter still holds the dstack spot below the record. */
+        flags = dcontext->sys_param0;
+        dstack = get_clone_record_dstack(
+            get_clone_record(sys_param(dcontext, SYSCALL_PARAM_CLONE_STACK)));
+    }
+    LOG(THREAD, LOG_SYSCALLS, 2, "clone failed: freeing unused dstack " PFX "\n",
+        dstack);
+    signal_clone_abandoned(dcontext, flags);
+    stack_free(dstack, DYNAMORIO_STACK_SIZE);
+    ASSERT(uninit_thread_count > 0);
+    ATOMIC_DEC(int, uninit_thread_count);
+}
+
 static bool
 handle_clone_pre(dcontext_t *dcontext)
 {
@@ -9719,7 +9752,8 @@ post_system_call(dcontext_t *dcontext)
             MCXT_SYSCALL_RES(mc));
         ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack = NULL;
         os_vfork_post(dcontext);
-        /* TODO i#5221: Handle clone3 returning errors other than ENOSYS. */
+        if (!success && was_thread_create_syscall(dcontext))
+            os_thread_create_failed(dcontext);
         /* We switch the lib tls segment back to dr's privlib segment.
          * Please refer to comment on os_switch_lib_tls.
          * It is only called in parent thread.
