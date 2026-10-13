@@ -1411,10 +1411,14 @@ opnd_replace_reg(opnd_t *opnd, reg_id_t old_reg, reg_id_t new_reg)
             reg_id_t i = (old_reg == oi) ? new_reg : oi;
             int d = opnd_get_disp(*opnd);
 #if defined(AARCH64)
-            bool scaled = false;
-            dr_extend_type_t extend = opnd_get_index_extend(*opnd, &scaled, NULL);
-            dr_opnd_flags_t flags = opnd_get_flags(*opnd);
-            *opnd = opnd_create_base_disp_aarch64(b, i, extend, scaled, d, flags, size);
+            /* Re-creating the operand would lose the pre-index state (which tells
+             * a zero-displacement offset form from a post-index form), the vector
+             * element size and any non-default shift: only swap the registers.
+             */
+            (void)d;
+            (void)size;
+            opnd->value.base_disp.base_reg = b;
+            opnd->value.base_disp.index_reg = i;
 #elif defined(ARM)
             uint amount;
             dr_shift_type_t shift = opnd_get_index_shift(*opnd, &amount);
@@ -1579,11 +1583,11 @@ opnd_replace_reg_resize(opnd_t *opnd, reg_id_t old_reg, reg_id_t new_reg)
         if (found) {
             int disp = opnd_get_disp(*opnd);
 #if defined(AARCH64)
-            bool scaled = false;
-            dr_extend_type_t extend = opnd_get_index_extend(*opnd, &scaled, NULL);
-            dr_opnd_flags_t flags = opnd_get_flags(*opnd);
-            *opnd = opnd_create_base_disp_aarch64(new_b, new_i, extend, scaled, disp,
-                                                  flags, size);
+            /* See opnd_replace_reg(): keep pre-index, element size and shift. */
+            (void)disp;
+            (void)size;
+            opnd->value.base_disp.base_reg = new_b;
+            opnd->value.base_disp.index_reg = new_i;
 #elif defined(ARM)
             uint amount;
             dr_shift_type_t shift = opnd_get_index_shift(*opnd, &amount);
