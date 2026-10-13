@@ -2813,6 +2813,10 @@ handle_sigsuspend(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize)
         dump_sigset(dcontext, &info->app_sigblocked);
     }
 #endif
+    /* Update the pending signals flag to allow pre_system_call to potentially
+     * skip the sigsuspend if a eligible signal is already pending.
+     */
+    check_signals_pending(dcontext, info);
     d_r_mutex_unlock(&info->sigblocked_lock);
     DOLOG(4, LOG_ASYNCH, dump_unmasked(dcontext, __FUNCTION__););
 }
