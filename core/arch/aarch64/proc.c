@@ -266,6 +266,11 @@ proc_set_feature(feature_bit_t feature_bit, bool enable)
     uint64 feat_val = GET_FEAT_VAL(feature_bit);
 
     feature_reg_idx_t feat_reg = GET_FEAT_REG(feature_bit);
+    /* The register field allows values beyond the registers we cache. */
+    if ((uint)feat_reg >= AA64_NUM_FEAT_REGS) {
+        CLIENT_ASSERT(false, "proc_set_feature: invalid feature");
+        return;
+    }
     freg_val += feat_reg;
 
     /* Clear the current feature state. */
@@ -313,6 +318,9 @@ proc_has_feature_imp(feature_bit_t feature_bit)
 {
     bool has_feature = false;
 
+    /* The register field allows values beyond the registers we cache. */
+    if ((uint)GET_FEAT_REG(feature_bit) >= AA64_NUM_FEAT_REGS)
+        return false;
     uint64 reg_val = get_reg_val(GET_FEAT_REG(feature_bit));
     ushort nibble_pos = GET_FEAT_NIBPOS(feature_bit);
     ushort reg_nibble = (reg_val >> (nibble_pos * 4)) & 0xFULL;
