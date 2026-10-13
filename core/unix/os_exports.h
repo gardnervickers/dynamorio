@@ -573,6 +573,10 @@ os_clone_post(dcontext_t *dcontext);
 
 void
 signal_fork_init(dcontext_t *dcontext);
+void
+signal_fork_forget_children(dcontext_t *dcontext);
+void
+os_fork_forget_thread(dcontext_t *dcontext, thread_record_t **threads, int num_threads);
 #if defined(LINUX) && defined(AARCH64)
 void
 signal_find_vdso_sigreturn(void);

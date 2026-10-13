@@ -166,6 +166,11 @@ typedef struct _os_thread_data_t {
      */
     bool vfork_waiting;
     int vfork_skips;
+    /* The dstack of the clone record for a thread-creating clone that this thread
+     * is about to make or is waiting in, until the clone returns here; see
+     * os_fork_forget_thread().
+     */
+    byte *pending_clone_dstack;
 
     /* Thread synchronization data held across a fork. */
     thread_record_t **fork_threads;

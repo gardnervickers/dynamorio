@@ -852,12 +852,22 @@ dynamorio_fork_init(dcontext_t *dcontext)
      */
     d_r_mutex_lock(&thread_initexit_lock);
     get_list_of_threads_ex(&threads, &num_threads, true /*include execve*/);
+    /* A thread that was creating a thread or a vfork child when we forked,
+     * possibly waiting at a safe spot in os_vfork_pre(), has children that do not
+     * exist here. Forget them while every thread's state is still in place.
+     */
+    for (i = 0; i < num_threads; i++) {
+        if (threads[i] != dcontext->thread_record)
+            os_fork_forget_thread(threads[i]->dcontext, threads, num_threads);
+    }
     for (i = 0; i < num_threads; i++) {
         if (threads[i] == dcontext->thread_record)
             remove_thread(threads[i]->id);
         else
             dynamo_other_thread_exit(threads[i]);
     }
+    /* Likewise, no thread is initializing in this process. */
+    uninit_thread_count = 0;
     d_r_mutex_unlock(&thread_initexit_lock);
     global_heap_free(threads,
                      num_threads * sizeof(thread_record_t *) HEAPACCT(ACCT_THREAD_MGT));

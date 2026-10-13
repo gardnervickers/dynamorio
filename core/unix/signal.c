@@ -1503,6 +1503,16 @@ requeue_signals_pending_since(dcontext_t *dcontext, thread_sig_info_t *info,
  * called in dynamorio_fork_init() after os_fork_init() else we clean
  * up data structs used in signal_thread_exit().
  */
+/* In a fork child, for another thread of the parent, which does not exist here:
+ * nor do the children it was starting, so its cleanup must not wait for them.
+ */
+void
+signal_fork_forget_children(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    info->num_unstarted_children = 0;
+}
+
 void
 signal_fork_init(dcontext_t *dcontext)
 {

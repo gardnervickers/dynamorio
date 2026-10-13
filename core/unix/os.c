@@ -2779,6 +2779,29 @@ os_fork_post(dcontext_t *dcontext, bool parent)
     vmm_heap_fork_post(dcontext, parent);
 }
 
+/* In a fork child, for another thread of the parent, which does not exist here,
+ * before dynamo_other_thread_exit() cleans it up: neither do the threads or vfork
+ * children it was creating. The dstack of a clone it was making is freed unless it
+ * already belongs to one of threads, whose own cleanup frees it.
+ */
+void
+os_fork_forget_thread(dcontext_t *dcontext, thread_record_t **threads, int num_threads)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    signal_fork_forget_children(dcontext);
+    if (ostd->pending_clone_dstack != NULL) {
+        bool in_use = false;
+        for (int i = 0; i < num_threads; i++) {
+            if (threads[i]->dcontext != NULL &&
+                threads[i]->dcontext->dstack == ostd->pending_clone_dstack)
+                in_use = true;
+        }
+        if (!in_use)
+            stack_free(ostd->pending_clone_dstack, DYNAMORIO_STACK_SIZE);
+        ostd->pending_clone_dstack = NULL;
+    }
+}
+
 /* this one is called before child's new logfiles are set up */
 void
 os_fork_init(dcontext_t *dcontext)
@@ -7490,6 +7513,7 @@ handle_clone_pre(dcontext_t *dcontext)
      * Note: This must be done after sys_param0 is set.
      */
     if (is_thread_create_syscall(dcontext, dr_clone_args)) {
+        void *crec;
         if (dcontext->sys_num == SYS_clone3) {
             /* create_clone_record modifies some fields in clone_args for the
              * clone3 syscall. Instead of reusing the app's copy of
@@ -7512,7 +7536,7 @@ handle_clone_pre(dcontext_t *dcontext)
             *sys_param_addr(dcontext, SYSCALL_PARAM_CLONE3_CLONE_ARGS) =
                 (reg_t)dr_clone_args;
             /* The pointer to the app's clone_args was saved in sys_param0 above. */
-            create_clone_record(dcontext, NULL, dr_clone_args, app_clone_args);
+            crec = create_clone_record(dcontext, NULL, dr_clone_args, app_clone_args);
         } else {
             /* We replace the app-provided stack pointer with our own stack
              * pointer in create_clone_record. Save the original pointer so
@@ -7520,10 +7544,11 @@ handle_clone_pre(dcontext_t *dcontext)
              * restored in the child in restore_clone_param_from_clone_record.
              */
             dcontext->sys_param1 = sys_param(dcontext, SYSCALL_PARAM_CLONE_STACK);
-            create_clone_record(dcontext,
-                                sys_param_addr(dcontext, SYSCALL_PARAM_CLONE_STACK), NULL,
-                                NULL);
+            crec = create_clone_record(
+                dcontext, sys_param_addr(dcontext, SYSCALL_PARAM_CLONE_STACK), NULL, NULL);
         }
+        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack =
+            get_clone_record_dstack(crec);
         os_clone_pre(dcontext);
         /* os_vfork_pre() may wait at a safe spot, so it must come before we
          * count the new thread as uninitialized: a synch-all that stopped us there
@@ -9660,6 +9685,7 @@ post_system_call(dcontext_t *dcontext)
         /* in /usr/src/linux/arch/i386/kernel/process.c */
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: clone returned " PFX "\n",
             MCXT_SYSCALL_RES(mc));
+        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack = NULL;
         os_vfork_post(dcontext);
         /* TODO i#5221: Handle clone3 returning errors other than ENOSYS. */
         /* We switch the lib tls segment back to dr's privlib segment.
