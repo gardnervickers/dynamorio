@@ -2948,25 +2948,6 @@ encode_opnd_simm6_5(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_o
     return encode_opnd_int(5, 6, true, 0, 0, opnd, enc_out);
 }
 
-/* vmsz: B/H/S/D for load/store multiple structures */
-
-static inline bool
-decode_opnd_vmsz(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    /* Multi-element structures (but not LD1/ST1) have no .1D arrangement. */
-    if (extract_uint(enc, 10, 2) == 3 && !TESTANY(1u << 30, enc) &&
-        (opcode == OP_ld2 || opcode == OP_ld3 || opcode == OP_ld4 || opcode == OP_st2 ||
-         opcode == OP_st3 || opcode == OP_st4))
-        return false;
-    return decode_opnd_int(10, 2, false, 0, OPSZ_2b, 0, enc, opnd);
-}
-
-static inline bool
-encode_opnd_vmsz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_int(10, 2, false, 0, 0, opnd, enc_out);
-}
-
 static inline bool
 decode_imm2_nesw(uint enc, uint pos, OUT opnd_t *opnd)
 {
@@ -3434,26 +3415,6 @@ encode_opnd_len(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
     return encode_opnd_int(13, 2, false, 0, 0, opnd, enc_out);
 }
 
-/* imm4 encoded in bits 11-14 */
-static inline bool
-decode_opnd_imm4idx(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    uint value = extract_uint(enc, 11, 4);
-    /* A 64-bit vector (Q=0) only has byte indices 0-7. */
-    if (!TESTANY(1u << 30, enc) && value > 7)
-        return false;
-    *opnd = opnd_create_immed_uint(value, OPSZ_4b);
-    return true;
-}
-
-static inline bool
-encode_opnd_imm4idx(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    if (!opnd_is_immed_int(opnd))
-        return false;
-    return encode_opnd_int(11, 4, false, 0, 0, opnd, enc_out);
-}
-
 /* w10: W register or WZR at bit position 10 */
 
 static inline bool
@@ -3592,38 +3553,6 @@ static inline bool
 encode_opnd_cond(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
     return encode_opnd_int(12, 4, false, 0, 0, opnd, enc_out);
-}
-
-/* scale: The scalar encoding of #fbits operand. This is the number of bits
- * after the decimal point for fixed-point values.
- */
-static inline bool
-decode_opnd_scale(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    uint scale = extract_uint(enc, 10, 6);
-    /* With a W register (sf=0) #fbits must be at most 32: scale >= 32. */
-    if (!TESTANY(1u << 31, enc) && scale < 32)
-        return false;
-    *opnd = opnd_create_immed_int(64 - scale, OPSZ_6b);
-    return true;
-}
-
-static inline bool
-encode_opnd_scale(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    ptr_int_t fbits;
-
-    if (!opnd_is_immed_int(opnd))
-        return false;
-
-    fbits = opnd_get_immed_int(opnd);
-
-    if (fbits < 1 || fbits > 64)
-        return false;
-
-    *enc_out = (64 - fbits) << 10; /* 'scale' bitfield in encoding */
-
-    return true;
 }
 
 static inline bool
@@ -5722,6 +5651,22 @@ encode_opnd_bhsd_immh_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *
     return opnd_get_immed_int(opnd) == opnd_get_immed_int(expect);
 }
 
+/* bhs_immh_sz: element size from immh for widening shifts (SSHLL...): B, H, S. */
+
+static inline bool
+decode_opnd_bhs_immh_sz(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    if (TESTANY(1u << 22, enc))
+        return false;
+    return decode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd);
+}
+
+static inline bool
+encode_opnd_bhs_immh_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd, enc_out);
+}
+
 static inline bool
 decode_hsd_immh_regx(int rpos, uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
@@ -5887,56 +5832,6 @@ encode_opnd_vindex_SD(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc
     } else {                                             // Double
         if (val < 0 || val >= 2)
             return false;
-        *enc_out = (val & 1) << H; // index=H
-    }
-    return true;
-}
-
-/* vindex_HS_2lane: Index for vector with half or single, using 2 lanes. */
-
-static inline bool
-decode_opnd_vindex_HS_2lane(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    const uint sz = extract_uint(enc, 22, 1);
-    const uint H = extract_uint(enc, 11, 1);
-    const uint L = extract_uint(enc, 21, 1);
-    uint bits;
-    const bool q = TESTANY(1u << 30, enc);
-    if (sz == 1) { // Half
-        /* Only two pairs in a 64-bit vector: H=1 needs Q=1. */
-        if (H != 0 && !q)
-            return false;
-        bits = (H << 1) | L; // index=H:L
-    } else {                 // Single
-        /* L must be 0 and there is no 64-bit vector form: reachable from
-         * arbitrary encodings, so no assert.
-         */
-        if (L != 0 || !q)
-            return false;
-        bits = H; // index=H
-    }
-
-    *opnd = opnd_create_immed_int(bits, OPSZ_2b);
-    return true;
-}
-
-static inline bool
-encode_opnd_vindex_HS_2lane(uint enc, int opcode, byte *pc, opnd_t opnd,
-                            OUT uint *enc_out)
-{
-    if (!opnd_is_immed_int(opnd))
-        return false;
-
-    const uint sz = extract_uint(enc, 22, 1);
-    const uint H = 11;
-    const uint L = 21;
-
-    const ptr_int_t val = opnd_get_immed_int(opnd);
-    if (sz == 1) { // Half
-        IF_RETURN_FALSE(val < 0 || val >= 4)
-        *enc_out = ((val & 1) << L) | (((val >> 1) & 1) << H); // index=H:L
-    } else {                                                   // Single
-        IF_RETURN_FALSE(val < 0 || val >= 2)
         *enc_out = (val & 1) << H; // index=H
     }
     return true;
@@ -7149,75 +7044,27 @@ q_bit(uint enc)
     return TESTANY(1u << 30, enc);
 }
 
-/* sd_sz_q: sd_sz with no .1D (sz=1, Q=0). */
+/* bd_sz: Vector element width for SIMD instructions. */
 
 static inline bool
-decode_opnd_sd_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+decode_opnd_bd_sz(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
-    if (TESTANY(1u << 22, enc) && !q_bit(enc))
-        return false;
-    return decode_opnd_sd_sz(enc, opcode, pc, opnd);
-}
-
-static inline bool
-encode_opnd_sd_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_sd_sz(enc, opcode, pc, opnd, enc_out);
-}
-
-/* bhsd_sz_q: bhsd_sz with no .1D (size=11, Q=0). */
-
-static inline bool
-decode_opnd_bhsd_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    if (extract_uint(enc, 22, 2) == 3 && !q_bit(enc))
-        return false;
-    return decode_opnd_bhsd_sz(enc, opcode, pc, opnd);
-}
-
-static inline bool
-encode_opnd_bhsd_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_bhsd_sz(enc, opcode, pc, opnd, enc_out);
-}
-
-/* bhs_sz_lanes: across-lanes reductions (ADDV, SMAXV...): B, H, or S with Q=1. */
-
-static inline bool
-decode_opnd_bhs_sz_lanes(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    if (extract_uint(enc, 22, 2) == 2 && !q_bit(enc))
-        return false;
-    return decode_opnd_bhs_sz(enc, opcode, pc, opnd);
-}
-
-static inline bool
-encode_opnd_bhs_sz_lanes(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_bhs_sz(enc, opcode, pc, opnd, enc_out);
-}
-
-/* hsd_sz_q: H, S, or D with Q=1 (e.g. FCADD/FCMLA vector). */
-
-static inline bool
-decode_opnd_hsd_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    const uint bits = extract_uint(enc, 22, 2);
-    if (bits == 0 || (bits == 3 && !q_bit(enc)))
+    uint bits = enc >> 22 & 3;
+    if (bits != 0 && bits != 3)
         return false;
     *opnd = opnd_create_immed_int(bits, OPSZ_2b);
     return true;
 }
 
 static inline bool
-encode_opnd_hsd_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+encode_opnd_bd_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
     if (!opnd_is_immed_int(opnd))
         return false;
-    const ptr_int_t val = opnd_get_immed_int(opnd);
-    if (val < 1 || val > 3)
+    ptr_int_t val = opnd_get_immed_int(opnd);
+    if (val != 0 && val != 3)
         return false;
-    *enc_out = (uint)val << 22;
+    *enc_out = val << 22;
     return true;
 }
 
@@ -7242,81 +7089,6 @@ encode_opnd_bh_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out
     if (val < 0 || val > 1)
         return false;
     *enc_out = (uint)val << 22;
-    return true;
-}
-
-/* bhsd_immh_sz_q: bhsd_immh_sz with no .1D (immh[3]=1, Q=0). */
-
-static inline bool
-decode_opnd_bhsd_immh_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    if (TESTANY(1u << 22, enc) && !q_bit(enc))
-        return false;
-    return decode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd);
-}
-
-static inline bool
-encode_opnd_bhsd_immh_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd, enc_out);
-}
-
-/* bhs_immh_sz: element size from immh for widening shifts (SSHLL...): B, H, S. */
-
-static inline bool
-decode_opnd_bhs_immh_sz(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    if (TESTANY(1u << 22, enc))
-        return false;
-    return decode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd);
-}
-
-static inline bool
-encode_opnd_bhs_immh_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd, enc_out);
-}
-
-/* imm5_dup: element index for DUP/INS (element): imm5 = x0000 is reserved, as
- * is a D element into a 64-bit vector (imm5 = x1000, Q=0).
- */
-
-static inline bool
-decode_opnd_imm5_dup(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    const uint imm5 = extract_uint(enc, 16, 5);
-    if ((imm5 & 0xf) == 0 || ((imm5 & 0xf) == 0x8 && !q_bit(enc)))
-        return false;
-    return decode_opnd_imm5(enc, opcode, pc, opnd);
-}
-
-static inline bool
-encode_opnd_imm5_dup(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_imm5(enc, opcode, pc, opnd, enc_out);
-}
-
-/* bd_sz: Vector element width for SIMD instructions. */
-
-static inline bool
-decode_opnd_bd_sz(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    uint bits = enc >> 22 & 3;
-    if (bits != 0 && bits != 3)
-        return false;
-    *opnd = opnd_create_immed_int(bits, OPSZ_2b);
-    return true;
-}
-
-static inline bool
-encode_opnd_bd_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    if (!opnd_is_immed_int(opnd))
-        return false;
-    ptr_int_t val = opnd_get_immed_int(opnd);
-    if (val != 0 && val != 3)
-        return false;
-    *enc_out = val << 22;
     return true;
 }
 
@@ -8733,6 +8505,64 @@ encode_opnd_mem0p(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out
     return encode_opnd_mem0_scale(extract_uint(enc, 30, 1) + 3, opnd, enc_out);
 }
 
+/* vmsz: B/H/S/D for load/store multiple structures */
+
+static inline bool
+decode_opnd_vmsz(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    /* Multi-element structures (but not LD1/ST1) have no .1D arrangement. */
+    if (extract_uint(enc, 10, 2) == 3 && !TESTANY(1u << 30, enc) &&
+        (opcode == OP_ld2 || opcode == OP_ld3 || opcode == OP_ld4 || opcode == OP_st2 ||
+         opcode == OP_st3 || opcode == OP_st4))
+        return false;
+    return decode_opnd_int(10, 2, false, 0, OPSZ_2b, 0, enc, opnd);
+}
+
+static inline bool
+encode_opnd_vmsz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_int(10, 2, false, 0, 0, opnd, enc_out);
+}
+
+/* imm4 encoded in bits 11-14 */
+static inline bool
+decode_opnd_imm4idx(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    uint value = extract_uint(enc, 11, 4);
+    /* A 64-bit vector (Q=0) only has byte indices 0-7. */
+    if (!TESTANY(1u << 30, enc) && value > 7)
+        return false;
+    *opnd = opnd_create_immed_uint(value, OPSZ_4b);
+    return true;
+}
+
+static inline bool
+encode_opnd_imm4idx(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    if (!opnd_is_immed_int(opnd))
+        return false;
+    return encode_opnd_int(11, 4, false, 0, 0, opnd, enc_out);
+}
+
+/* imm5_dup: element index for DUP/INS (element): imm5 = x0000 is reserved, as
+ * is a D element into a 64-bit vector (imm5 = x1000, Q=0).
+ */
+
+static inline bool
+decode_opnd_imm5_dup(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    const uint imm5 = extract_uint(enc, 16, 5);
+    if ((imm5 & 0xf) == 0 || ((imm5 & 0xf) == 0x8 && !q_bit(enc)))
+        return false;
+    return decode_opnd_imm5(enc, opcode, pc, opnd);
+}
+
+static inline bool
+encode_opnd_imm5_dup(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_imm5(enc, opcode, pc, opnd, enc_out);
+}
+
 /* x16imm: immediate operand for SIMD load/store multiple structures (post-indexed) */
 
 static inline bool
@@ -8768,6 +8598,144 @@ encode_opnd_x16imm(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_ou
         return true;
     }
     return false;
+}
+
+/* bhsd_immh_sz_q: bhsd_immh_sz with no .1D (immh[3]=1, Q=0). */
+
+static inline bool
+decode_opnd_bhsd_immh_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    if (TESTANY(1u << 22, enc) && !q_bit(enc))
+        return false;
+    return decode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd);
+}
+
+static inline bool
+encode_opnd_bhsd_immh_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_bhsd_immh_sz(enc, opcode, pc, opnd, enc_out);
+}
+
+/* vindex_HS_2lane: Index for vector with half or single, using 2 lanes. */
+
+static inline bool
+decode_opnd_vindex_HS_2lane(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    const uint sz = extract_uint(enc, 22, 1);
+    const uint H = extract_uint(enc, 11, 1);
+    const uint L = extract_uint(enc, 21, 1);
+    uint bits;
+    const bool q = TESTANY(1u << 30, enc);
+    if (sz == 1) { // Half
+        /* Only two pairs in a 64-bit vector: H=1 needs Q=1. */
+        if (H != 0 && !q)
+            return false;
+        bits = (H << 1) | L; // index=H:L
+    } else {                 // Single
+        /* L must be 0 and there is no 64-bit vector form: reachable from
+         * arbitrary encodings, so no assert.
+         */
+        if (L != 0 || !q)
+            return false;
+        bits = H; // index=H
+    }
+
+    *opnd = opnd_create_immed_int(bits, OPSZ_2b);
+    return true;
+}
+
+static inline bool
+encode_opnd_vindex_HS_2lane(uint enc, int opcode, byte *pc, opnd_t opnd,
+                            OUT uint *enc_out)
+{
+    if (!opnd_is_immed_int(opnd))
+        return false;
+
+    const uint sz = extract_uint(enc, 22, 1);
+    const uint H = 11;
+    const uint L = 21;
+
+    const ptr_int_t val = opnd_get_immed_int(opnd);
+    if (sz == 1) { // Half
+        IF_RETURN_FALSE(val < 0 || val >= 4)
+        *enc_out = ((val & 1) << L) | (((val >> 1) & 1) << H); // index=H:L
+    } else {                                                   // Single
+        IF_RETURN_FALSE(val < 0 || val >= 2)
+        *enc_out = (val & 1) << H; // index=H
+    }
+    return true;
+}
+
+/* sd_sz_q: sd_sz with no .1D (sz=1, Q=0). */
+
+static inline bool
+decode_opnd_sd_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    if (TESTANY(1u << 22, enc) && !q_bit(enc))
+        return false;
+    return decode_opnd_sd_sz(enc, opcode, pc, opnd);
+}
+
+static inline bool
+encode_opnd_sd_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_sd_sz(enc, opcode, pc, opnd, enc_out);
+}
+
+/* bhsd_sz_q: bhsd_sz with no .1D (size=11, Q=0). */
+
+static inline bool
+decode_opnd_bhsd_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    if (extract_uint(enc, 22, 2) == 3 && !q_bit(enc))
+        return false;
+    return decode_opnd_bhsd_sz(enc, opcode, pc, opnd);
+}
+
+static inline bool
+encode_opnd_bhsd_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_bhsd_sz(enc, opcode, pc, opnd, enc_out);
+}
+
+/* bhs_sz_lanes: across-lanes reductions (ADDV, SMAXV...): B, H, or S with Q=1. */
+
+static inline bool
+decode_opnd_bhs_sz_lanes(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    if (extract_uint(enc, 22, 2) == 2 && !q_bit(enc))
+        return false;
+    return decode_opnd_bhs_sz(enc, opcode, pc, opnd);
+}
+
+static inline bool
+encode_opnd_bhs_sz_lanes(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_bhs_sz(enc, opcode, pc, opnd, enc_out);
+}
+
+/* hsd_sz_q: H, S, or D with Q=1 (e.g. FCADD/FCMLA vector). */
+
+static inline bool
+decode_opnd_hsd_sz_q(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    const uint bits = extract_uint(enc, 22, 2);
+    if (bits == 0 || (bits == 3 && !q_bit(enc)))
+        return false;
+    *opnd = opnd_create_immed_int(bits, OPSZ_2b);
+    return true;
+}
+
+static inline bool
+encode_opnd_hsd_sz_q(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    if (!opnd_is_immed_int(opnd))
+        return false;
+    const ptr_int_t val = opnd_get_immed_int(opnd);
+    if (val < 1 || val > 3)
+        return false;
+    *enc_out = (uint)val << 22;
+    return true;
 }
 
 /* svemem_vec_sd_gpr16: SVE memory address with GPR offset [<Zn>.S/D{, <Xm>}] */
@@ -9143,6 +9111,38 @@ static inline bool
 encode_opnd_vdq_q_sd_5(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
     return encode_opnd_dq_q(5, opnd, enc_out);
+}
+
+/* scale: The scalar encoding of #fbits operand. This is the number of bits
+ * after the decimal point for fixed-point values.
+ */
+static inline bool
+decode_opnd_scale(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    uint scale = extract_uint(enc, 10, 6);
+    /* With a W register (sf=0) #fbits must be at most 32: scale >= 32. */
+    if (!TESTANY(1u << 31, enc) && scale < 32)
+        return false;
+    *opnd = opnd_create_immed_int(64 - scale, OPSZ_6b);
+    return true;
+}
+
+static inline bool
+encode_opnd_scale(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    ptr_int_t fbits;
+
+    if (!opnd_is_immed_int(opnd))
+        return false;
+
+    fbits = opnd_get_immed_int(opnd);
+
+    if (fbits < 1 || fbits > 64)
+        return false;
+
+    *enc_out = (64 - fbits) << 10; /* 'scale' bitfield in encoding */
+
+    return true;
 }
 
 /* imm6: shift amount for logical and arithmetical instructions */
