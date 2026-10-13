@@ -1870,6 +1870,32 @@ set_our_handler_sigact(kernel_sigaction_t *act, int sig)
     set_handler_sigact(act, sig, (handler_t)main_signal_handler);
 }
 
+/* The kernel acts on some dispositions itself, so for a signal we intercept we
+ * cannot always give it just our handler:
+ * - An ignored signal is discarded by the kernel (unless blocked), stays ignored
+ *   across execve (where a handled one becomes SIG_DFL: a nohup'd child would die
+ *   on SIGHUP), and an ignored SIGCHLD reaps exited children.  We leave a signal
+ *   the app ignores ignored in the kernel, except those we need ourselves (which
+ *   sig_kernel_blockable() rules out).  A client signal event does not see it
+ *   (drmgr always registers one, so we cannot ask whether a client wants it).
+ * - SA_NOCLDSTOP and SA_NOCLDWAIT decide whether a stopped child sends SIGCHLD
+ *   and whether exited children are reaped, so they go to the kernel with our
+ *   handler.
+ */
+static void
+set_our_kernel_sigact(thread_sig_info_t *info, int sig, kernel_sigaction_t *act)
+{
+    kernel_sigaction_t *app = info->sighand->action[sig];
+    if (app != NULL && app->handler == (handler_t)SIG_IGN && sig_kernel_blockable(sig)) {
+        memset(act, 0, sizeof(*act));
+        act->handler = (handler_t)SIG_IGN;
+        return;
+    }
+    set_our_handler_sigact(act, sig);
+    if (sig == SIGCHLD && app != NULL)
+        act->flags |= app->flags & (SA_NOCLDSTOP | SA_NOCLDWAIT);
+}
+
 static void
 set_handler_and_record_app(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
                            kernel_sigaction_t *act)
@@ -1947,6 +1973,11 @@ set_handler_and_record_app(dcontext_t *dcontext, thread_sig_info_t *info, int si
     }
 
     /* Arm the signal. */
+    kernel_sigaction_t ours;
+    if (act->handler == (handler_t)main_signal_handler) {
+        set_our_kernel_sigact(info, sig, &ours);
+        act = &ours;
+    }
     rc = sigaction_syscall(sig, act, NULL);
     DODEBUG({
         /* i#4627: QEMU before 5.0 has a signal mapping bug where 33 and 64
@@ -2001,7 +2032,7 @@ intercept_signal_no_longer_ignore(dcontext_t *dcontext, thread_sig_info_t *info,
 {
     kernel_sigaction_t act;
     ASSERT(sig <= MAX_SIGNUM);
-    set_our_handler_sigact(&act, sig);
+    set_our_kernel_sigact(info, sig, &act);
     DEBUG_DECLARE(int rc =) sigaction_syscall(sig, &act, NULL);
     ASSERT(rc == 0);
 }
@@ -2300,6 +2331,12 @@ handle_sigaction(dcontext_t *dcontext, int sig, const kernel_sigaction_t *act,
     if (info->sighand->is_shared)
         d_r_mutex_unlock(&info->sighand->lock);
     if (info->sighand->we_intercept[sig]) {
+        if (act != NULL) {
+            /* The kernel's part of the new action (see set_our_kernel_sigact()). */
+            kernel_sigaction_t ours;
+            set_our_kernel_sigact(info, sig, &ours);
+            sigaction_syscall(sig, &ours, NULL);
+        }
         /* cancel the syscall */
         *result = handle_post_sigaction(dcontext, true, sig, act, oact, sigsetsize);
         return false;

@@ -1444,6 +1444,10 @@ DR_API
  *
  * \note DR always requests SA_SIGINFO for all signals.
  *
+ * \note A signal the application ignores (SIG_IGN) is ignored by the kernel and
+ * raises no event, unless it is a synchronous fault signal (such as SIGSEGV,
+ * SIGBUS or SIGILL).
+ *
  * \note This version of DR does not intercept the signals SIGCONT,
  * SIGSTOP, SIGTSTP, SIGTTIN, or SIGTTOU.  Future versions should add
  * support for these signals.
