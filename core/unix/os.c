@@ -60,6 +60,12 @@
 #ifndef MAP_ANONYMOUS
 #    define MAP_ANONYMOUS MAP_ANON /* MAP_ANON on Mac */
 #endif
+#ifndef MADV_FREE
+#    define MADV_FREE 8
+#endif
+#ifndef MADV_DONTNEED_LOCKED
+#    define MADV_DONTNEED_LOCKED 24
+#endif
 #ifndef MAP_FIXED_NOREPLACE
 #    define MAP_FIXED_NOREPLACE 0x100000
 #endif
@@ -5477,6 +5483,8 @@ ignorable_system_call_normalized(int num)
     case SYS_munmap:
 #ifdef LINUX
     case SYS_mremap:
+    /* Can discard code: see post_system_call(). */
+    case SYS_madvise:
 #endif
     case SYS_mprotect:
 #ifdef ANDROID
@@ -9003,6 +9011,15 @@ pre_system_call(dcontext_t *dcontext)
         break;
     }
 
+#ifdef LINUX
+    case SYS_madvise:
+        /* save for post */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = sys_param(dcontext, 1);
+        dcontext->sys_param2 = sys_param(dcontext, 2);
+        break;
+#endif
+
 #ifdef SYS_pipe
     case SYS_pipe:
 #endif
@@ -9601,6 +9618,16 @@ process_mmap(dcontext_t *dcontext, app_pc base, size_t size, uint prot,
         }
     }
 
+    if (TESTANY(MAP_FIXED, flags) && !dynamo_vm_area_overlap(base, base + size)) {
+        /* The new mapping replaced whatever was mapped here, which the kernel
+         * makes coherent with no cache maintenance by the app: it is an unmap
+         * and a map, not a protection change, so remove any code we have from
+         * the old contents.  Nothing is flushed where we have no fragments, such
+         * as for the loader's segment mappings over a new module.
+         */
+        app_memory_deallocation(dcontext, base, size,
+                                false /* don't own thread_initexit_lock */, image);
+    }
     LOG(THREAD, LOG_SYSCALLS, 4, "\t try app_mem_alloc\n");
     IF_NO_MEMQUERY(memcache_handle_mmap(dcontext, base, size, memprot, image));
     if (app_memory_allocation(dcontext, base, size, memprot, image _IF_DEBUG(map_type)))
@@ -9841,6 +9868,30 @@ post_system_call(dcontext_t *dcontext)
         process_mmap(dcontext, base, size, prot, flags _IF_DEBUG(map_type));
         break;
     }
+#ifdef LINUX
+    case SYS_madvise: {
+        int advice = (int)dcontext->sys_param2;
+        app_pc addr = (app_pc)dcontext->sys_param0;
+        size_t len = ALIGN_FORWARD((size_t)dcontext->sys_param1, PAGE_SIZE);
+        /* Discarding pages replaces their contents: with zeros, or for a private
+         * file mapping with the file's contents again, which the kernel makes
+         * coherent without cache maintenance by the app.
+         */
+        if (success &&
+            (advice == MADV_DONTNEED || advice == MADV_REMOVE ||
+             advice == MADV_FREE || advice == MADV_DONTNEED_LOCKED) &&
+            executable_vm_area_overlap(addr, addr + len, false /*have no lock*/)) {
+            LOG(THREAD, LOG_VMAREAS | LOG_SYSCALLS, 2,
+                "syscall: madvise %d discards code " PFX "-" PFX "\n", advice, addr,
+                addr + len);
+            flush_fragments_from_region(dcontext, addr, len, false /*no synchall*/,
+                                        THREAD_SYNCH_NO_LOCKS_NO_XFER,
+                                        NULL /*flush_completion_callback*/,
+                                        NULL /*user_data*/);
+        }
+        break;
+    }
+#endif
     case SYS_munmap: {
         app_pc addr = (app_pc)dcontext->sys_param0;
         size_t len = (size_t)dcontext->sys_param1;
