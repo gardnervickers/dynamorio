@@ -5133,8 +5133,14 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
     } else if (safe_is_in_fcache(dcontext, pc, xsp)) {
         LOG(THREAD, LOG_ASYNCH, 2, "record_pending_signal(%d) from cache pc " PFX "\n",
             sig, pc);
-        /* We assume a reroute can be delayed as a process-directed asynch signal. */
-        if (forged || reroute || can_always_delay[sig]) {
+        /* We assume a reroute can be delayed as a process-directed asynch signal.
+         * So can a normally-synchronous signal (SIGILL, SIGSEGV, ...) that was sent
+         * by kill, tgkill or sigqueue: it did not come from the interrupted
+         * instruction, which may be one we cannot translate (a client's meta
+         * instruction).
+         */
+        if (forged || reroute || can_always_delay[sig] ||
+            is_sys_kill(dcontext, pc, xsp, &frame->info)) {
             /* to make translation easier, want to delay if can until d_r_dispatch
              * unlink cur frag, wait for d_r_dispatch
              */
