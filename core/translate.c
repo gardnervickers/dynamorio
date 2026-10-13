@@ -1340,7 +1340,7 @@ restore_stolen_register(dcontext_t *dcontext, priv_mcontext_t *mcontext)
 
 #ifdef AARCH64
 /* Whether the instruction before pc restores the app's x2 from its TLS slot, as the
- * IBL hit path does before it loads and jumps to the fragment's start pc.
+ * IBL hit path does just before it jumps to the fragment's start pc.
  */
 static bool
 ibl_x2_restored_before(cache_pc pc)
@@ -1383,18 +1383,12 @@ ibl_lookup_target(dcontext_t *tdcontext, priv_mcontext_t *mcontext)
                                            branch_type);
             if (start == NULL || end == NULL || pc < start || pc >= end)
                 continue;
-            /* The target is in x2 until the hit path restores the app's x2, after
-             * which x1 still points at the hit entry.
+            /* The target is in x2 until the hit path restores the app's x2, by
+             * which time it has copied the target to x1.  (The hit entry's tag
+             * is no substitute: a concurrent removal replaces it with FAKE_TAG.)
              */
-            if (ibl_x2_restored_before(pc) ||
-                ibl_x2_restored_before(pc - AARCH64_INSTR_SIZE)) {
-                app_pc tag;
-                if (!d_r_safe_read((byte *)mcontext->r1 +
-                                       offsetof(fragment_entry_t, tag_fragment),
-                                   sizeof(tag), &tag))
-                    return NULL;
-                return tag;
-            }
+            if (ibl_x2_restored_before(pc))
+                return (app_pc)mcontext->r1;
             return (app_pc)mcontext->r2;
         }
     }

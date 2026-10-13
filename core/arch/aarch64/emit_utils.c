@@ -959,7 +959,7 @@ emit_indirect_branch_lookup(dcontext_t *dc, generated_code_t *code, byte *pc,
      *     unlink_stub_entry
      * target_delete_entry:
      *     x0: scratch
-     *     x1: table entry pointer from ibl lookup hit path
+     *     x1: indirect branch target, from ibl lookup hit path
      *     x2: app's x2
      *     TLS_REG0_SLOT: app's x0
      *     TLS_REG1_SLOT: app's x1
@@ -972,7 +972,7 @@ emit_indirect_branch_lookup(dcontext_t *dc, generated_code_t *code, byte *pc,
      *     TLS_REG1_SLOT: app's x1 (recovered by fcache_return)
      * On hit exit we output:
      *     x0: fragment_start_pc (points to the fragment prefix)
-     *     x1: scratch reg
+     *     x1: indirect branch target (scratch for the fragment)
      *     x2: app's x2
      *     TLS_REG0_SLOT: app's x0 (recovered by fragment_prefix)
      *     TLS_REG1_SLOT: app's x1 (recovered by fragment_prefix)
@@ -1032,14 +1032,22 @@ emit_indirect_branch_lookup(dcontext_t *dc, generated_code_t *code, byte *pc,
      * will be restored by the fragment prefix.
      */
 
-    /* Recover app's original x2. */
-    APP(&ilist, instr_create_restore_from_tls(dc, DR_REG_R2, TLS_REG2_SLOT));
-
     /* ldr x0, [x1, #start_pc_fragment_offset] */
     APP(&ilist,
         INSTR_CREATE_ldr(dc, opnd_create_reg(DR_REG_X0),
                          OPND_CREATE_MEMPTR(
                              DR_REG_X1, offsetof(fragment_entry_t, start_pc_fragment))));
+    /* Keep the target in x1 for target_delete_entry and for translation: a
+     * concurrent removal from a shared table replaces the entry's tag with
+     * FAKE_TAG, so the entry no longer tells which tag we matched.
+     * mov x1, x2
+     */
+    APP(&ilist,
+        XINST_CREATE_move(dc, opnd_create_reg(DR_REG_X1), opnd_create_reg(DR_REG_X2)));
+
+    /* Recover app's original x2. */
+    APP(&ilist, instr_create_restore_from_tls(dc, DR_REG_R2, TLS_REG2_SLOT));
+
     /* br x0
      * (keep in sync with instr_is_ibl_hit_jump())
      */
@@ -1094,11 +1102,12 @@ emit_indirect_branch_lookup(dcontext_t *dc, generated_code_t *code, byte *pc,
                      0 /* beginning of instruction */,
                      (ptr_uint_t *)&ibl_code->target_delete_entry);
 
-    /* Load next_tag from table entry. */
+    /* The hit path left the target in x1.  We must not reload it from the
+     * table entry, whose tag a concurrent removal may have set to FAKE_TAG.
+     * mov x2, x1
+     */
     APP(&ilist,
-        INSTR_CREATE_ldr(
-            dc, opnd_create_reg(DR_REG_R2),
-            OPND_CREATE_MEMPTR(DR_REG_R1, offsetof(fragment_entry_t, tag_fragment))));
+        XINST_CREATE_move(dc, opnd_create_reg(DR_REG_X2), opnd_create_reg(DR_REG_X1)));
 
     /* Store &linkstub_ibl_deleted in r0, instead of last exit linkstub by skipped code
      * below.

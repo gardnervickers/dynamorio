@@ -5456,16 +5456,11 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
         if (f == NULL && sc->SC_R2 != 0)
             f = fragment_lookup(dcontext, ENTRY_PC_TO_DECODE_PC(sc->SC_R2));
 #    ifdef AARCH64
-        /* Except on the hit path: the app's x2 is restored before the fragment's
-         * start pc is loaded from the hashtable entry, which x1 still points to.
+        /* Except at the end of the hit path: the target is copied to x1 before the
+         * app's x2 is restored.
          */
-        if (f == NULL && sc->regs[1] != 0) {
-            app_pc tag;
-            if (d_r_safe_read((byte *)sc->regs[1] + offsetof(fragment_entry_t, tag_fragment),
-                              sizeof(tag), &tag) &&
-                tag != NULL)
-                f = fragment_lookup(dcontext, tag);
-        }
+        if (f == NULL && sc->regs[1] != 0)
+            f = fragment_lookup(dcontext, (app_pc)sc->regs[1]);
 #    endif
 #elif defined(X86)
         /* The target is initially in xcx but is then copied to xbx. */
