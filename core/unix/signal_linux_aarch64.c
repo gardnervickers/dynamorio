@@ -53,6 +53,28 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame)
     ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
 }
 
+/* Returns the context record at offset in the record list at base (limit bytes
+ * long), or NULL at the terminating record or if the list is malformed: a
+ * record must have a nonzero size that keeps it inside the list.  The kernel
+ * builds these lists, but a corrupt or hostile frame must not make us loop
+ * forever or read past it.
+ */
+static inline struct _aarch64_ctx *
+sigcontext_record_at(byte *base, size_t offset, size_t limit)
+{
+    if (offset > limit || limit - offset < sizeof(struct _aarch64_ctx))
+        return NULL;
+    struct _aarch64_ctx *head = (struct _aarch64_ctx *)(base + offset);
+    if (head->magic == 0)
+        return NULL;
+    if (head->size < sizeof(*head) || head->size > limit - offset) {
+        SYSLOG_INTERNAL_WARNING("Malformed signal context record: magic 0x%x size %u",
+                                head->magic, head->size);
+        return NULL;
+    }
+    return head;
+}
+
 #ifdef DEBUG
 /* Representation of quadwords (128 bits) as 2 doublewords. */
 typedef union {
@@ -96,16 +118,21 @@ dump_sigcontext(dcontext_t *dcontext, sigcontext_t *sc)
 #    ifndef DR_HOST_NOT_TARGET
     if (proc_has_feature(FEATURE_SVE)) {
         size_t offset = sizeof(struct fpsimd_context);
-        struct _aarch64_ctx *next_head = (struct _aarch64_ctx *)(sc->__reserved + offset);
-        while (next_head->magic != 0) {
+        struct _aarch64_ctx *next_head;
+        while ((next_head = sigcontext_record_at(sc->__reserved, offset,
+                                                 sizeof(sc->__reserved))) != NULL) {
             switch (next_head->magic) {
             case ESR_MAGIC: break;
             case EXTRA_MAGIC: break;
             case SVE_MAGIC: {
                 const struct sve_context *sve = (struct sve_context *)(next_head);
                 LOG(THREAD, LOG_ASYNCH, 2, "\tSVE vector length %d bytes\n", sve->vl);
-                ASSERT(sve->vl == proc_get_vector_length_bytes());
                 const unsigned int quads_per_vector = sve_vecquad_from_veclen(sve->vl);
+                /* Only a record with live state has register data to show. */
+                if (sve->head.size < SVE_SIG_CONTEXT_SIZE(quads_per_vector)) {
+                    LOG(THREAD, LOG_ASYNCH, 2, "\tno SVE register data\n\n");
+                    break;
+                }
                 /* The size and offset macros below are used to access register
                  * state from memory. These are defined in the kernel's
                  * sigcontext.h. For scalable vectors, we typically deal in
@@ -131,7 +158,6 @@ dump_sigcontext(dcontext_t *dcontext, sigcontext_t *sc)
                 LOG(THREAD, LOG_ASYNCH, 2, "\tSVE_SIG_FFR_OFFSET   %d\n\n",
                     SVE_SIG_FFR_OFFSET(quads_per_vector));
 
-                dr_simd_t z;
                 int boff; /* Byte offset for each doubleword in a vector. */
                 for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
                     LOG(THREAD, LOG_ASYNCH, 2, "\tz%-2d  0x", i);
@@ -154,10 +180,11 @@ dump_sigcontext(dcontext_t *dcontext, sigcontext_t *sc)
                          * All major Linux arm64 kernel distributions are
                          * little-endian.
                          */
-                        z.u64[boff] = *((uint64 *)((
+                        /* Not stored in a dr_simd_t: the vector may be longer. */
+                        const uint64 dword = *((uint64 *)((
                             ((byte *)sve) + (SVE_SIG_ZREG_OFFSET(quads_per_vector, i)) +
                             (boff * 8))));
-                        LOG(THREAD, LOG_ASYNCH, 2, "%016lx ", z.u64[boff]);
+                        LOG(THREAD, LOG_ASYNCH, 2, "%016lx ", dword);
                     }
                     LOG(THREAD, LOG_ASYNCH, 2, "\n");
                 }
@@ -186,7 +213,6 @@ dump_sigcontext(dcontext_t *dcontext, sigcontext_t *sc)
                 break;
             }
             offset += next_head->size;
-            next_head = (struct _aarch64_ctx *)(sc->__reserved + offset);
         }
     }
 #    endif
@@ -229,9 +255,10 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
         /* fpsimd_context is always the first section. After that the esr_context,
          * extra_context and sve_context sections can be in any order.
          */
-        struct _aarch64_ctx *next_head =
-            (struct _aarch64_ctx *)(sc_full->sc->__reserved + offset);
-        while (next_head->magic != 0) {
+        struct _aarch64_ctx *next_head;
+        while ((next_head = sigcontext_record_at(sc_full->sc->__reserved, offset,
+                                                 sizeof(sc_full->sc->__reserved))) !=
+               NULL) {
             ASSERT(next_head->magic == ESR_MAGIC || next_head->magic == SVE_MAGIC ||
                    next_head->magic == EXTRA_MAGIC);
             switch (next_head->magic) {
@@ -239,9 +266,23 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
             case EXTRA_MAGIC: break;
             case SVE_MAGIC: {
                 const struct sve_context *sve = (struct sve_context *)(next_head);
-                ASSERT(sve->vl == proc_get_vector_length_bytes());
+                /* A record with another vector length (e.g. SME's streaming
+                 * vector length) holds state DR doesn't track.
+                 */
+                if (sve->vl != proc_get_vector_length_bytes())
+                    break;
                 const unsigned int quads_per_vector = sve_vecquad_from_veclen(sve->vl);
-                if (sve->head.size != sizeof(struct sve_context)) {
+                /* The record only has register data if the kernel considers the
+                 * SVE state live; and dr_mcontext_t holds at most 512-bit
+                 * vectors, so copy no more than its slots hold.
+                 */
+                const size_t zsize =
+                    MIN(SVE_SIG_ZREG_SIZE(quads_per_vector), sizeof(mc->simd[0]));
+                const size_t psize =
+                    MIN(SVE_SIG_PREG_SIZE(quads_per_vector), sizeof(mc->svep[0]));
+                const size_t ffrsize =
+                    MIN(SVE_SIG_FFR_SIZE(quads_per_vector), sizeof(mc->ffr));
+                if (sve->head.size >= SVE_SIG_CONTEXT_SIZE(quads_per_vector)) {
                     for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
                         /* SVE specifies that AArch64's SIMD&FP registers
                          * (V0-V31) which hold FP scalars and NEON 128-bit
@@ -253,16 +294,16 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                          */
                         memcpy(&mc->simd[i].u32,
                                (byte *)sve + SVE_SIG_ZREG_OFFSET(quads_per_vector, i),
-                               SVE_SIG_ZREG_SIZE(quads_per_vector));
+                               zsize);
                         memcpy(&mc->simd[i].q, &fpc->vregs[i], sizeof(mc->simd->q));
                     }
                     for (i = 0; i < MCXT_NUM_SVEP_SLOTS; i++) {
                         memcpy(&mc->svep[i].u16,
                                (byte *)sve + SVE_SIG_PREG_OFFSET(quads_per_vector, i),
-                               SVE_SIG_PREG_SIZE(quads_per_vector));
+                               psize);
                     }
                     memcpy(&mc->ffr, (byte *)sve + SVE_SIG_FFR_OFFSET(quads_per_vector),
-                           SVE_SIG_FFR_SIZE(quads_per_vector));
+                           ffrsize);
                 }
                 break;
             }
@@ -271,7 +312,6 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                                         __func__, __LINE__, next_head->magic);
             }
             offset += next_head->size;
-            next_head = (struct _aarch64_ctx *)(sc_full->sc->__reserved + offset);
         }
     }
 #endif
@@ -296,6 +336,9 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
     if (next_head == NULL) {
         return;
     }
+    /* The records live in sigcontext's __reserved area. */
+    const size_t limit = sizeof(sc_full->sc->__reserved) -
+        ((byte *)sc_full->fp_simd_state - (byte *)sc_full->sc->__reserved);
 
     struct fpsimd_context *fpsimd = NULL;
     struct sve_context *sve = NULL;
@@ -303,26 +346,38 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
     const struct _aarch64_ctx null_ctx = { 0 };
 
     /* Search for the context records we are interested in. */
-    while (next_head->magic != 0) {
-        switch (next_head->magic) {
-        case FPSIMD_MAGIC: fpsimd = (void *)next_head; break;
-        case SVE_MAGIC: sve = (void *)next_head; break;
+    struct _aarch64_ctx *record;
+    while ((record = sigcontext_record_at(sc_full->fp_simd_state, offset, limit)) !=
+           NULL) {
+        switch (record->magic) {
+        case FPSIMD_MAGIC: fpsimd = (void *)record; break;
+        case SVE_MAGIC: sve = (void *)record; break;
         default: break;
         }
-        offset += next_head->size;
-        next_head = GET_RECORD_AT_OFFSET(offset);
+        offset += record->size;
     }
+    /* Stopped at the terminator, or at a malformed list: leave the latter alone. */
+    if (limit - offset < sizeof(struct _aarch64_ctx) ||
+        ((struct _aarch64_ctx *)GET_RECORD_AT_OFFSET(offset))->magic != 0)
+        return;
+    next_head = GET_RECORD_AT_OFFSET(offset);
 
     struct _aarch64_ctx *terminator_record = next_head;
     ASSERT(terminator_record->magic == 0);
 
-    if (sve != NULL) {
+    /* The kernel also adds an SVE record on hardware with SME but no SVE, and
+     * its vector length is then SME's streaming one: DR doesn't track that
+     * state, so leave such a record exactly as the kernel wrote it.
+     */
+    const bool sve_tracked = proc_has_feature(FEATURE_SVE) &&
+        (sve == NULL || sve->vl == proc_get_vector_length_bytes());
+
+    if (sve != NULL && sve_tracked) {
         /* Check that we have a full SVE record with space for the register data.
          * The kernel only includes space for register data if it considers the SVE state
          * to be "live" for the current thread.
          * See https://docs.kernel.org/arch/arm64/sve.html for more information.
          */
-        ASSERT(sve->vl == proc_get_vector_length_bytes());
         if (sve->head.size < SVE_SIG_CONTEXT_SIZE(sve_vecquad_from_veclen(sve->vl))) {
             /* sigcontext has an sve_context record but it doesn't contain any register
              * data. We need to remove it and add a new larger record with space for the
@@ -349,6 +404,8 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
     }
 
     if (fpsimd == NULL) {
+        if (limit - offset < sizeof(struct fpsimd_context) + sizeof(*terminator_record))
+            return;
         fpsimd = (struct fpsimd_context *)terminator_record;
         fpsimd->head.magic = FPSIMD_MAGIC;
         fpsimd->head.size = sizeof(struct fpsimd_context);
@@ -358,7 +415,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         *terminator_record = null_ctx;
     }
 
-    if (sve == NULL && proc_has_feature(FEATURE_SVE)) {
+    if (sve == NULL && sve_tracked) {
         sve = (struct sve_context *)terminator_record;
         /* Set other fields of sve_context to zero. New fields may be added and
          * unexpected values in those fields may cause problems. This is a small
@@ -370,11 +427,25 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         sve->head.magic = SVE_MAGIC;
         sve->vl = proc_get_vector_length_bytes();
         const uint quads_per_vector = sve_vecquad_from_veclen(sve->vl);
-        sve->head.size = ALIGN_FORWARD(SVE_SIG_CONTEXT_SIZE(quads_per_vector), 16);
+        const size_t sve_size = ALIGN_FORWARD(SVE_SIG_CONTEXT_SIZE(quads_per_vector), 16);
+        if (limit - offset < sve_size + sizeof(*terminator_record)) {
+            /* Long vectors need the kernel's extra_context area, which we don't
+             * build: leave the SVE state out rather than overrun __reserved.
+             */
+            SYSLOG_INTERNAL_WARNING("No room for a %u-byte SVE signal context record",
+                                    (uint)sve_size);
+            *terminator_record = null_ctx;
+            sve = NULL;
+        } else {
+            sve->head.size = sve_size;
+            /* We may not hold all of each vector: don't leave the rest undefined. */
+            memset((byte *)sve + sizeof(struct sve_context), 0,
+                   sve_size - sizeof(struct sve_context));
 
-        offset += sve->head.size;
-        terminator_record = GET_RECORD_AT_OFFSET(offset);
-        *terminator_record = null_ctx;
+            offset += sve->head.size;
+            terminator_record = GET_RECORD_AT_OFFSET(offset);
+            *terminator_record = null_ctx;
+        }
     }
 
     fpsimd->fpsr = mc->fpsr;
@@ -385,20 +456,25 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         memcpy(&fpsimd->vregs[i], &mc->simd[i].u32[0], sizeof(fpsimd->vregs[i]));
     }
 
-    if (proc_has_feature(FEATURE_SVE)) {
-        ASSERT(sve->vl == proc_get_vector_length_bytes());
+    if (sve != NULL && sve_tracked) {
         const uint quads_per_vector = sve_vecquad_from_veclen(sve->vl);
         ASSERT(sve->head.size >= SVE_SIG_CONTEXT_SIZE(quads_per_vector));
+        /* dr_mcontext_t holds at most 512-bit vectors: write no more than its
+         * slots hold, leaving any higher bits in the record as they are.
+         */
+        const size_t zsize = MIN(sve->vl, sizeof(mc->simd[0]));
+        const size_t psize = MIN(sve->vl / 8, sizeof(mc->svep[0]));
+        const size_t ffrsize = MIN(sve->vl / 8, sizeof(mc->ffr));
 
         for (uint i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
             memcpy((byte *)sve + SVE_SIG_ZREG_OFFSET(quads_per_vector, i),
-                   &mc->simd[i].u32, sve->vl);
+                   &mc->simd[i].u32, zsize);
         }
         for (uint i = 0; i < MCXT_NUM_SVEP_SLOTS; i++) {
             memcpy((byte *)sve + SVE_SIG_PREG_OFFSET(quads_per_vector, i),
-                   &mc->svep[i].u16, sve->vl / 8);
+                   &mc->svep[i].u16, psize);
         }
-        memcpy((byte *)sve + SVE_SIG_FFR_OFFSET(quads_per_vector), &mc->ffr, sve->vl / 8);
+        memcpy((byte *)sve + SVE_SIG_FFR_OFFSET(quads_per_vector), &mc->ffr, ffrsize);
     }
 #endif
 }
