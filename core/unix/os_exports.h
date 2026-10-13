@@ -544,6 +544,8 @@ reg_t
 get_clone_record_app_xsp(void *record);
 byte *
 get_clone_record_dstack(void *record);
+thread_id_t
+get_clone_record_vfork_parent(void *record);
 
 #if defined(AARCHXX) || defined(RISCV64)
 reg_t

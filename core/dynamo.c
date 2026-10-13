@@ -1987,10 +1987,9 @@ mark_thread_execve(thread_record_t *tr, bool execve)
     tr->execve = execve;
     d_r_mutex_lock(&all_threads_lock);
     if (execve) {
-        /* since we free on a second vfork we should never accumulate
-         * more than one
+        /* Several threads can each have a vfork child in execve at once: a
+         * thread frees its own child's state at its next clone.
          */
-        ASSERT(num_execve_threads == 0);
         num_execve_threads++;
     } else {
         ASSERT(num_execve_threads > 0);
@@ -2166,6 +2165,7 @@ add_thread(IF_WINDOWS_ELSE_NP(HANDLE hthread, process_id_t pid), thread_id_t tid
 #else
     tr->pid = pid;
     tr->execve = false;
+    tr->vfork_parent = INVALID_THREAD_ID;
 #endif
     tr->id = tid;
     ASSERT(tid != INVALID_THREAD_ID); /* ensure os never assigns invalid id to a thread */

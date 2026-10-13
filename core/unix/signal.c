@@ -1009,6 +1009,14 @@ get_clone_record_thread_arg(void *record)
 }
 #endif
 
+thread_id_t
+get_clone_record_vfork_parent(void *record)
+{
+    clone_record_t *crec = (clone_record_t *)record;
+    ASSERT(crec != NULL);
+    return TESTANY(CLONE_VFORK, crec->clone_flags) ? crec->caller_id : INVALID_THREAD_ID;
+}
+
 byte *
 get_clone_record_dstack(void *record)
 {

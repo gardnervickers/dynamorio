@@ -2653,6 +2653,8 @@ os_thread_init_finalize(dcontext_t *dcontext, void *os_data)
      * thread_initexit_lock (i#2779).
      */
     signal_thread_inherit(dcontext, os_data);
+    if (os_data != NULL)
+        dcontext->thread_record->vfork_parent = get_clone_record_vfork_parent(os_data);
 }
 
 void
@@ -6556,13 +6558,11 @@ handle_execve(dcontext_t *dcontext)
      * SYS_execve: but execve seems more likely to fail than termination
      * syscalls.  Our solution is to mark this thread as "execve" and hide it
      * from regular thread queries; we clean it up in the process-exiting
-     * synch_with_thread(), or if the same parent thread performs another vfork
+     * synch_with_thread(), or if the same parent thread performs another clone
      * (to prevent heap accumulation from repeated vfork+execve).  Since vfork
-     * on linux suspends the parent, there cannot be any races with the execve
-     * syscall completing: there can't even be peer vfork threads, so we could
-     * set a flag and clean up in d_r_dispatch, but that seems overkill.  (If vfork
-     * didn't suspend the parent we'd need to touch a marker file or something
-     * to know the execve was finished.)
+     * on linux suspends the parent until the execve completes, the parent cannot
+     * race with it; other threads of the parent process can, and each can have
+     * its own vfork child in execve (Go runs os/exec this way).
      */
     mark_thread_execve(dcontext->thread_record, true);
 
@@ -6691,10 +6691,12 @@ handle_execve_post(dcontext_t *dcontext)
     }
 }
 
-/* i#237/PR 498284: to avoid accumulation of thread state we clean up a vfork
- * child who invoked execve here so we have at most one outstanding thread.  we
- * also clean up at process exit and before thread creation.  we could do this
- * in d_r_dispatch but too rare to be worth a flag check there.
+/* i#237/PR 498284: to avoid accumulation of thread state we clean up, before
+ * this thread clones again, a vfork child of this thread that invoked execve.
+ * The kernel held this thread until that child's execve succeeded (a failed
+ * execve unmarks the child), so its state is no longer in use.  A vfork child of
+ * another thread can still be executing in DR on its way to the execve: freeing
+ * it then crashed that child.  Remaining children are cleaned up at process exit.
  */
 static void
 cleanup_after_vfork_execve(dcontext_t *dcontext)
@@ -6707,7 +6709,7 @@ cleanup_after_vfork_execve(dcontext_t *dcontext)
     d_r_mutex_lock(&thread_initexit_lock);
     get_list_of_threads_ex(&threads, &num_threads, true /*include execve*/);
     for (i = 0; i < num_threads; i++) {
-        if (threads[i]->execve) {
+        if (threads[i]->execve && threads[i]->vfork_parent == dcontext->owning_thread) {
             LOG(THREAD, LOG_SYSCALLS, 2, "cleaning up earlier vfork thread " TIDFMT "\n",
                 threads[i]->id);
             dynamo_other_thread_exit(threads[i]);

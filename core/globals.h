@@ -281,6 +281,10 @@ typedef struct _thread_record_t {
 #else
     process_id_t pid; /* thread group id */
     bool execve;      /* exiting due to execve (i#237/PR 498284) */
+    /* For a CLONE_VFORK child, the thread that cloned it, which the kernel holds
+     * until the child execs or exits; else INVALID_THREAD_ID.
+     */
+    thread_id_t vfork_parent;
 #endif
     uint num;                  /* creation ordinal */
     bool under_dynamo_control; /* used for deciding whether to intercept events */
