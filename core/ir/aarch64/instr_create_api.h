@@ -18697,6 +18697,17 @@
 #define INSTR_CREATE_xaflag(dc) instr_create_0dst_0src(dc, OP_xaflag)
 
 /**
+ * Creates an SB instruction.
+ *
+ * This macro is used to encode the forms:
+   \verbatim
+      SB
+   \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ */
+#define INSTR_CREATE_sb(dc) instr_create_0dst_0src(dc, OP_sb)
+
+/**
  * Creates a WFE instruction.
  *
  * This macro is used to encode the forms:
