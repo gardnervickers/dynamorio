@@ -240,7 +240,7 @@ x1011010100xxxxxxxxx01xxxxxxxxxx  r   81   BASE      csneg            wx0 : wx5 
 11010101000000110011xxxx10111111  n   85   BASE        dmb                : imm4
 11010110101111110000001111100000  n   86   BASE       drps                :
 11010101000000110011xxxx10011111  n   87   BASE        dsb                : imm4
-01011110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup            dq0 : dq5 imm5_dup
+01011110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup bhsd_imm5_reg0 : q5 imm5_dup
 00001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             d0 : d5 imm5_dup
 01001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             q0 : q5 imm5_dup
 00001110000xxxxx000011xxxxxxxxxx  n   88   BASE        dup             d0 : wx5_imm5 bhs_imm5_sz_s

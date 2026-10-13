@@ -4214,6 +4214,27 @@ encode_opnd_bhsd_imm5_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *
     return imm5_sz_encode(VECTOR_ELEM_WIDTH_DOUBLE, false, opnd, enc_out);
 }
 
+/* bhsd_imm5_reg0: B, H, S or D register at bit 0 whose size is the element size given
+ * by the lowest set bit of imm5 (bits 16-20), as for DUP (element, scalar).
+ */
+static inline bool
+decode_opnd_bhsd_imm5_reg0(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    int lowest_bit;
+    if (!lowest_bit_set(enc, 16, 5, &lowest_bit) || lowest_bit > 3)
+        return false;
+    return decode_opnd_vector_reg(0, lowest_bit, enc, opnd);
+}
+
+static inline bool
+encode_opnd_bhsd_imm5_reg0(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    int lowest_bit;
+    if (!lowest_bit_set(enc, 16, 5, &lowest_bit) || lowest_bit > 3)
+        return false;
+    return encode_opnd_vector_reg(0, lowest_bit, opnd, enc_out);
+}
+
 static inline bool
 decode_z_tsz_bhsdq_base(uint enc, uint pos, OUT opnd_t *opnd)
 {

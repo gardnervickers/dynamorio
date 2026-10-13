@@ -193,6 +193,7 @@
 -----------?????----------------  bh_imm5_sz # Size encoded as least significant bit in imm5
 -----------?????----------------  bhs_imm5_sz # Size encoded as least significant bit in imm5
 -----------?????----------------  bhsd_imm5_sz # Size encoded as least significant bit in imm5
+-----------?????-----------xxxxx  bhsd_imm5_reg0  # bhsd register, size from lowest set bit of imm5
 -----------?????-----------xxxxx  z_tsz_bhsdq_0   # Z register with size encoded in tsz field
 -----------?????------xxxxx-----  z_tsz_bhsdq_5   # Z register with size encoded in tsz field
 -----------?????------xxxxx-----  wx5_imm5   # reg 5-9 d or q is inferred from bits 16:20
