@@ -1250,6 +1250,70 @@ restore_stolen_register(dcontext_t *dcontext, priv_mcontext_t *mcontext)
 #endif
 }
 
+#ifdef AARCH64
+/* Whether the instruction before pc restores the app's x2 from its TLS slot, as the
+ * IBL hit path does before it loads and jumps to the fragment's start pc.
+ */
+static bool
+ibl_x2_restored_before(cache_pc pc)
+{
+    instr_t instr;
+    bool match;
+    instr_init(GLOBAL_DCONTEXT, &instr);
+    match = decode(GLOBAL_DCONTEXT, pc - AARCH64_INSTR_SIZE, &instr) != NULL &&
+        instr_get_opcode(&instr) == OP_ldr && instr_num_dsts(&instr) == 1 &&
+        opnd_is_reg(instr_get_dst(&instr, 0)) &&
+        opnd_get_reg(instr_get_dst(&instr, 0)) == DR_REG_X2 &&
+        opnd_is_base_disp(instr_get_src(&instr, 0)) &&
+        opnd_get_base(instr_get_src(&instr, 0)) == dr_reg_stolen &&
+        opnd_get_disp(instr_get_src(&instr, 0)) == TLS_REG2_SLOT;
+    instr_free(GLOBAL_DCONTEXT, &instr);
+    return match;
+}
+
+/* If mcontext is stopped in the hashtable lookup of an indirect branch lookup
+ * routine, returns the app target of that indirect branch: the lookup has not yet
+ * changed any app state but x0-x2, whose app values are in their TLS slots.
+ * Otherwise returns NULL.  See emit_indirect_branch_lookup().
+ */
+static app_pc
+ibl_lookup_target(dcontext_t *tdcontext, priv_mcontext_t *mcontext)
+{
+    cache_pc pc = (cache_pc)mcontext->pc;
+    ibl_source_fragment_type_t source_type;
+    ibl_branch_type_t branch_type;
+    for (source_type = IBL_SOURCE_TYPE_START; source_type < IBL_SOURCE_TYPE_END;
+         source_type++) {
+        for (branch_type = IBL_BRANCH_TYPE_START; branch_type < IBL_BRANCH_TYPE_END;
+             branch_type++) {
+            cache_pc start = get_ibl_routine(tdcontext, IBL_LINKED, source_type,
+                                             branch_type);
+            /* The target delete entry and the miss path after it have their own
+             * state, which we do not translate.
+             */
+            cache_pc end = get_ibl_routine(tdcontext, IBL_DELETE, source_type,
+                                           branch_type);
+            if (start == NULL || end == NULL || pc < start || pc >= end)
+                continue;
+            /* The target is in x2 until the hit path restores the app's x2, after
+             * which x1 still points at the hit entry.
+             */
+            if (ibl_x2_restored_before(pc) ||
+                ibl_x2_restored_before(pc - AARCH64_INSTR_SIZE)) {
+                app_pc tag;
+                if (!d_r_safe_read((byte *)mcontext->r1 +
+                                       offsetof(fragment_entry_t, tag_fragment),
+                                   sizeof(tag), &tag))
+                    return NULL;
+                return tag;
+            }
+            return (app_pc)mcontext->r2;
+        }
+    }
+    return NULL;
+}
+#endif
+
 /* The esp in mcontext must either be valid or NULL (if null will be unable to
  * recreate on XP and 03 at vsyscall_after_syscall and on sygate 2k at after syscall).
  * Returns true if successful.  Whether successful or not, attempts to modify
@@ -1264,6 +1328,9 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
                             bool just_pc, fragment_t *owning_f, bool restore_memory)
 {
     recreate_success_t res = (just_pc ? RECREATE_SUCCESS_PC : RECREATE_SUCCESS_STATE);
+#ifdef AARCH64
+    app_pc ibl_target;
+#endif
     dr_mcontext_t xl8_mcontext;
     dr_mcontext_t raw_mcontext;
     dr_mcontext_init(&xl8_mcontext);
@@ -1409,6 +1476,31 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
                 return RECREATE_FAILURE;
         }
         return res;
+#ifdef AARCH64
+    } else if ((ibl_target = ibl_lookup_target(tdcontext, mcontext)) != NULL) {
+        /* A thread looping through indirect branches spends much of its time
+         * here: without this, a synch-all could rarely stop it at a safe spot.
+         * The indirect branch itself is complete, so the app is at its target.
+         */
+        LOG(THREAD_GET, LOG_INTERP | LOG_SYNCH, 2,
+            "recreate_app: in indirect branch lookup, target " PFX "\n", ibl_target);
+        if (!just_pc) {
+            mcontext->r0 = tdcontext->local_state->spill_space.r0;
+            mcontext->r1 = tdcontext->local_state->spill_space.r1;
+            mcontext->r2 = tdcontext->local_state->spill_space.r2;
+            restore_stolen_register(tdcontext, mcontext);
+            mcontext->pc = ibl_target;
+#    ifndef LINUX_KERNEL
+            if (dr_xl8_hook_exists()) {
+                if (!instrument_restore_nonfcache_state_prealloc(
+                        tdcontext, restore_memory, mcontext, &xl8_mcontext))
+                    return RECREATE_FAILURE;
+            }
+#    endif
+        } else
+            mcontext->pc = ibl_target;
+        return res;
+#endif
     } else if (in_generated_routine(tdcontext, mcontext->pc)) {
         LOG(THREAD_GET, LOG_INTERP | LOG_SYNCH, 2,
             "recreate_app state at untranslatable address in "
