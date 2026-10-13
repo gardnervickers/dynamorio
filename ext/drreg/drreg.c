@@ -2208,6 +2208,17 @@ drreg_event_restore_state_without_ilist(void *drcontext, bool restore_memory,
     return true;
 }
 
+/* Returns whether an app instr in ilist translates to pc. */
+static bool
+app_pc_in_ilist(instrlist_t *ilist, app_pc pc)
+{
+    for (instr_t *in = instrlist_first(ilist); in != NULL; in = instr_get_next(in)) {
+        if (instr_is_app(in) && instr_get_app_pc(in) == pc)
+            return true;
+    }
+    return false;
+}
+
 /* Restores machine state modified by drreg, using the reconstructed instrlist
  * of the faulting fragment.
  * This is a more robust version of drreg_event_restore_state_without_ilist
@@ -2284,7 +2295,10 @@ drreg_event_restore_state_with_ilist(void *drcontext, bool restore_memory,
          * drreg_event_restore_state_without_ilist and check for !instr_is_app only if
          * the ilist is available.
          */
-        if (!instr_is_app(inst)) {
+        /* DR's own mangling (which has a translation) can use the DR slots that
+         * we also use once we run out of ours: only consider tool instrs.
+         */
+        if (!instr_is_app(inst) && instr_get_app_pc(inst) == NULL) {
             if (is_our_spill_or_restore(drcontext, inst, &spill, &reg, &slot, NULL)) {
                 if (!spill) {
                     /* If we find a restore for app aflags/gpr, we'll record it now. While
@@ -2393,6 +2407,129 @@ drreg_event_restore_state_with_ilist(void *drcontext, bool restore_memory,
                 }
             }
         }
+    }
+    /* i#3801: the walk above pairs each restore with its spill, so it misses an
+     * app value that was spilled before the fault and is never restored because
+     * the app overwrites the gpr (or the arithmetic flags) later in the fragment.
+     * At the fault, the gpr or flags still hold a tool value while the app value
+     * is in a slot (or, for the flags, a gpr).  We find such values by walking
+     * forward to the fault, tracking where each app value is saved and whether a
+     * tool value has replaced it.  This is conservative: a gpr counts as holding
+     * a tool value only between our spill of its app value (or a load of a tool
+     * value) and the next restore of its app value.
+     */
+    uint app_slot[DR_NUM_GPR_REGS];
+    bool holds_tool_value[DR_NUM_GPR_REGS];
+    bool dr_scratch[DR_NUM_GPR_REGS];
+    reg_id_t app_aflags_reg = DR_REG_NULL;
+    uint app_aflags_slot = MAX_SPILLS;
+    bool aflags_hold_tool_value = false;
+    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
+        app_slot[GPR_IDX(reg)] = MAX_SPILLS;
+        holds_tool_value[GPR_IDX(reg)] = false;
+        dr_scratch[GPR_IDX(reg)] = false;
+    }
+    for (inst = instrlist_first(info->fragment_info.ilist);
+         inst != NULL && inst != fault_inst; inst = instr_get_next(inst)) {
+        if (instr_is_app(inst)) {
+            if (TESTALL(EFLAGS_WRITE_ARITH,
+                        instr_get_arith_flags(inst, DR_QUERY_INCLUDE_ALL))) {
+                app_aflags_reg = DR_REG_NULL;
+                app_aflags_slot = MAX_SPILLS;
+                aflags_hold_tool_value = false;
+            }
+        } else if (instr_get_app_pc(inst) == NULL && is_aflags_spill(inst)) {
+            reg_id_t flags_reg = aflags_spill_get_reg(inst);
+            if (app_slot[GPR_IDX(flags_reg)] != MAX_SPILLS)
+                holds_tool_value[GPR_IDX(flags_reg)] = true;
+            if (!aflags_hold_tool_value)
+                app_aflags_reg = flags_reg;
+            else if (flags_reg == app_aflags_reg)
+                app_aflags_reg = DR_REG_NULL;
+            continue;
+        } else if (instr_get_app_pc(inst) == NULL && is_aflags_restore(inst)) {
+            aflags_hold_tool_value = aflags_restore_get_reg(inst) != app_aflags_reg;
+            continue;
+        } else if (instr_get_app_pc(inst) == NULL &&
+                   is_our_spill_or_restore(drcontext, inst, &spill, &reg, &slot, NULL)) {
+            if (spill) {
+                reg_id_t other;
+                for (other = DR_REG_START_GPR; other <= DR_REG_STOP_GPR; other++) {
+                    if (other != reg && app_slot[GPR_IDX(other)] == slot)
+                        app_slot[GPR_IDX(other)] = MAX_SPILLS;
+                }
+                if (reg == app_aflags_reg)
+                    app_aflags_slot = slot;
+                else if (app_aflags_slot == slot)
+                    app_aflags_slot = MAX_SPILLS;
+                if (!holds_tool_value[GPR_IDX(reg)] && reg != app_aflags_reg) {
+                    /* A spill of the app value, which the tool may now clobber. */
+                    app_slot[GPR_IDX(reg)] = slot;
+                    holds_tool_value[GPR_IDX(reg)] = true;
+                }
+            } else {
+                holds_tool_value[GPR_IDX(reg)] = app_slot[GPR_IDX(reg)] != slot;
+                if (slot == app_aflags_slot)
+                    app_aflags_reg = reg;
+                else if (reg == app_aflags_reg)
+                    app_aflags_reg = DR_REG_NULL;
+            }
+            continue;
+        } else {
+            bool tls;
+            uint offs;
+            if (instr_is_reg_spill_or_restore(drcontext, inst, &tls, &spill, &reg,
+                                              &offs) &&
+                reg >= DR_REG_START_GPR && reg <= DR_REG_STOP_GPR) {
+                /* DR (not us) saving or restoring a gpr it uses as a scratch. */
+                dr_scratch[GPR_IDX(reg)] = spill;
+                continue;
+            }
+            if (TESTANY(EFLAGS_WRITE_ARITH,
+                        instr_get_arith_flags(inst, DR_QUERY_INCLUDE_ALL)))
+                aflags_hold_tool_value = true;
+        }
+        for (int i = 0; i < instr_num_dsts(inst); i++) {
+            opnd_t opnd = instr_get_dst(inst, i);
+            if (!opnd_is_reg(opnd) || !reg_is_gpr(opnd_get_reg(opnd)))
+                continue;
+            reg_id_t dst = reg_to_pointer_sized(opnd_get_reg(opnd));
+            if (dst < DR_REG_START_GPR || dst > DR_REG_STOP_GPR)
+                continue;
+            /* When DR replaces an app instr (e.g., an ADR or a literal load) with
+             * meta instrs, they carry its translation and write its destination,
+             * unless DR saved the gpr first to use it as a scratch.  Meta instrs
+             * translating to an app instr that is still present (a clean call or
+             * other mangling around it) do not write app values.  Only our own
+             * spills and restores (above) mark a gpr as holding a tool value.
+             */
+            if (instr_is_app(inst) ||
+                (instr_get_app_pc(inst) != NULL && !dr_scratch[GPR_IDX(dst)] &&
+                 !app_pc_in_ilist(info->fragment_info.ilist, instr_get_app_pc(inst)))) {
+                app_slot[GPR_IDX(dst)] = MAX_SPILLS;
+                holds_tool_value[GPR_IDX(dst)] = false;
+            }
+            if (dst == app_aflags_reg)
+                app_aflags_reg = DR_REG_NULL;
+        }
+    }
+    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
+        /* DR's own slots (past ours) do not survive app instrs, so only trust ours. */
+        if (spill_slot[GPR_IDX(reg)] == MAX_SPILLS && holds_tool_value[GPR_IDX(reg)] &&
+            app_slot[GPR_IDX(reg)] < ops.num_spill_slots) {
+            LOG(drcontext, DR_LOG_ALL, 3,
+                "%s: app value of %s spilled to slot %d before the fault is never "
+                "restored\n",
+                __FUNCTION__, get_register_name(reg), app_slot[GPR_IDX(reg)]);
+            spill_slot[GPR_IDX(reg)] = app_slot[GPR_IDX(reg)];
+        }
+    }
+    if (aflags_spill_reg == DR_REG_NULL &&
+        spill_slot[GPR_IDX(AFLAGS_ALIAS_REG)] == MAX_SPILLS && aflags_hold_tool_value) {
+        if (app_aflags_reg != DR_REG_NULL)
+            aflags_spill_reg = app_aflags_reg;
+        else if (app_aflags_slot < ops.num_spill_slots)
+            spill_slot[GPR_IDX(AFLAGS_ALIAS_REG)] = app_aflags_slot;
     }
 /* RISC-V does not have any aflags to restore */
 #if !defined(RISCV64)
