@@ -7347,7 +7347,6 @@ os_vfork_pre(dcontext_t *dcontext, uint64 flags)
              */
             d_r_mutex_unlock(&thread_initexit_lock);
             signal_clone_abandoned(dcontext, flags);
-            ATOMIC_DEC(int, uninit_thread_count);
             while (true)
                 os_thread_sleep(10);
         }
@@ -7526,9 +7525,13 @@ handle_clone_pre(dcontext_t *dcontext)
                                 NULL);
         }
         os_clone_pre(dcontext);
-        os_new_thread_pre();
+        /* os_vfork_pre() may wait at a safe spot, so it must come before we
+         * count the new thread as uninitialized: a synch-all that stopped us there
+         * would otherwise wait forever for a child that we have not created.
+         */
         if (TESTANY(CLONE_VFORK, flags))
             os_vfork_pre(dcontext, flags);
+        os_new_thread_pre();
     } else {
         /* This is really a fork. */
         bool clear_sighand = dcontext->sys_num == SYS_clone3 &&
