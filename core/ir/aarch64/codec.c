@@ -2815,6 +2815,19 @@ encode_opnd_z_b_5(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out
     return encode_single_sized(OPSZ_SCALABLE, 5, BYTE_REG, 0, opnd, enc_out);
 }
 
+/* z_b_5p1: The second register of a { <Zn1>.B, <Zn2>.B } pair, Zn1 at bit 5. */
+static inline bool
+decode_opnd_z_b_5p1(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    return decode_single_sized(DR_REG_Z0, DR_REG_Z31, 5, 5, BYTE_REG, 1, enc, opnd);
+}
+
+static inline bool
+encode_opnd_z_b_5p1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_single_sized(OPSZ_SCALABLE, 5, BYTE_REG, 1, opnd, enc_out);
+}
+
 static inline bool
 decode_opnd_z_h_5(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
@@ -3224,31 +3237,6 @@ encode_opnd_cmode_h_sz(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *en
 
     opnd = opnd_create_immed_uint(cmode, OPSZ_1b);
     encode_opnd_int(13, 1, false, false, 0, opnd, enc_out);
-    return true;
-}
-
-static inline bool
-decode_opnd_shift1(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    const int shift_bit = extract_uint(enc, 13, 1);
-    const int shift = shift_bit * 8;
-    *opnd = opnd_create_immed_int(shift, OPSZ_1b);
-    return true;
-}
-
-static inline bool
-encode_opnd_shift1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    if (!opnd_is_immed_int(opnd))
-        return false;
-    /* Only LSL #0 and LSL #8 are encodable. */
-    const int64 shift = opnd_get_immed_int(opnd);
-    if (shift != 0 && shift != 8)
-        return false;
-    const uint shift_bit = (uint)shift / 8;
-
-    *enc_out |= shift_bit << 13;
-
     return true;
 }
 
@@ -3671,6 +3659,12 @@ encode_opnd_imm13_const(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *e
 
     if (width != 64) {
         const ptr_uint_t subfield = imm_val & MASK(width);
+        /* Don't silently drop bits above the element width: accept only a value that
+         * fits it, written either unsigned or sign-extended.
+         */
+        const ptr_uint_t sign = (ptr_uint_t)1 << (width - 1);
+        if (imm_val != subfield && imm_val != (subfield ^ sign) - sign)
+            return false;
         for (int i = 0; i < 64; i += width) {
             imm_val <<= width;
             imm_val |= subfield;
@@ -4709,10 +4703,31 @@ encode_opnd_s16(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
     return encode_opnd_vector_reg(16, 2, opnd, enc_out);
 }
 
+/* Only the first-fault loads allow the scalar+scalar index register Xm to be XZR
+ * (Rm == 11111); for every other contiguous scalar+scalar load, store and prefetch
+ * that encoding is reserved.
+ */
+static inline bool
+svemem_gprs_index_allows_xzr(int opcode)
+{
+    switch (opcode) {
+    case OP_ldff1b:
+    case OP_ldff1h:
+    case OP_ldff1w:
+    case OP_ldff1d:
+    case OP_ldff1sb:
+    case OP_ldff1sh:
+    case OP_ldff1sw: return true;
+    default: return false;
+    }
+}
+
 static inline bool
 svemem_gprs_per_element_decode(opnd_size_t mem_transfer, uint shift_amount, uint enc,
                                int opcode, byte *pc, OUT opnd_t *opnd)
 {
+    if (extract_uint(enc, 16, 5) == 31 && !svemem_gprs_index_allows_xzr(opcode))
+        return false;
     *opnd = opnd_create_base_disp_shift_aarch64(
         decode_reg(extract_uint(enc, 5, 5), true, true),
         decode_reg(extract_uint(enc, 16, 5), true, false), DR_EXTEND_UXTX,
@@ -4724,23 +4739,6 @@ static inline bool
 svemem_gprs_per_element_encode(opnd_size_t mem_transfer, uint shift_amount, uint enc,
                                int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
-    const uint index_reg = opnd_get_index(opnd);
-
-    /* Only the first-fault loads allow Xm to be WZR. */
-    switch (opcode) {
-    case OP_ldff1b:
-    case OP_ldff1h:
-    case OP_ldff1w:
-    case OP_ldff1d:
-    case OP_ldff1sb:
-    case OP_ldff1sh:
-    case OP_ldff1sw: break;
-    default:
-        if (index_reg == DR_REG_WZR)
-            return false;
-        break;
-    }
-
     if (!opnd_is_base_disp(opnd) || opnd_get_size(opnd) != mem_transfer ||
         opnd_get_disp(opnd) != 0)
         return false;
@@ -4756,6 +4754,11 @@ svemem_gprs_per_element_encode(opnd_size_t mem_transfer, uint shift_amount, uint
     if (!encode_reg(&rn, &is_x_register, opnd_get_base(opnd), true) || !is_x_register)
         return false;
     if (!encode_reg(&rm, &is_x_register, opnd_get_index(opnd), false) || !is_x_register)
+        return false;
+    /* As in svemem_gprs_per_element_decode(): Xm == XZR is reserved except for the
+     * first-fault loads.
+     */
+    if (rm == 31 && !svemem_gprs_index_allows_xzr(opcode))
         return false;
 
     *enc_out = rn << 5 | rm << 16;
@@ -5347,7 +5350,10 @@ encode_svememx6_5(aarch64_reg_offset offset, opnd_t opnd, OUT uint *enc_out)
         return false;
 
     const uint scale = 1 << offset;
-    if (opnd_size_in_bytes(opnd_get_size(opnd)) != scale)
+    /* Require the exact size decode_svememx6_5() produces: another size with the same
+     * byte count (e.g. a sub-register size) would not decode back as requested.
+     */
+    if (opnd_get_size(opnd) != opnd_size_from_bytes(scale))
         return false;
 
     const int disp = opnd_get_disp(opnd);
@@ -6043,9 +6049,22 @@ encode_tszl_size(opnd_t opnd, OUT uint *enc_out, uint size_offset)
 static inline bool
 decode_opnd_z_tszl19_bhsd_0(uint enc, int opcode, byte *pc, OUT opnd_t *opnd);
 
+/* For the SVE2 saturating extract narrow instructions (SQXTNB etc.) the 3-bit
+ * tsize field tszh:tszl (bits 22, 20:19) must have exactly one bit set: values
+ * other than 001, 010 and 100 are reserved.
+ */
+static inline bool
+wtszl19_tsize_is_valid(uint enc)
+{
+    const uint tsize = (BITS(enc, 22, 22) << 2) | BITS(enc, 20, 19);
+    return tsize != 0 && (tsize & (tsize - 1)) == 0;
+}
+
 static inline bool
 decode_opnd_z_wtszl19_bhsd_0(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
+    if (!wtszl19_tsize_is_valid(enc))
+        return false;
     return decode_opnd_z_tszl19_bhsd_0(enc, opcode, pc, opnd);
 }
 
@@ -6078,6 +6097,8 @@ extract_tsz_offset(uint enc, uint tszh_pos, uint tszl_pos)
 static inline bool
 decode_opnd_z_wtszl19p1_bhsd_5(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
+    if (!wtszl19_tsize_is_valid(enc))
+        return false;
     aarch64_reg_offset offset = extract_tsz_offset(enc, 22, 19);
     ASSERT(offset < DOUBLE_REG);
     offset += 1;
@@ -6639,6 +6660,41 @@ encode_opnd_fpimm8_5(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_
     return false;
 }
 
+/* shift1: LSL #0 or #8 for SVE integer immediates, depending on bit 13. */
+
+static inline bool
+decode_opnd_shift1(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    const int shift_bit = extract_uint(enc, 13, 1);
+    /* size:sh == 001 (byte elements shifted by 8) is reserved. */
+    if (shift_bit == 1 && extract_uint(enc, 22, 2) == BYTE_REG)
+        return false;
+    const int shift = shift_bit * 8;
+    *opnd = opnd_create_immed_int(shift, OPSZ_1b);
+    return true;
+}
+
+static inline bool
+encode_opnd_shift1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    if (!opnd_is_immed_int(opnd))
+        return false;
+    /* Only LSL #0 and LSL #8 are encodable. */
+    const int64 shift = opnd_get_immed_int(opnd);
+    if (shift != 0 && shift != 8)
+        return false;
+    const uint shift_bit = (uint)shift / 8;
+    /* The element size comes from the vector operand via enc: as in
+     * decode_opnd_shift1(), LSL #8 is reserved for byte elements.
+     */
+    if (shift_bit == 1 && extract_uint(enc, 22, 2) == BYTE_REG)
+        return false;
+
+    *enc_out |= shift_bit << 13;
+
+    return true;
+}
+
 static inline bool
 decode_opnd_z_tszl19_bhsd_0(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
@@ -6847,11 +6903,20 @@ encode_opnd_svemem_vec_vec_idx(uint enc, int opcode, byte *pc, opnd_t opnd,
 
     opnd_size_t element_size;
     dr_extend_type_t extend_type;
+    bool scaled;
     uint msz;
     if (!((zn < 32) && (zm < 32)) ||
         !decode_svemem_vec_vec_opc(BITS(enc, 23, 22), &element_size, &extend_type) ||
         element_size != opnd_get_vector_element_size(opnd) ||
-        extend_type != opnd_get_index_extend(opnd, NULL, &msz))
+        extend_type != opnd_get_index_extend(opnd, &scaled, &msz))
+        return false;
+
+    /* [<Zn>.<T>, <Zm>.<T>{, <mod> <amount>}] has no displacement or negated index,
+     * transfers no memory (see decode_opnd_svemem_vec_vec_idx()), and its shift amount
+     * is the 2-bit msz field, with the index scaled exactly when it is nonzero.
+     */
+    if (opnd_get_disp(opnd) != 0 || TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) ||
+        opnd_get_size(opnd) != OPSZ_0 || msz > 3 || scaled != (msz != 0))
         return false;
 
     *enc_out |= (zm << 16) | (msz << 10) | (zn << 5);

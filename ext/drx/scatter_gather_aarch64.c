@@ -287,6 +287,9 @@ get_scatter_gather_info(instr_t *instr, DR_PARAM_OUT scatter_gather_info_t *sg_i
         break
 
         DRX_CASE_REP(ld1rob, OPSZ_32);
+        DRX_CASE_REP(ld1roh, OPSZ_32);
+        DRX_CASE_REP(ld1row, OPSZ_32);
+        DRX_CASE_REP(ld1rod, OPSZ_32);
 
         DRX_CASE_REP(ld1rqb, OPSZ_16);
         DRX_CASE_REP(ld1rqh, OPSZ_16);

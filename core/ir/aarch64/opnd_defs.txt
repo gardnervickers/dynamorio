@@ -127,6 +127,7 @@
 ----------------------xxxxx-----  q5         # Q register
 ----------------------xxxxx-----  z5         # Z register
 ----------------------xxxxx-----  z_b_5      # Z register with b size elements
+----------------------xxxxx-----  z_b_5p1    # Z register with b size elements, plus 1
 ----------------------xxxxx-----  z_h_5      # Z register with h size elements
 ----------------------xxxxx-----  z_s_5      # Z register with s size elements
 ----------------------xxxxx-----  z_d_5      # Z register with d size elements
@@ -149,7 +150,6 @@
 -------------------xxxxxxxx-----  imm8_5     # 8 bit imm at pos 5
 -------------------xxxxxxxx-----  simm8_5    # signed 8 bit imm at pos 5
 ------------------x-------------  cmode_h_sz # Vector shift for 16 bit elements
-------------------x-------------  shift1     # LSL #0 or #8 depending on bit 13
 ------------------xx------------  imm2idx    # imm from 13-12, used as an index
 ------------------xxxx----------  p10        # SVE predicate registers p0-p15
 ------------------xxxx----------  p10_mrg    # SVE predicate registers p0-p15, merging
@@ -285,6 +285,8 @@
 --------??------------xxxxx-----  z_tb_bhs_5 # sve vector reg, elsz depending on size Tb
 --------??----------??xxxxx-----  mem9post_tag   # Same as mem9_tag but specifically post-indexed
 --------??---------xxxxxxxx-----  fpimm8_5   # floating-point 8 bit imm at pos 5
+--------??--------x-------------  shift1     # LSL #0 or #8 depending on bit 13; LSL #8
+                                             # is reserved for byte elements (size 00)
 --------??-??--------------xxxxx  z_tszl19_bhsd_0 # z element register mediated by the tszl and tszh fields
 --------??-??--------------xxxxx  z_tszl19_bhs_0 # z element register mediated by the tszl and tszh fields
 --------??-??--------------xxxxx  z_tszl19p1_hsd_0 # z element register mediated by the tszl and tszh fields, plus 1

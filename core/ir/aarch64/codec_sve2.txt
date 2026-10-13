@@ -64,6 +64,7 @@
 00000100001xxxxx001110xxxxxxxxxx  n   600  SVE2      eor3          z_d_0 : z_d_0 z_d_16 z_d_5
 01000101xx0xxxxx100100xxxxxxxxxx  n   1078 SVE2     eorbt  z_size_bhsd_0 : z_size_bhsd_0 z_size_bhsd_5 z_size_bhsd_16
 01000101xx0xxxxx100101xxxxxxxxxx  n   1079 SVE2     eortb  z_size_bhsd_0 : z_size_bhsd_0 z_size_bhsd_5 z_size_bhsd_16
+00000101011xxxxx000xxxxxxxxxxxxx  n   92   SVE2       ext          z_b_0 : z_b_5 z_b_5p1 imm8_10
 01100100xx010000100xxxxxxxxxxxxx  n   99   SVE2     faddp   z_size_hsd_0 : p10_mrg_lo.gov z_size_hsd_0 z_size_hsd_5
 0110010010001001101xxxxxxxxxxxxx  n   1156 SVE2    fcvtlt          z_s_0 : p10_mrg_lo.gov z_msz_bhsd_5
 0110010011001011101xxxxxxxxxxxxx  n   1156 SVE2    fcvtlt          z_d_0 : p10_mrg_lo.gov z_s_5
@@ -99,6 +100,12 @@
 11000101000xxxxx110xxxxxxxxxxxxx  n   994  SVE2    ldnt1w          z_d_0 : svemem_vec_30sd_gpr16 p10_zer_lo.gov
 10000101000xxxxx101xxxxxxxxxxxxx  n   994  SVE2    ldnt1w          z_s_0 : svemem_vec_30sd_gpr16 p10_zer_lo.gov
 01000101xx1xxxxx100xxxxxxxx0xxxx  w   1189 SVE2     match    p_size_bh_0 : p10_zer_lo.gov z_size_bh_5 z_size_bh_16
+01000100111xxxxx000010xxxxxxxxxx  n   312  SVE2       mla          z_d_0 : z_d_0 z_d_5 z4_d_16 i1_index_20
+010001000x1xxxxx000010xxxxxxxxxx  n   312  SVE2       mla          z_h_0 : z_h_0 z_h_5 z3_h_16 i3_index_19
+01000100101xxxxx000010xxxxxxxxxx  n   312  SVE2       mla          z_s_0 : z_s_0 z_s_5 z3_s_16 i2_index_19
+01000100111xxxxx000011xxxxxxxxxx  n   313  SVE2       mls          z_d_0 : z_d_0 z_d_5 z4_d_16 i1_index_20
+010001000x1xxxxx000011xxxxxxxxxx  n   313  SVE2       mls          z_h_0 : z_h_0 z_h_5 z3_h_16 i3_index_19
+01000100101xxxxx000011xxxxxxxxxx  n   313  SVE2       mls          z_s_0 : z_s_0 z_s_5 z3_s_16 i2_index_19
 00000100xx1xxxxx011000xxxxxxxxxx  n   321  SVE2       mul  z_size_bhsd_0 : z_size_bhsd_5 z_size_bhsd_16
 01000100111xxxxx111110xxxxxxxxxx  n   321  SVE2       mul          z_d_0 : z_d_5 z4_d_16 i1_index_20
 010001000x1xxxxx111110xxxxxxxxxx  n   321  SVE2       mul          z_h_0 : z_h_5 z3_h_16 i3_index_19
@@ -106,8 +113,10 @@
 00000100111xxxxx001111xxxxxxxxxx  n   1072 SVE2      nbsl          z_d_0 : z_d_0 z_d_16 z_d_5
 01000101xx1xxxxx100xxxxxxxx1xxxx  w   1190 SVE2    nmatch    p_size_bh_0 : p10_zer_lo.gov z_size_bh_5 z_size_bh_16
 00000100001xxxxx011001xxxxxxxxxx  n   328  SVE2      pmul   z_msz_bhsd_0 : z_msz_bhsd_5 z_msz_bhsd_16
-01000101xx0xxxxx011010xxxxxxxxxx  n   1084 SVE2    pmullb    z_size_hd_0 : z_sizep1_bs_5 z_sizep1_bs_16
-01000101xx0xxxxx011011xxxxxxxxxx  n   1085 SVE2    pmullt    z_size_hd_0 : z_sizep1_bs_5 z_sizep1_bs_16
+01000101x10xxxxx011010xxxxxxxxxx  n   1084 SVE2    pmullb    z_size_hd_0 : z_sizep1_bs_5 z_sizep1_bs_16
+01000101000xxxxx011010xxxxxxxxxx  n   1084 SVEAES    pmullb          z_q_0 : z_d_5 z_d_16
+01000101x10xxxxx011011xxxxxxxxxx  n   1085 SVE2    pmullt    z_size_hd_0 : z_sizep1_bs_5 z_sizep1_bs_16
+01000101000xxxxx011011xxxxxxxxxx  n   1085 SVEAES    pmullt          z_q_0 : z_d_5 z_d_16
 01000101xx1xxxxx011010xxxxxxxxxx  n   1086 SVE2   raddhnb  z_sizep1_bhs_0 : z_size_hsd_5 z_size_hsd_16
 01000101xx1xxxxx011011xxxxxxxxxx  n   1087 SVE2   raddhnt  z_sizep1_bhs_0 : z_sizep1_bhs_0 z_size_hsd_5 z_size_hsd_16
 01000101001xxxxx111101xxxxxxxxxx  n   603  SVESHA3      rax1          z_d_0 : z_d_5 z_d_16
@@ -152,6 +161,7 @@
 01000100xx0xxxxx010101xxxxxxxxxx  n   1102 SVE2    smlslt   z_size_hsd_0 : z_size_hsd_0 z_sizep1_bhs_5 z_sizep1_bhs_16
 01000100111xxxxx1010x1xxxxxxxxxx  n   1102 SVE2    smlslt          z_d_0 : z_d_0 z_s_5 z4_s_16 i2_index_11
 01000100101xxxxx1010x1xxxxxxxxxx  n   1102 SVE2    smlslt          z_s_0 : z_s_0 z_msz_bhsd_5 z3_msz_bhsd_16 i3_index_11
+00000100xx1xxxxx011010xxxxxxxxxx  n   399  SVE2     smulh  z_size_bhsd_0 : z_size_bhsd_5 z_size_bhsd_16
 01000101xx0xxxxx011100xxxxxxxxxx  n   1103 SVE2    smullb   z_size_hsd_0 : z_sizep1_bhs_5 z_sizep1_bhs_16
 01000100111xxxxx1100x0xxxxxxxxxx  n   1103 SVE2    smullb          z_d_0 : z_s_5 z4_s_16 i2_index_11
 01000100101xxxxx1100x0xxxxxxxxxx  n   1103 SVE2    smullb          z_s_0 : z_msz_bhsd_5 z3_msz_bhsd_16 i3_index_11
@@ -160,6 +170,7 @@
 01000100101xxxxx1100x1xxxxxxxxxx  n   1104 SVE2    smullt          z_s_0 : z_msz_bhsd_5 z3_msz_bhsd_16 i3_index_11
 00000101xx101101100xxxxxxxxxxxxx  n   882  SVE2    splice  z_size_bhsd_0 : p10_lo.gov z_size_bhsd_5 z_size_bhsd_5p1
 01000100xx001000101xxxxxxxxxxxxx  n   402  SVE2     sqabs  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_5
+01000100xx011000100xxxxxxxxxxxxx  n   403  SVE2     sqadd  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 01000101xx00000111011xxxxxxxxxxx  n   1168 SVE2    sqcadd  z_size_bhsd_0 : z_size_bhsd_0 z_size_bhsd_5 imm1_ew_10
 01000100xx0xxxxx011000xxxxxxxxxx  n   1105 SVE2  sqdmlalb   z_size_hsd_0 : z_size_hsd_0 z_sizep1_bhs_5 z_sizep1_bhs_16
 01000100111xxxxx0010x0xxxxxxxxxx  n   1105 SVE2  sqdmlalb          z_d_0 : z_d_0 z_s_5 z4_s_16 i2_index_11
@@ -215,6 +226,7 @@
 010001010x1xxxxx001001xxxxxxxxxx  n   1175 SVE2   sqshrnt  z_tszl19_bhs_0 : z_tszl19_bhs_0 z_tszl19p1_hsd_5 tszl19lo_imm3_16p1
 010001010x1xxxxx000000xxxxxxxxxx  n   1176 SVE2  sqshrunb  z_tszl19_bhs_0 : z_tszl19p1_hsd_5 tszl19lo_imm3_16p1
 010001010x1xxxxx000001xxxxxxxxxx  n   1177 SVE2  sqshrunt  z_tszl19_bhs_0 : z_tszl19_bhs_0 z_tszl19p1_hsd_5 tszl19lo_imm3_16p1
+01000100xx011010100xxxxxxxxxxxxx  n   425  SVE2     sqsub  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 01000100xx011110100xxxxxxxxxxxxx  n   1149 SVE2    sqsubr  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 010001010x1xx000010000xxxxxxxxxx  n   1139 SVE2    sqxtnb  z_wtszl19_bhsd_0 : z_wtszl19p1_bhsd_5
 010001010x1xx000010001xxxxxxxxxx  n   1140 SVE2    sqxtnt  z_wtszl19_bhsd_0 : z_wtszl19_bhsd_0 z_wtszl19p1_bhsd_5
@@ -274,12 +286,14 @@
 01000100xx0xxxxx010111xxxxxxxxxx  n   1132 SVE2    umlslt   z_size_hsd_0 : z_size_hsd_0 z_sizep1_bhs_5 z_sizep1_bhs_16
 01000100111xxxxx1011x1xxxxxxxxxx  n   1132 SVE2    umlslt          z_d_0 : z_d_0 z_s_5 z4_s_16 i2_index_11
 01000100101xxxxx1011x1xxxxxxxxxx  n   1132 SVE2    umlslt          z_s_0 : z_s_0 z_msz_bhsd_5 z3_msz_bhsd_16 i3_index_11
+00000100xx1xxxxx011011xxxxxxxxxx  n   528  SVE2     umulh  z_size_bhsd_0 : z_size_bhsd_5 z_size_bhsd_16
 01000101xx0xxxxx011110xxxxxxxxxx  n   1133 SVE2    umullb   z_size_hsd_0 : z_sizep1_bhs_5 z_sizep1_bhs_16
 01000100111xxxxx1101x0xxxxxxxxxx  n   1133 SVE2    umullb          z_d_0 : z_s_5 z4_s_16 i2_index_11
 01000100101xxxxx1101x0xxxxxxxxxx  n   1133 SVE2    umullb          z_s_0 : z_msz_bhsd_5 z3_msz_bhsd_16 i3_index_11
 01000101xx0xxxxx011111xxxxxxxxxx  n   1134 SVE2    umullt   z_size_hsd_0 : z_sizep1_bhs_5 z_sizep1_bhs_16
 01000100111xxxxx1101x1xxxxxxxxxx  n   1134 SVE2    umullt          z_d_0 : z_s_5 z4_s_16 i2_index_11
 01000100101xxxxx1101x1xxxxxxxxxx  n   1134 SVE2    umullt          z_s_0 : z_msz_bhsd_5 z3_msz_bhsd_16 i3_index_11
+01000100xx011001100xxxxxxxxxxxxx  n   531  SVE2     uqadd  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 01000100xx001011100xxxxxxxxxxxxx  n   532  SVE2    uqrshl  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 01000100xx001111100xxxxxxxxxxxxx  n   1152 SVE2   uqrshlr  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 010001010x1xxxxx001110xxxxxxxxxx  n   1180 SVE2  uqrshrnb  z_tszl19_bhs_0 : z_tszl19p1_hsd_5 tszl19lo_imm3_16p1
@@ -289,6 +303,7 @@
 01000100xx001101100xxxxxxxxxxxxx  n   1153 SVE2    uqshlr  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 010001010x1xxxxx001100xxxxxxxxxx  n   1182 SVE2   uqshrnb  z_tszl19_bhs_0 : z_tszl19p1_hsd_5 tszl19lo_imm3_16p1
 010001010x1xxxxx001101xxxxxxxxxx  n   1183 SVE2   uqshrnt  z_tszl19_bhs_0 : z_tszl19_bhs_0 z_tszl19p1_hsd_5 tszl19lo_imm3_16p1
+01000100xx011011100xxxxxxxxxxxxx  n   538  SVE2     uqsub  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 01000100xx011111100xxxxxxxxxxxxx  n   1154 SVE2    uqsubr  z_size_bhsd_0 : p10_mrg_lo.gov z_size_bhsd_0 z_size_bhsd_5
 010001010x1xx000010010xxxxxxxxxx  n   1143 SVE2    uqxtnb  z_wtszl19_bhsd_0 : z_wtszl19p1_bhsd_5
 010001010x1xx000010011xxxxxxxxxx  n   1144 SVE2    uqxtnt  z_wtszl19_bhsd_0 : z_wtszl19_bhsd_0 z_wtszl19p1_bhsd_5

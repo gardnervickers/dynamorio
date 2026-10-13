@@ -707,6 +707,9 @@ instr_is_gather(instr_t *instr)
     case OP_ld1sh:
     case OP_ld1sw:
     case OP_ld1rob:
+    case OP_ld1roh:
+    case OP_ld1row:
+    case OP_ld1rod:
     case OP_ld1rqb:
     case OP_ld1rqh:
     case OP_ld1rqw:

@@ -243,6 +243,7 @@
 011001000x1xxxxx000001xxxxxxxxxx  n   144  SVE     fmls          z_h_0 : z_h_0 z_h_5 z3_h_16 i3_index_19
 01100100101xxxxx000001xxxxxxxxxx  n   144  SVE     fmls          z_s_0 : z_s_0 z_s_5 z3_s_16 i2_index_19
 01100100111xxxxx000001xxxxxxxxxx  n   144  SVE     fmls          z_d_0 : z_d_0 z_d_5 z4_d_16 i1_index_20
+01100100111xxxxx111001xxxxxxxxxx  n   1227 F64MM   fmmla          z_d_0 : z_d_0 z_d_5 z_d_16
 01100101xx1xxxxx101xxxxxxxxxxxxx  n   933  SVE     fmsb   z_size_hsd_0 : z_size_hsd_0 p10_mrg_lo.gov z_size_hsd_5 z_size_hsd_16
 01100101xx011010100xxx0000xxxxxx  n   149  SVE     fmul   z_size_hsd_0 : p10_mrg_lo.gov z_size_hsd_0 fpimm1_half_two_5
 01100101xx000010100xxxxxxxxxxxxx  n   149  SVE     fmul   z_size_hsd_0 : p10_mrg_lo.gov z_size_hsd_0 z_size_hsd_5
@@ -342,6 +343,13 @@
 1000010011xxxxxx110xxxxxxxxxxxxx  n   910  SVE    ld1rh          z_s_0 : svememx6_h_5 p10_zer_lo.gov
 1000010011xxxxxx111xxxxxxxxxxxxx  n   910  SVE    ld1rh          z_d_0 : svememx6_h_5 p10_zer_lo.gov
 10100100001xxxxx000xxxxxxxxxxxxx  n   947  SVE   ld1rob          z_b_0 : svemem_gpr_shf p10_zer_lo.gov
+101001000010xxxx001xxxxxxxxxxxxx  n   947  F64MM  ld1rob          z_b_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
+10100101101xxxxx000xxxxxxxxxxxxx  n   1230 F64MM  ld1rod          z_d_0 : svemem_gpr_shf p10_zer_lo.gov
+101001011010xxxx001xxxxxxxxxxxxx  n   1230 F64MM  ld1rod          z_d_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
+10100100101xxxxx000xxxxxxxxxxxxx  n   1228 F64MM  ld1roh          z_h_0 : svemem_gpr_shf p10_zer_lo.gov
+101001001010xxxx001xxxxxxxxxxxxx  n   1228 F64MM  ld1roh          z_h_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
+10100101001xxxxx000xxxxxxxxxxxxx  n   1229 F64MM  ld1row          z_s_0 : svemem_gpr_shf p10_zer_lo.gov
+101001010010xxxx001xxxxxxxxxxxxx  n   1229 F64MM  ld1row          z_s_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
 101001000000xxxx001xxxxxxxxxxxxx  n   948  SVE   ld1rqb          z_b_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
 10100100000xxxxx000xxxxxxxxxxxxx  n   948  SVE   ld1rqb          z_b_0 : svemem_gpr_shf p10_zer_lo.gov
 101001011000xxxx001xxxxxxxxxxxxx  n   1060 SVE   ld1rqd          z_d_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
