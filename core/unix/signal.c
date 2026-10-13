@@ -7433,7 +7433,17 @@ reroute_to_unmasked_thread(dcontext_t *dcontext, sigframe_rt_t *frame, int sig)
              * trying to copy this same signal frame over there.
              */
             bool sent = false;
-            if (siginfo->si_code == SI_QUEUE) {
+#ifdef LINUX
+            /* The kernel accepts the original siginfo for any negative si_code
+             * other than SI_TKILL (sigqueue, timers, mqueues, ...), keeping the
+             * sender's pid, uid and value.
+             */
+            if (siginfo->si_code < 0 && siginfo->si_code != SI_TKILL) {
+                sent = dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
+                                         trecs[i]->id, sig, siginfo) == 0;
+            }
+#endif
+            if (!sent && siginfo->si_code == SI_QUEUE) {
                 /* We need SYS_rt_tgsigqueueinfo which is on kernel 2.6.31+.
                  * If it's not available we have to fall back to SYS_tgkill.
                  * XXX: We ignore custom values in other siginfo fields for someone
@@ -7451,6 +7461,11 @@ reroute_to_unmasked_thread(dcontext_t *dcontext, sigframe_rt_t *frame, int sig)
             RSTATS_INC(num_signals_rerouted);
         }
         d_r_mutex_unlock(&tgt_info->sigblocked_lock);
+        /* The kernel delivers a process-directed signal to one thread: send it to
+         * the first that can take it, not to every one.
+         */
+        if (found)
+            break;
     }
     d_r_mutex_unlock(&thread_initexit_lock);
     if (was_linking)
