@@ -3965,16 +3965,36 @@ fixup_rtframe_pointers(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
 static void
 fixup_siginfo(dcontext_t *dcontext, int sig, sigframe_rt_t *frame)
 {
-    /* For some signals, si_addr is a PC which we must translate. */
-    if (sig != SIGILL && sig != SIGTRAP && sig != SIGFPE)
-        return; /* nothing to do */
     sigcontext_t *sc = get_sigcontext_from_rt_frame(frame);
     kernel_siginfo_t *siginfo = SIGINFO_FROM_RT_FRAME(frame);
-    LOG(THREAD, LOG_ASYNCH, 3, "%s: updating si_addr from " PFX " to " PFX "\n",
-        __FUNCTION__, siginfo->si_addr, sc->SC_XIP);
-    siginfo->si_addr = (void *)sc->SC_XIP;
+    /* Only the kernel's own reports (si_code > 0) carry a code address.  A signal
+     * sent by kill, tgkill or sigqueue (si_code <= 0) keeps the sender's pid, uid
+     * and value in the same union, which we must leave alone.
+     */
+    if (siginfo->si_code <= 0)
+        return;
+    /* For some signals, si_addr is a PC which we must translate. */
+    if (sig == SIGILL || sig == SIGTRAP || sig == SIGFPE) {
+        LOG(THREAD, LOG_ASYNCH, 3, "%s: updating si_addr from " PFX " to " PFX "\n",
+            __FUNCTION__, siginfo->si_addr, sc->SC_XIP);
+        siginfo->si_addr = (void *)sc->SC_XIP;
 #ifdef LINUX
-    siginfo->si_addr_lsb = sc->SC_XIP & 0x1;
+        siginfo->si_addr_lsb = sc->SC_XIP & 0x1;
+#endif
+    }
+#ifdef LINUX
+#    ifndef SYS_SECCOMP
+#        define SYS_SECCOMP 1
+#    endif
+    else if (sig == SIGSYS && siginfo->si_code == SYS_SECCOMP) {
+        /* seccomp reports the address just after the trapping syscall instruction,
+         * which is where the translated context resumes.  The kernel's value is the
+         * address in our syscall gencode or code cache.
+         */
+        LOG(THREAD, LOG_ASYNCH, 3, "%s: updating si_call_addr from " PFX " to " PFX "\n",
+            __FUNCTION__, siginfo->si_call_addr, sc->SC_XIP);
+        siginfo->si_call_addr = (void *)sc->SC_XIP;
+    }
 #endif
 }
 
