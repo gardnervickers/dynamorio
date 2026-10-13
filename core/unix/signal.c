@@ -7011,7 +7011,11 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
             IF_ARM(dr_set_isa_mode(dcontext, get_pc_mode_from_cpsr(sc), NULL));
         }
         execute_default_from_dispatch(dcontext, sig, frame);
-        return true;
+        /* An ignored signal transfers no control: deliver the next one now
+         * rather than leaving it queued (and, if blockable, blocked in the
+         * kernel) until some later exit to dispatch.
+         */
+        return default_action[sig] != DEFAULT_IGNORE;
     }
     CLIENT_ASSERT(action == DR_SIGNAL_DELIVER, "invalid signal event return value");
 
