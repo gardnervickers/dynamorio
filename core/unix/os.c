@@ -6930,7 +6930,16 @@ os_switch_seg_to_context(dcontext_t *dcontext, reg_id_t seg, bool to_app)
         bool app_mem_valid = true;
         if (os_tls->app_lib_tls_base == NULL)
             app_mem_valid = false;
-        else {
+        else if (os_tls->app_lib_tls_base == ostd->inherited_app_lib_tls_base) {
+            /* This thread shares its parent's TLS block (a vfork child). The
+             * parent parked its own DR TLS base in that block's slot before the
+             * clone and takes it back when the clone returns: if we put ours
+             * there, a child that exits or goes native without exec would leave
+             * the parent running on our freed TLS. Keep our privlib segment, as
+             * for an invalid app value below.
+             */
+            app_mem_valid = false;
+        } else {
             uint prot;
             bool rc = get_memory_info(os_tls->app_lib_tls_base, NULL, NULL, &prot);
             /* Rule out a garbage value, which happens in our own test

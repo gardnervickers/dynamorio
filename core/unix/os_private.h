@@ -204,6 +204,15 @@ typedef struct _os_thread_data_t {
     void *priv_lib_tls_base;
     void *priv_alt_tls_base;
     void *dr_tls_base;
+#if defined(AARCHXX) || defined(RISCV64)
+    /* The app TLS base this thread inherited from its parent because its clone
+     * had no CLONE_SETTLS (a vfork child, as in posix_spawn). That TLS block
+     * still belongs to the parent, whose DR TLS base is parked in its
+     * DR_TLS_BASE_OFFSET slot until the clone returns, so this thread must not
+     * swap its own base into it: see os_switch_seg_to_context().
+     */
+    void *inherited_app_lib_tls_base;
+#endif
 #ifdef X86
     void *app_thread_areas;              /* data structure for app's thread area info */
     struct _os_local_state_t *clone_tls; /* i#2089: a copy for children to inherit */

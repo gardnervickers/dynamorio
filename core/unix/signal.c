@@ -1037,6 +1037,8 @@ set_app_lib_tls_base_from_clone_record(dcontext_t *dcontext, void *record)
         /* child and parent share the same TLS */
         os_set_app_tls_base(dcontext, TLS_REG_LIB,
                             ((clone_record_t *)record)->app_lib_tls_base);
+        ((os_thread_data_t *)dcontext->os_field)->inherited_app_lib_tls_base =
+            ((clone_record_t *)record)->app_lib_tls_base;
     }
 }
 #endif
