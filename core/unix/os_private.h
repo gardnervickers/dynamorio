@@ -229,6 +229,11 @@ typedef struct _os_thread_data_t {
      * remaining timeout we pass on a restart, and the parameter it replaces.
      */
     uint64 syscall_start_ns;
+    /* The relative timespec timeout the wait began with, read at its start: the
+     * app's buffer may change before a restart (nanosleep's rem can be its req).
+     */
+    uint64 syscall_timeout_ns;
+    bool syscall_timeout_valid;
     struct timespec syscall_restart_timeout;
     int syscall_restart_param;
     reg_t syscall_restart_app_value;

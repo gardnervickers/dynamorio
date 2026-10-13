@@ -5647,28 +5647,50 @@ os_syscall_restart_pre(dcontext_t *dcontext)
 {
     os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
     bool relative = false;
+    int ts_param = -1; /* The parameter holding a relative timespec timeout. */
     ostd->syscall_restart_param = -1;
+    ostd->syscall_timeout_valid = false;
     switch (dcontext->sys_num) {
 #    ifdef SYS_nanosleep
-    case SYS_nanosleep: relative = true; break;
+    case SYS_nanosleep:
+        relative = true;
+        ts_param = 0;
+        break;
 #    endif
     case SYS_clock_nanosleep:
         relative = !TESTANY(RESTART_TIMER_ABSTIME, (int)sys_param(dcontext, 1));
+        ts_param = 2;
         break;
     case SYS_futex:
         relative = ((int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK) ==
                 RESTART_FUTEX_WAIT &&
             sys_param(dcontext, 3) != 0;
+        ts_param = 3;
         break;
     case SYS_epoll_pwait: relative = (int)sys_param(dcontext, 3) > 0; break;
 #    ifdef SYS_epoll_pwait2
-    case SYS_epoll_pwait2: relative = sys_param(dcontext, 3) != 0; break;
+    case SYS_epoll_pwait2:
+        relative = sys_param(dcontext, 3) != 0;
+        ts_param = 3;
+        break;
 #    endif
-    case SYS_rt_sigtimedwait: relative = sys_param(dcontext, 2) != 0; break;
+    case SYS_rt_sigtimedwait:
+        relative = sys_param(dcontext, 2) != 0;
+        ts_param = 2;
+        break;
     default: break;
     }
-    if (relative)
+    if (relative) {
         ostd->syscall_start_ns = restart_clock_ns();
+        struct timespec ts;
+        if (ts_param >= 0 &&
+            d_r_safe_read((void *)sys_param(dcontext, ts_param), sizeof(ts), &ts) &&
+            ts.tv_sec >= 0 && ts.tv_nsec >= 0) {
+            ostd->syscall_timeout_ns =
+                (uint64)ts.tv_sec * 1000000000ULL + (uint64)ts.tv_nsec;
+            ostd->syscall_timeout_valid = true;
+        }
+    }
 }
 
 /* Sets *out to what is left of a relative timeout ts (app memory) begun at
@@ -5679,9 +5701,19 @@ restart_remaining_timeout(os_thread_data_t *ostd, const struct timespec *app_ts,
                           struct timespec *out)
 {
     struct timespec ts;
-    if (!d_r_safe_read(app_ts, sizeof(ts), &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0)
-        return false;
-    uint64 total = (uint64)ts.tv_sec * 1000000000ULL + (uint64)ts.tv_nsec;
+    uint64 total;
+    if (ostd->syscall_timeout_valid) {
+        /* Not app_ts: the kernel writes nanosleep's remaining time to rem on each
+         * interruption, and an app may pass the same buffer as rem and req, so
+         * re-reading it after the first restart subtracted the time already
+         * waited twice, and repeated suspends cut a long sleep short.
+         */
+        total = ostd->syscall_timeout_ns;
+    } else {
+        if (!d_r_safe_read(app_ts, sizeof(ts), &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0)
+            return false;
+        total = (uint64)ts.tv_sec * 1000000000ULL + (uint64)ts.tv_nsec;
+    }
     uint64 now = restart_clock_ns();
     uint64 elapsed = now > ostd->syscall_start_ns ? now - ostd->syscall_start_ns : 0;
     uint64 left = total > elapsed ? total - elapsed : 0;
