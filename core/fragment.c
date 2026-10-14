@@ -6858,6 +6858,7 @@ flush_fragments_from_region(dcontext_t *dcontext, app_pc base, size_t size,
                             void (*flush_completion_callback)(void *user_data),
                             void *user_data)
 {
+    bool synched;
     /* we pass false to flush_fragments_in_region_start() below for owning the initexit
      * lock */
     ASSERT_DO_NOT_OWN_MUTEX(true, &thread_initexit_lock);
@@ -6867,11 +6868,29 @@ flush_fragments_from_region(dcontext_t *dcontext, app_pc base, size_t size,
     flush_fragments_in_region_start(dcontext, base, size, false /*don't own initexit*/,
                                     false /*don't free futures*/, false /*exec valid*/,
                                     force_synchall, cur_state _IF_DGCDIAG(NULL));
-    if (flush_completion_callback != NULL) {
+    synched = is_self_allsynch_flushing();
+    if (flush_completion_callback != NULL && synched) {
         (*flush_completion_callback)(user_data);
     }
 
     flush_fragments_in_region_finish(dcontext, false);
+
+    if (flush_completion_callback != NULL && !synched) {
+        /* Nothing was executed from the region, so there was nothing to flush
+         * and no thread was suspended.  The callback is documented to run
+         * before the other threads resume (a client may change its
+         * instrumentation there and rely on no thread building or running a
+         * fragment meanwhile), so suspend them for it.
+         */
+        thread_record_t **threads;
+        int num_threads;
+        synch_with_all_threads(THREAD_SYNCH_SUSPENDED_VALID_MCONTEXT_OR_NO_XFER, &threads,
+                               &num_threads, cur_state,
+                               /* As for a synchall flush. */
+                               THREAD_SYNCH_SUSPEND_FAILURE_IGNORE);
+        (*flush_completion_callback)(user_data);
+        end_synch_with_all_threads(threads, num_threads, true /*resume*/);
+    }
 }
 
 /* Invalidate all fragments in all caches.  Currently executed

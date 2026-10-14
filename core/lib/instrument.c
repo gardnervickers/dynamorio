@@ -6949,12 +6949,12 @@ dr_flush_region_ex(app_pc start, size_t size,
         return false;
     }
 
-    if (!executable_vm_area_executed_from(start, start + size)) {
-        /* Nothing to flush (dr_flush_region() passes no callback). */
-        if (flush_completion_callback != NULL)
-            (*flush_completion_callback)(user_data);
+    /* With a completion callback, flush_fragments_from_region() still suspends
+     * the other threads for it when there is nothing to flush.
+     */
+    if (flush_completion_callback == NULL &&
+        !executable_vm_area_executed_from(start, start + size))
         return true;
-    }
 
     flush_fragments_from_region(dcontext, start, size, true /*force synchall*/,
                                 THREAD_SYNCH_NO_LOCKS_NO_XFER, flush_completion_callback,
