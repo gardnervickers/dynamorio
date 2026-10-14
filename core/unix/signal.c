@@ -2144,8 +2144,11 @@ signal_reinstate_handlers(dcontext_t *dcontext, bool ignore_alarm)
          * Not the blocked ones, though: they cannot arrive during init, and
          * ignoring a signal discards its pending instances, such as those the
          * app had blocked and pending when it called execve.
+         * Nor our suspend signal (a delayable realtime signal on Linux): attach
+         * takes over the other threads with it while this is in effect.
          */
-        if (can_always_delay[i] && ignore_alarm && !kernel_sigismember(&cur_mask, i)) {
+        if (can_always_delay[i] && ignore_alarm && !kernel_sigismember(&cur_mask, i) &&
+            i != SUSPEND_SIGNAL) {
             LOG(THREAD, LOG_ASYNCH, 2, "\tignoring %d initially\n", i);
             intercept_signal_ignore_initially(dcontext, info, i);
         } else {
