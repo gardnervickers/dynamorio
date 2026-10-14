@@ -9725,6 +9725,28 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
     ASSERT(((sigframe_rt_t *)xsp)->uc.uc_stack.ss_sp == info->app_sigstack.ss_sp);
 #endif
 
+    /* Hand the signals we have queued for this thread back to the kernel,
+     * addressed to it with their original siginfo: otherwise they are freed with
+     * its state after the detach and never delivered.  We block them all first;
+     * the sigreturn installs the app's mask, and the kernel delivers them then,
+     * or keeps those the app blocks pending, as it would have without us.
+     */
+    if (info->num_pending > 0) {
+        kernel_sigset_t all;
+        kernel_sigfillset(&all);
+        sigprocmask_syscall(SIG_BLOCK, &all, NULL, sizeof(all));
+    }
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        while (info->sigpending[sig] != NULL) {
+            LOG(THREAD, LOG_ASYNCH, 2, "%s: re-sending pending signal %d\n", __FUNCTION__,
+                sig);
+            dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
+                              get_sys_thread_id(), sig,
+                              &info->sigpending[sig]->rt_frame.info);
+            free_pending_signal(info, sig);
+        }
+    }
+
     /* Restore app segment registers. It is important that we do not restore the
      * app's blocked sigmask yet. It is better to let that happen automatically
      * at sigreturn since we've already set it in the signal frame.
