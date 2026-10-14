@@ -53,6 +53,20 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame)
     ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
 }
 
+void
+sigcontext_set_app_pstate(sigcontext_t *sc)
+{
+    /* DR never writes PSTATE.DIT, so the hardware value is the app's. */
+#ifndef DR_HOST_NOT_TARGET
+    if (proc_has_feature(FEATURE_DIT)) {
+        const ptr_uint_t dit_bit = 1 << 24;
+        ptr_uint_t dit;
+        asm volatile("mrs %0, s3_3_c4_c2_5" : "=r"(dit)); /* mrs %0, dit */
+        sc->pstate = (sc->pstate & ~dit_bit) | (dit & dit_bit);
+    }
+#endif
+}
+
 /* Returns the context record at offset in the record list at base (limit bytes
  * long), or NULL at the terminating record or if the list is malformed: a
  * record must have a nonzero size that keeps it inside the list.  The kernel

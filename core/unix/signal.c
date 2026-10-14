@@ -7159,6 +7159,12 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
          * abandon the currently-interrupted context.
          */
         mcontext_to_ucontext(uc, mcontext);
+#if defined(LINUX) && defined(AARCH64)
+        /* Our mcontext has only NZCV of PSTATE: without the rest, the handler
+         * would see DIT clear and its sigreturn would clear the app's DIT.
+         */
+        sigcontext_set_app_pstate(sc);
+#endif
     }
 
     /* Sigreturn needs the target ISA mode to be set in the T bit in cpsr.

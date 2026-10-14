@@ -678,6 +678,14 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc);
 void
 save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame);
 
+#if defined(LINUX) && defined(AARCH64)
+/* Sets the PSTATE fields of sc that our mcontext does not hold (it holds only
+ * NZCV) to the app's current values.
+ */
+void
+sigcontext_set_app_pstate(sigcontext_t *sc);
+#endif
+
 #ifdef DEBUG
 void
 dump_sigcontext(dcontext_t *dcontext, sigcontext_t *sc);
