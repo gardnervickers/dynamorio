@@ -778,7 +778,13 @@ OPTION_DEFAULT(bool, avoid_dlclose, true, "Avoid calling dlclose from DynamoRIO.
 OPTION_DEFAULT(bool, intercept_all_signals, true, "intercept all signals")
 OPTION_DEFAULT(bool, reroute_alarm_signals, true,
                "reroute alarm signals arriving in a blocked-for-app thread")
-OPTION_DEFAULT(uint, max_pending_signals, 8,
+/* Signals the app blocks wait in the kernel; this bounds only those DR holds for delivery.
+ * Past it, a signal goes back to the kernel behind later instances of the same number, so
+ * the bound must cover every signal number that can become deliverable at once, or
+ * realtime signals lose their FIFO order. Each unit is reserved per thread and committed
+ * as used.
+ */
+OPTION_DEFAULT(uint, max_pending_signals, 32,
                "maximum count of pending signals per thread")
 
 /* i#2080: we have had some problems using sigreturn to set a thread's
