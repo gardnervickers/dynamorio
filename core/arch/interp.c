@@ -4078,6 +4078,19 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                  instr_get_opcode(bb->instr) == OP_isb) {
             break;
         }
+        /* Without -hw_cache_consistency, mangle_icache_op() replaces an IC IVAU or DSB
+         * with an exit to d_r_dispatch() that saves the registers as the app's and
+         * resumes at the next instruction.  End the block with it, as with a syscall,
+         * so that instrumentation is complete before it: a tool value in a register
+         * (e.g., one drreg reserved across app instrs, or has not yet restored) would
+         * otherwise become the app's value.
+         */
+        else if (!INTERNAL_OPTION(hw_cache_consistency) &&
+                 (instr_is_icache_op(bb->instr) ||
+                  instr_get_opcode(bb->instr) == OP_dsb ||
+                  instr_get_opcode(bb->instr) == OP_dsbnxs)) {
+            break;
+        }
 #endif
 #if 0 /*i#1313, i#1314*/
         else if (instr_get_opcode(bb->instr) == OP_getsec) {
