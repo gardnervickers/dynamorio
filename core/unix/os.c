@@ -5892,6 +5892,35 @@ restart_remaining_timeout(os_thread_data_t *ostd, const struct timespec *app_ts,
     return true;
 }
 
+/* Returns whether syscall sysnum with first argument arg0 can be waiting in the
+ * kernel when a signal interrupts it with -ERESTARTSYS, as a read or write of a
+ * pipe, socket or terminal can: then, as our handler has SA_RESTART (i#2659),
+ * the kernel points the interrupted context at the syscall instruction just as
+ * if the signal had arrived before the syscall was issued.
+ */
+bool
+os_syscall_may_wait_restartably(int sysnum, reg_t arg0)
+{
+    switch (sysnum) {
+    case SYS_read:
+    case SYS_readv:
+    case SYS_write:
+    case SYS_writev: {
+        struct stat64 st;
+        if (dynamorio_syscall(SYSNUM_FSTAT, 2, arg0, &st) != 0)
+            return false;
+        return S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode) || S_ISCHR(st.st_mode);
+    }
+#    ifdef SYS_recvfrom
+    case SYS_recvfrom:
+    case SYS_recvmsg:
+    case SYS_sendto:
+    case SYS_sendmsg: return true;
+#    endif
+    default: return false;
+    }
+}
+
 /* Returns whether the syscall about to run may wait with no timeout and has no
  * temporary signal mask or other pre-syscall handling that could not be repeated
  * (handle_system_call()).

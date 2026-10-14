@@ -484,6 +484,8 @@ receive_pending_signal(dcontext_t *dcontext);
 bool
 os_syscall_is_unbounded_wait(dcontext_t *dcontext);
 bool
+os_syscall_may_wait_restartably(int sysnum, reg_t arg0);
+bool
 is_signal_restorer_code(byte *pc, size_t *len);
 bool
 is_currently_on_sigaltstack(dcontext_t *dcontext);

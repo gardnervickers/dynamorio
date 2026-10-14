@@ -5257,6 +5257,38 @@ interrupted_inlined_syscall(dcontext_t *dcontext, fragment_t *f,
     return pre_or_post_syscall;
 }
 
+#if defined(LINUX) && defined(AARCH64)
+/* For a signal that interrupted an inlined syscall: with SA_RESTART on our handler
+ * (i#2659), the kernel points a syscall it interrupted with -ERESTARTSYS back at
+ * the syscall instruction, where a signal that arrived before the syscall was
+ * issued also leaves it.  If the app's handler does not have SA_RESTART, the former
+ * must fail with EINTR: for a syscall that can be waiting there, such as a read of
+ * an empty pipe, report it as interrupted rather than restart it after the handler.
+ */
+static void
+adjust_inlined_syscall_for_no_restart(dcontext_t *dcontext, thread_sig_info_t *info,
+                                      int sig, sigcontext_t *sc)
+{
+    kernel_sigaction_t *act = info->sighand->action[sig];
+    if (act == NULL || act->handler == (handler_t)SIG_DFL ||
+        act->handler == (handler_t)SIG_IGN || TESTANY(SA_RESTART, act->flags))
+        return;
+    instr_t instr;
+    instr_init(dcontext, &instr);
+    byte *next_pc = decode(dcontext, (byte *)sc->SC_XIP, &instr);
+    bool at_syscall = next_pc != NULL && instr_valid(&instr) && instr_is_syscall(&instr);
+    instr_free(dcontext, &instr);
+    if (!at_syscall ||
+        !os_syscall_may_wait_restartably((int)sc->SC_SYSNUM_REG, sc->SC_R0))
+        return;
+    LOG(THREAD, LOG_ASYNCH, 2,
+        "inlined syscall %d interrupted for a handler without SA_RESTART: EINTR\n",
+        (int)sc->SC_SYSNUM_REG);
+    sc->SC_XIP = (ptr_uint_t)next_pc;
+    sc->SC_RETURN_REG = -EINTR;
+}
+#endif
+
 /* i#1145: auto-restart syscalls interrupted by signals */
 static bool
 adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
@@ -5733,8 +5765,11 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                     /* We don't set at_auto_restart_syscall because we just leave
                      * the SA_RESTART kernel-supplied resumption point: with no
                      * post-syscall handler to worry about we have no need to
-                     * change anything.
+                     * change anything, unless the app's handler wants EINTR.
                      */
+#if defined(LINUX) && defined(AARCH64)
+                    adjust_inlined_syscall_for_no_restart(dcontext, info, sig, sc);
+#endif
                 } else {
                     /* could get another signal but should be in same fragment */
                     ASSERT(info->interrupted == NULL || info->interrupted == f);
