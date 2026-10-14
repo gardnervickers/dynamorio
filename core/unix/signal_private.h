@@ -342,6 +342,12 @@ typedef struct _sigpending_t {
     bool use_sigcontext;
     /* Was this unblocked at receive time? */
     bool unblocked_at_receipt;
+    /* Was this a process-directed signal (signal_is_process_wide() at receipt)? */
+    bool process_wide;
+    /* Was this a fault of the interrupted instruction (or one we forged for it),
+     * which executing that instruction again raises again?
+     */
+    bool from_instr;
     struct _sigpending_t *next;
 #if defined(LINUX) && defined(X86)
     /* fpstate is no longer kept inside the frame, and is not always present.

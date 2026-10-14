@@ -489,6 +489,28 @@ signal_is_process_wide(dcontext_t *dcontext, kernel_siginfo_t *info, byte *pc, b
 #endif
 }
 
+/* Like signal_is_process_wide() but reads no memory and takes no locks, for any
+ * signal record_pending_signal() records: a signal this thread sent itself is
+ * recognized by pc being at our syscall.
+ */
+static bool
+signal_was_process_directed(dcontext_t *dcontext, kernel_siginfo_t *info, byte *pc)
+{
+#ifdef LINUX
+    if (info->si_code == SI_USER || info->si_code == SI_QUEUE) {
+        if (is_after_do_syscall_addr(dcontext, pc) &&
+            (dcontext->sys_num == SYS_tkill || dcontext->sys_num == SYS_tgkill ||
+             dcontext->sys_num == SYS_rt_tgsigqueueinfo))
+            return false;
+        return true;
+    }
+    /* The other cases do not look at the context. */
+    return signal_is_process_wide(dcontext, info, NULL, NULL);
+#else
+    return true;
+#endif
+}
+
 static inline int
 sigaltstack_syscall(const stack_t *newstack, stack_t *oldstack)
 {
@@ -1445,6 +1467,44 @@ free_pending_signal(thread_sig_info_t *info, int sig)
     info->sigpending[sig] = temp->next;
     special_heap_free(info->sigheap, temp);
     info->num_pending--;
+}
+
+static bool
+is_signal_for_us(kernel_siginfo_t *siginfo, int sig_expecting);
+
+/* For a thread that detaches: hands the first signal we have queued for it with
+ * number sig back to the kernel, with its original siginfo, and frees it.  An
+ * app signal goes back to this thread, or to the process if it was
+ * process-directed.  A fault of an instruction is dropped, as the app context
+ * the thread returns to executes the instruction again, and so are our own
+ * suspend and nudge signals.  The caller blocks all signals first: the app's
+ * mask, installed once the thread returns to the app, decides when the kernel
+ * delivers them, as it would have without us.
+ */
+static void
+resend_pending_signal_at_detach(dcontext_t *dcontext, thread_sig_info_t *info, int sig)
+{
+    sigpending_t *p = info->sigpending[sig];
+    if (p->from_instr) {
+        LOG(THREAD, LOG_ASYNCH, 2, "%s: dropping pending fault %d\n", __FUNCTION__, sig);
+    } else if ((sig == SUSPEND_SIGNAL &&
+                is_signal_for_us(&p->rt_frame.info, SUSPEND_SIGNAL)) ||
+               (sig == NUDGESIG_SIGNUM &&
+                is_signal_for_us(&p->rt_frame.info, NUDGESIG_SIGNUM))) {
+        LOG(THREAD, LOG_ASYNCH, 2, "%s: dropping our pending signal %d\n", __FUNCTION__,
+            sig);
+    } else if (p->process_wide) {
+        /* Natively any thread not blocking it could have taken it. */
+        LOG(THREAD, LOG_ASYNCH, 2, "%s: re-sending pending signal %d to the process\n",
+            __FUNCTION__, sig);
+        requeue_signal_to_process(sig, &p->rt_frame.info);
+    } else {
+        LOG(THREAD, LOG_ASYNCH, 2, "%s: re-sending pending signal %d\n", __FUNCTION__,
+            sig);
+        dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(), get_sys_thread_id(),
+                          sig, &p->rt_frame.info);
+    }
+    free_pending_signal(info, sig);
 }
 
 static void
@@ -5609,6 +5669,13 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
     sigpending_t *pend;
     fragment_t *f = NULL;
     fragment_t wrapper;
+    /* Determined before pc is translated: it looks at DR's syscall pc. */
+    bool process_wide = signal_was_process_directed(dcontext, &frame->info, pc);
+    /* Kernel-generated (si_code > 0): executing the instruction raises it again. */
+    bool from_instr = forged ||
+        (frame->info.si_code > 0 &&
+         (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGFPE ||
+          sig == SIGTRAP));
 
     /* We no longer block SUSPEND_SIGNAL (i#184/PR 450670) or SIGSEGV (i#193/PR 287309).
      * But we can have re-entrancy issues in this routine if the app uses the same
@@ -6173,6 +6240,8 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             /* Signals of one number are delivered in the order they arrived. */
             pend->next = NULL;
             pend->unblocked_at_receipt = !blocked && !reroute;
+            pend->process_wide = process_wide;
+            pend->from_instr = from_instr;
 
             /* FIXME: note that for asynchronous signals we don't need to
              *  bother to record exact machine context, even entire frame,
@@ -9811,9 +9880,9 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
     ASSERT(((sigframe_rt_t *)xsp)->uc.uc_stack.ss_sp == info->app_sigstack.ss_sp);
 #endif
 
-    /* Hand the signals we have queued for this thread back to the kernel,
-     * addressed to it with their original siginfo: otherwise they are freed with
-     * its state after the detach and never delivered.  We block them all first;
+    /* Hand the signals we have queued for this thread back to the kernel
+     * (resend_pending_signal_at_detach()): otherwise they are freed with its state
+     * after the detach and never delivered.  We block them all first;
      * the sigreturn installs the app's mask, and the kernel delivers them then,
      * or keeps those the app blocks pending, as it would have without us.
      */
@@ -9823,14 +9892,8 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
         sigprocmask_syscall(SIG_BLOCK, &all, NULL, sizeof(all));
     }
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        while (info->sigpending[sig] != NULL) {
-            LOG(THREAD, LOG_ASYNCH, 2, "%s: re-sending pending signal %d\n", __FUNCTION__,
-                sig);
-            dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
-                              get_sys_thread_id(), sig,
-                              &info->sigpending[sig]->rt_frame.info);
-            free_pending_signal(info, sig);
-        }
+        while (info->sigpending[sig] != NULL)
+            resend_pending_signal_at_detach(dcontext, info, sig);
     }
 
     /* Restore app segment registers. It is important that we do not restore the
