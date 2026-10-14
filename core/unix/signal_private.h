@@ -335,7 +335,6 @@ typedef struct rt_sigframe {
  * in rt form.
  */
 typedef struct _sigpending_t {
-    sigframe_rt_t rt_frame;
     /* i#182/PR 449996: we provide the faulting access address for SIGSEGV, etc. */
     byte *access_address;
     /* use the sigcontext, not the mcontext (used to restart syscalls for i#1145) */
@@ -343,6 +342,10 @@ typedef struct _sigpending_t {
     /* Was this unblocked at receive time? */
     bool unblocked_at_receipt;
     struct _sigpending_t *next;
+    /* Last but for x86's xstate: on AArch64 an EXTRA record's data follows the
+     * frame, in the signal_frame_extra_size() bytes at the end of each unit.
+     */
+    sigframe_rt_t rt_frame;
 #if defined(LINUX) && defined(X86)
     /* fpstate is no longer kept inside the frame, and is not always present.
      * if we delay we need to ensure we have room for it.
@@ -684,6 +687,16 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame);
  */
 void
 sigcontext_set_app_pstate(sigcontext_t *sc);
+
+/* Returns how many bytes of frame's contents lie beyond sizeof(sigframe_rt_t):
+ * the data of an EXTRA record, which follows the frame's terminator.
+ */
+size_t
+signal_frame_extra_used(sigframe_rt_t *frame);
+
+/* Points the EXTRA record of copy, a copy of orig, at copy's own data. */
+void
+signal_frame_extra_relocate(sigframe_rt_t *copy, sigframe_rt_t *orig);
 #endif
 
 #ifdef DEBUG

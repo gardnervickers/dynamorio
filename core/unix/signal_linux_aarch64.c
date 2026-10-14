@@ -356,6 +356,10 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
 
     struct fpsimd_context *fpsimd = NULL;
     struct sve_context *sve = NULL;
+    /* An EXTRA record must stay directly followed by the terminator and then
+     * its data: we neither add nor move records around it.
+     */
+    bool has_extra = false;
 
     const struct _aarch64_ctx null_ctx = { 0 };
 
@@ -366,6 +370,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         switch (record->magic) {
         case FPSIMD_MAGIC: fpsimd = (void *)record; break;
         case SVE_MAGIC: sve = (void *)record; break;
+        case EXTRA_MAGIC: has_extra = true; break;
         default: break;
         }
         offset += record->size;
@@ -386,6 +391,9 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
     const bool sve_tracked = proc_has_feature(FEATURE_SVE) &&
         (sve == NULL || sve->vl == proc_get_vector_length_bytes());
 
+    if (has_extra && sve != NULL &&
+        sve->head.size < SVE_SIG_CONTEXT_SIZE(sve_vecquad_from_veclen(sve->vl)))
+        sve = NULL; /* No room to grow it: leave it as the kernel wrote it. */
     if (sve != NULL && sve_tracked) {
         /* Check that we have a full SVE record with space for the register data.
          * The kernel only includes space for register data if it considers the SVE state
@@ -418,7 +426,8 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
     }
 
     if (fpsimd == NULL) {
-        if (limit - offset < sizeof(struct fpsimd_context) + sizeof(*terminator_record))
+        if (has_extra ||
+            limit - offset < sizeof(struct fpsimd_context) + sizeof(*terminator_record))
             return;
         fpsimd = (struct fpsimd_context *)terminator_record;
         fpsimd->head.magic = FPSIMD_MAGIC;
@@ -429,7 +438,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         *terminator_record = null_ctx;
     }
 
-    if (sve == NULL && sve_tracked) {
+    if (sve == NULL && sve_tracked && !has_extra) {
         sve = (struct sve_context *)terminator_record;
         /* Set other fields of sve_context to zero. New fields may be added and
          * unexpected values in those fields may cause problems. This is a small
@@ -493,14 +502,104 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
 #endif
 }
 
+/* The most the kernel's signal frames can extend beyond sigframe_rt_t: with
+ * SVE or SME state that does not fit in __reserved, an EXTRA record's data
+ * follows the frame (see frame_extra_record()).
+ */
+static size_t frame_extra_max;
+
 size_t
 signal_frame_extra_size(bool include_alignment)
 {
-    return 0;
+    return frame_extra_max;
 }
+
+#define AUXV_AT_HWCAP 16
+#define AUXV_AT_HWCAP2 26
+#define AUXV_HWCAP_SVE (1ULL << 22)
+#define AUXV_HWCAP2_SME (1ULL << 23)
+/* The kernel's limit on a signal frame's size, EXTRA data included. */
+#define SIGFRAME_MAXSZ (64 * 1024)
 
 void
 signal_arch_init(void)
 {
-    /* Nothing. */
+    /* Only SVE and SME state can overflow __reserved.  Its size depends on
+     * vector lengths the application can change (and the kernel's
+     * AT_MINSIGSTKSZ has been seen not to account for SME), so we allow for
+     * the kernel's limit.
+     */
+    uint64 hwcap = 0, hwcap2 = 0;
+    file_t f = os_open("/proc/self/auxv", OS_OPEN_READ);
+    if (f != INVALID_FILE) {
+        uint64 auxv[2];
+        while (os_read(f, auxv, sizeof(auxv)) == sizeof(auxv) && auxv[0] != 0) {
+            if (auxv[0] == AUXV_AT_HWCAP)
+                hwcap = auxv[1];
+            else if (auxv[0] == AUXV_AT_HWCAP2)
+                hwcap2 = auxv[1];
+        }
+        os_close(f);
+    }
+    if (TESTANY(AUXV_HWCAP_SVE, hwcap) || TESTANY(AUXV_HWCAP2_SME, hwcap2) ||
+        proc_has_feature(FEATURE_SVE))
+        frame_extra_max = SIGFRAME_MAXSZ - sizeof(sigframe_rt_t);
+}
+
+/* Returns frame's EXTRA record if it has a well-formed one whose data fits in
+ * frame_extra_max bytes past sigframe_rt_t, and sets *extra_used to how many
+ * bytes the data extends past it.  The kernel puts the data at the first
+ * 16-byte aligned address after the terminator following the record, which may
+ * be inside __reserved, and rejects any other datap at rt_sigreturn.
+ */
+static struct extra_context *
+frame_extra_record(sigframe_rt_t *frame, size_t *extra_used)
+{
+    sigcontext_t *sc = &frame->uc.uc_mcontext;
+    size_t offset = 0;
+    struct _aarch64_ctx *record;
+    while ((record = sigcontext_record_at(sc->__reserved, offset,
+                                          sizeof(sc->__reserved))) != NULL) {
+        if (record->magic == EXTRA_MAGIC) {
+            struct extra_context *extra = (struct extra_context *)record;
+            byte *data = (byte *)record + record->size +
+                ALIGN_FORWARD(sizeof(struct _aarch64_ctx), 16);
+            if (record->size < sizeof(*extra) ||
+                data > (byte *)sc->__reserved + sizeof(sc->__reserved) ||
+                extra->datap != (uint64)data)
+                return NULL;
+            byte *end = data + extra->size;
+            byte *frame_end = (byte *)(frame + 1);
+            if (end > frame_end + frame_extra_max) {
+                SYSLOG_INTERNAL_WARNING_ONCE("Signal frame EXTRA data (%u bytes) is "
+                                             "larger than expected",
+                                             extra->size);
+                return NULL;
+            }
+            *extra_used = end > frame_end ? end - frame_end : 0;
+            return extra;
+        }
+        offset += record->size;
+    }
+    return NULL;
+}
+
+size_t
+signal_frame_extra_used(sigframe_rt_t *frame)
+{
+    size_t used = 0;
+    frame_extra_record(frame, &used);
+    return used;
+}
+
+void
+signal_frame_extra_relocate(sigframe_rt_t *copy, sigframe_rt_t *orig)
+{
+    size_t used;
+    struct extra_context *extra = frame_extra_record(orig, &used);
+    if (extra == NULL)
+        return;
+    /* The record and its data moved together. */
+    extra = (struct extra_context *)((byte *)copy + ((byte *)extra - (byte *)orig));
+    extra->datap += (byte *)copy - (byte *)orig;
 }

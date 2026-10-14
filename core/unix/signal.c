@@ -4209,6 +4209,7 @@ get_sigstack_frame_ptr(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
             IF_LINUX(IF_X86((sc->fpstate == NULL ? 0
                                                  : signal_frame_extra_size(
                                                        true)) +)) 64 /* align + slop */;
+        IF_LINUX(IF_AARCH64(frame_sz_max += signal_frame_extra_used(frame)));
         if (sp > (byte *)frame && sp < (byte *)frame + frame_sz_max) {
             sp = (byte *)frame;
             /* We're probably *on* the stack right where we want to put the frame! */
@@ -4244,6 +4245,11 @@ get_sigstack_frame_ptr(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
 
     /* now get frame pointer: need to go down to first field of frame */
     sp -= get_app_frame_size(info, sig);
+#if defined(LINUX) && defined(AARCH64)
+    /* An EXTRA record's data follows the frame. */
+    sp -=
+        signal_frame_extra_used(frame == NULL ? &info->sigpending[sig]->rt_frame : frame);
+#endif
 #if defined(LINUX) && defined(X86)
     if (frame == NULL) {
         /* XXX i#641: we always include space for full xstate,
@@ -4516,10 +4522,18 @@ memcpy_rt_frame(sigframe_rt_t *frame, byte *dst, bool from_pending)
         return;
     }
 #endif
+#if defined(LINUX) && defined(AARCH64)
+    /* An EXTRA record's data follows the frame and moves with it. */
+    size_t size = sizeof(sigframe_rt_t) + signal_frame_extra_used(frame);
+    ASSERT(dst >= (byte *)frame + size || dst + size <= (byte *)frame);
+    memcpy(dst, frame, size);
+    signal_frame_extra_relocate((sigframe_rt_t *)dst, frame);
+#else
     /* Ensure no overlap. */
     ASSERT(dst >= (byte *)(frame + 1) + signal_frame_extra_size(true) ||
            dst + sizeof(sigframe_rt_t) + signal_frame_extra_size(true) <= (byte *)frame);
     memcpy(dst, frame, sizeof(sigframe_rt_t));
+#endif
 }
 
 /* Copies frame to sp.
@@ -4548,6 +4562,7 @@ copy_frame_to_stack(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
     sigcontext_t *sc = get_sigcontext_from_rt_frame(frame);
     size += (sc->fpstate == NULL ? 0 : signal_frame_extra_size(true));
 #endif /* LINUX && X86 */
+    IF_LINUX(IF_AARCH64(size += signal_frame_extra_used(frame)));
 
     LOG(THREAD, LOG_ASYNCH, 3, "copy_frame_to_stack: rt=%d, src=" PFX ", sp=" PFX "\n",
         rtframe, frame, sp);
