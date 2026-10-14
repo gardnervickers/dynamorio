@@ -867,6 +867,28 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
     return true;
 }
 
+/* Returns whether eliding the direct cti at cti_pc to target could leave a block whose
+ * app code changes before we are told.  Without -hw_cache_consistency an app writes
+ * code and only then has us flush it (AArch64 IC IVAU), so a thread can still run, and
+ * fault in, a block built from the old code; we translate its state by re-decoding the
+ * current code.  A JIT retargets calls and branches all the time: HotSpot points a call
+ * site at an inline-cache stub, and patches a callee's verified entry to a branch.  Had
+ * we elided the old target into the block, the new ilist would map the old target's
+ * instructions to the new target's: a null receiver faulting in the callee's inline
+ * cache check was reported in the stub, and HotSpot did not recognize the implicit null
+ * check.  Without elision, the patched cti ends the block in both versions and the
+ * target's code is its own block, so its instructions keep their addresses.
+ */
+static bool
+elided_cti_may_change(app_pc cti_pc, app_pc target)
+{
+    uint prot;
+    if (INTERNAL_OPTION(hw_cache_consistency))
+        return false;
+    return (get_memory_info(cti_pc, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot)) ||
+        (get_memory_info(target, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot));
+}
+
 /* Direct cti from prev_pc to new_pc */
 static bool
 check_new_page_jmp(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
@@ -1091,7 +1113,8 @@ bb_process_ubr(dcontext_t *dcontext, build_bb_t *bb)
     } else {
         if (bb->follow_direct && !must_not_be_entered(tgt) &&
             bb->num_elide_jmp < DYNAMO_OPTION(max_elide_jmp) &&
-            (DYNAMO_OPTION(elide_back_jmps) || bb->cur_pc <= tgt)) {
+            (DYNAMO_OPTION(elide_back_jmps) || bb->cur_pc <= tgt) &&
+            !elided_cti_may_change(bb->instr_start, tgt)) {
             if (check_new_page_jmp(dcontext, bb, tgt)) {
                 /* Elide unconditional branch and follow target */
                 bb->num_elide_jmp++;
@@ -1200,7 +1223,8 @@ bb_process_call_direct(dcontext_t *dcontext, build_bb_t *bb)
         /* FIXME: use follow_direct_call() */
         if (bb->follow_direct && !must_not_be_entered(callee) &&
             bb->num_elide_call < DYNAMO_OPTION(max_elide_call) &&
-            (DYNAMO_OPTION(elide_back_calls) || bb->cur_pc <= callee)) {
+            (DYNAMO_OPTION(elide_back_calls) || bb->cur_pc <= callee) &&
+            !elided_cti_may_change(bb->instr_start, callee)) {
             if (check_new_page_jmp(dcontext, bb, callee)) {
                 bb->num_elide_call++;
                 STATS_INC(total_elided_calls);
