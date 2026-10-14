@@ -708,12 +708,14 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
     /* After each app write, update spilled app values: */
     for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
         if (pt->reg[GPR_IDX(reg)].in_use) {
-            if ((force_respill || instr_writes_to_reg(inst, reg, DR_QUERY_INCLUDE_ALL)) &&
-                /* Don't bother if reg is dead beyond this write */
-                (ops.conservative || pt->live_idx == 0 ||
-                 drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx - 1) ==
-                     REG_LIVE ||
-                 pt->aflags.xchg == reg)) {
+            /* Don't bother saving the app value if reg is dead beyond this write;
+             * the tool's value must survive the write either way.
+             */
+            bool app_live = ops.conservative || pt->live_idx == 0 ||
+                drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx - 1) ==
+                    REG_LIVE ||
+                pt->aflags.xchg == reg;
+            if (force_respill || instr_writes_to_reg(inst, reg, DR_QUERY_INCLUDE_ALL)) {
                 uint tmp_slot = MAX_SPILLS;
                 if (pt->aflags.xchg == reg) {
                     /* Bail on keeping the flags in the reg. */
@@ -752,7 +754,9 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                  * inserting before inst (the old instr_get_prev(next)) would
                  * spill before the callee's dr_set_mcontext() changes.
                  */
-                if (restored_for_read[GPR_IDX(reg)]) {
+                if (!app_live) {
+                    /* Nothing to save. */
+                } else if (restored_for_read[GPR_IDX(reg)]) {
                     ASSERT(instr_get_next(inst) != NULL,
                            "missing tool value restore after app read");
                     spill_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, bb,
@@ -761,7 +765,8 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                     spill_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, bb,
                               next /*after*/);
                 }
-                pt->reg[GPR_IDX(reg)].ever_spilled = true;
+                if (app_live)
+                    pt->reg[GPR_IDX(reg)].ever_spilled = true;
                 if (!restored_for_read[GPR_IDX(reg)]) {
                     restore_reg(drcontext, pt, reg, tmp_slot, bb, next /*after*/,
                                 false /*see release_tmp_slots()*/);
