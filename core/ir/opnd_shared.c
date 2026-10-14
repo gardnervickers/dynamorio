@@ -1394,9 +1394,14 @@ opnd_replace_reg(opnd_t *opnd, reg_id_t old_reg, reg_id_t new_reg)
 
     case REG_kind:
         if (old_reg == opnd_get_reg(*opnd)) {
+            /* Keep the vector element size (e.g., an SVE Z or FRINT32X D/Q register):
+             * opnd_create_reg_ex() would drop it.
+             */
+            opnd_size_t element_size = opnd->value.reg_and_element_size.element_size;
             *opnd = opnd_create_reg_ex(
                 new_reg, opnd_is_reg_partial(*opnd) ? opnd_get_size(*opnd) : 0,
                 opnd_get_flags(*opnd));
+            opnd->value.reg_and_element_size.element_size = element_size;
             return true;
         }
         return false;
@@ -1552,9 +1557,12 @@ opnd_replace_reg_resize(opnd_t *opnd, reg_id_t old_reg, reg_id_t new_reg)
         if (reg_overlap(old_reg, opnd_get_reg(*opnd))) {
             reg_id_t sized_reg = reg_match_size_and_type(new_reg, opnd_get_size(*opnd),
                                                          opnd_get_reg(*opnd));
+            /* See opnd_replace_reg(): keep the vector element size. */
+            opnd_size_t element_size = opnd->value.reg_and_element_size.element_size;
             *opnd = opnd_create_reg_ex(
                 sized_reg, opnd_is_reg_partial(*opnd) ? opnd_get_size(*opnd) : 0,
                 opnd_get_flags(*opnd));
+            opnd->value.reg_and_element_size.element_size = element_size;
             return true;
         }
         return false;
