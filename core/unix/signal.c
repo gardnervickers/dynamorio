@@ -3962,6 +3962,13 @@ thread_set_self_mcontext(priv_mcontext_t *mc, bool is_detach_external)
     sc_full.sc->fpstate = NULL;
 #endif
     mcontext_to_sigcontext(&sc_full, mc, DR_MC_ALL);
+#if defined(LINUX) && defined(AARCH64)
+    /* Our mcontext has only NZCV of PSTATE: without the rest, the sigreturn
+     * below would clear the app's DIT (e.g., for a thread a synchall flush or
+     * reset sends back to dispatch while it waits at a safe spot).
+     */
+    sigcontext_set_app_pstate(sc_full.sc);
+#endif
     thread_set_segment_registers(sc_full.sc);
     /* sigreturn takes the mode from cpsr */
     IF_ARM(
