@@ -649,7 +649,17 @@ drreg_respill_aflags_after_write(void *drcontext, per_thread_t *pt, instrlist_t 
                 pt->live_idx, get_where_app_pc(inst));
             /* Release current aflags slot if any. We'll reserve a new one if needed. */
             reset_aflags_spill_slot(pt);
+            /* The spill goes after inst, so any scratch gpr it reserves must be
+             * chosen by the liveness after an app inst: inst may write a gpr that
+             * is dead before it but live after it.  (live_idx counts down to 0 at
+             * the last instr.  For a clean call, inst is a label before the app
+             * instr, whose own liveness applies.)
+             */
+            uint live_idx = pt->live_idx;
+            if (instr_is_app(inst) && pt->live_idx > 0)
+                pt->live_idx--;
             res = drreg_spill_aflags(drcontext, bb, next /*after*/, pt);
+            pt->live_idx = live_idx;
             if (res != DRREG_SUCCESS) {
                 drreg_report_error(res, "failed to spill aflags after app write");
             }
