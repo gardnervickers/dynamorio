@@ -1496,7 +1496,21 @@ raw2trace_t::append_bb_entries(raw2trace_thread_data_t *tdata,
 {
     uint instr_count = in_entry->pc.instr_count;
     const instr_summary_t *instr = nullptr;
+    // The module index comes from the raw file: check it before indexing the
+    // module vector with it (a corrupt or mismatched file must give an error,
+    // not an out-of-bounds read).
+    if (in_entry->pc.modidx != PC_MODIDX_INVALID &&
+        in_entry->pc.modidx >= modvec_().size()) {
+        tdata->error = "Block with an invalid module index " +
+            std::to_string(static_cast<uint64_t>(in_entry->pc.modidx)) + " (" +
+            std::to_string(modvec_().size()) + " modules)";
+        return false;
+    }
     app_pc start_pc = modmap_().get_map_pc(in_entry->pc.modidx, in_entry->pc.modoffs);
+    if (in_entry->pc.modidx == PC_MODIDX_INVALID && start_pc == nullptr) {
+        tdata->error = "Non-module block with no encoding record";
+        return false;
+    }
     app_pc pc, decode_pc = start_pc;
     if (in_entry->pc.modidx == PC_MODIDX_INVALID) {
         log(3, "Appending %u instrs in bb " PFX " in generated code\n", instr_count,
@@ -2055,7 +2069,9 @@ raw2trace_t::get_marker_value(raw2trace_thread_data_t *tdata,
         marker_val = (marker_val << 32) | static_cast<uintptr_t>(next->extended.valueA);
         *entry = next;
 #else
-        return "TRACE_MARKER_TYPE_SPLIT_VALUE unexpected for 32-bit";
+        // (This used to return the message, which converts to true: success.)
+        tdata->error = "TRACE_MARKER_TYPE_SPLIT_VALUE unexpected for 32-bit";
+        return false;
 #endif
     }
 #ifdef X64 // 32-bit always had the absolute pc as the raw marker value.
@@ -2069,7 +2085,12 @@ raw2trace_t::get_marker_value(raw2trace_thread_data_t *tdata,
             // legacy traces.
             kernel_interrupted_raw_pc_t raw_pc;
             raw_pc.combined_value = marker_val;
-            DR_ASSERT(raw_pc.pc.modidx != PC_MODIDX_INVALID);
+            if (raw_pc.pc.modidx == PC_MODIDX_INVALID ||
+                raw_pc.pc.modidx >= modvec_().size()) {
+                tdata->error = "Kernel transfer marker with an invalid module index " +
+                    std::to_string(static_cast<uint64_t>(raw_pc.pc.modidx));
+                return false;
+            }
             app_pc pc = modvec_()[raw_pc.pc.modidx].orig_seg_base +
                 (raw_pc.pc.modoffs - modvec_()[raw_pc.pc.modidx].seg_offs);
             log(3,
