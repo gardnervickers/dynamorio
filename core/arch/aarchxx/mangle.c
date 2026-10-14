@@ -4352,6 +4352,26 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     return next_instr;
 }
 
+/* An exception return clears the local exclusive monitor (ClearExclusiveLocal()
+ * in the architecture's exception return), so natively a store-exclusive after
+ * a system call, or after a signal handler was entered, fails.  The
+ * -ldstex2cas reservation lives in TLS, which neither event touches: without
+ * this, "ldxr; svc; stxr" succeeded under DR.  We clear it, as for OP_clrex,
+ * whenever the application makes a system call and whenever we deliver a
+ * signal to one of its handlers.  (Other kernel entries the application does
+ * not see, such as interrupts, also clear the hardware monitor; skipping those
+ * only makes a store-exclusive succeed where it could have failed spuriously.)
+ */
+void
+ldstex_clear_reservation(dcontext_t *dcontext)
+{
+    if (!INTERNAL_OPTION(ldstex2cas) || dcontext == NULL || dcontext == GLOBAL_DCONTEXT ||
+        dcontext->local_state == NULL)
+        return;
+    dcontext->local_state->spill_space.ldstex_addr = 0;
+    dcontext->local_state->spill_space.ldstex_size = 0;
+}
+
 /* Returns NULL if it did not instrument and the caller should handle stolen reg, etc. */
 instr_t *
 mangle_exclusive_monitor_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,

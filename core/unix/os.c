@@ -7986,7 +7986,11 @@ pre_system_call(dcontext_t *dcontext)
     bool execute_syscall = true;
     dr_where_am_i_t old_whereami = dcontext->whereami;
     dcontext->whereami = DR_WHERE_SYSCALL_HANDLER;
-    /* FIXME We haven't yet done the work to detect which syscalls we
+#ifdef AARCHXX
+    /* The kernel's return from the system call clears the exclusive monitor. */
+    ldstex_clear_reservation(dcontext);
+#endif
+    /* XXX We haven't yet done the work to detect which syscalls we
      * can determine a priori will fail. Once we do, we will set the
      * expect_last_syscall_to_fail to true for those case, and can
      * confirm in post_system_call() that the syscall failed as

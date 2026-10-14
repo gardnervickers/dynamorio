@@ -205,6 +205,14 @@ typedef struct _local_state_t {
     spill_state_t spill_space;
 } local_state_t;
 
+#ifdef AARCHXX
+/* Clears the -ldstex2cas software exclusive monitor, as an exception return
+ * clears the hardware one: see ldstex_clear_reservation() in mangle.c.
+ */
+void
+ldstex_clear_reservation(dcontext_t *dcontext);
+#endif
+
 typedef struct _local_state_extended_t {
     spill_state_t spill_space;
     table_stat_state_t table_space;

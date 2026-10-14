@@ -4539,6 +4539,10 @@ copy_frame_to_stack(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
     LOG(THREAD, LOG_ASYNCH, 3, "copy_frame_to_stack: rt=%d, src=" PFX ", sp=" PFX "\n",
         rtframe, frame, sp);
     fixup_siginfo(dcontext, sig, frame);
+#ifdef AARCHXX
+    /* The kernel's return into the handler clears the exclusive monitor. */
+    ldstex_clear_reservation(dcontext);
+#endif
 
     /* We avoid querying memory as it incurs global contended locks. */
     flush_pc =

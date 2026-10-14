@@ -974,6 +974,20 @@ mangle_syscall(dcontext_t *dcontext, instrlist_t *ilist, uint flags, instr_t *in
         return;
     }
 
+#    ifdef AARCH64
+    /* A system call inlined in the cache never reaches pre_system_call(), which
+     * clears the -ldstex2cas reservation as the kernel's return clears the
+     * exclusive monitor (see ldstex_clear_reservation()): clear it here.  This
+     * goes before the signal barrier below, which must end right at the syscall.
+     */
+    if (INTERNAL_OPTION(ldstex2cas)) {
+        PRE(ilist, instr,
+            instr_create_save_to_tls(dcontext, DR_REG_XZR, TLS_LDSTEX_ADDR_SLOT));
+        PRE(ilist, instr,
+            instr_create_save_to_tls(dcontext, DR_REG_XZR, TLS_LDSTEX_SIZE_SLOT));
+    }
+#    endif
+
     /* signal barrier: need to be able to exit fragment immediately
      * prior to syscall, so we set up an exit cti with a jmp right beforehand
      * that by default hops over the exit cti.
