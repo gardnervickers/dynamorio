@@ -9330,6 +9330,24 @@ alarm_signal_has_DR_only_itimer(dcontext_t *dcontext, int signal)
     return DR_only;
 }
 
+/* Charges time the kernel's timer has run to the app's and our own pending
+ * timers, leaving each still armed.  Caller should hold the lock.
+ */
+static void
+itimer_charge_elapsed(thread_sig_info_t *info, int which, uint64 elapsed)
+{
+    if ((*info->itimer)[which].app.value > 0) {
+        (*info->itimer)[which].app.value = (*info->itimer)[which].app.value > elapsed
+            ? (*info->itimer)[which].app.value - elapsed
+            : 1;
+    }
+    if ((*info->itimer)[which].dr.value > 0) {
+        (*info->itimer)[which].dr.value = (*info->itimer)[which].dr.value > elapsed
+            ? (*info->itimer)[which].dr.value - elapsed
+            : 1;
+    }
+}
+
 static bool
 handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
 {
@@ -9446,18 +9464,9 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
         if ((*info->itimer)[which].actual.interval > 0 &&
             getitimer_syscall(which, &now) == SUCCESS) {
             uint64 left = timeval_to_usec(&now.it_value);
-            uint64 lag = left > 0 && left <= (*info->itimer)[which].actual.interval
-                ? (*info->itimer)[which].actual.interval - left
-                : 0;
-            if ((*info->itimer)[which].app.value > 0) {
-                (*info->itimer)[which].app.value = (*info->itimer)[which].app.value > lag
-                    ? (*info->itimer)[which].app.value - lag
-                    : 1;
-            }
-            if ((*info->itimer)[which].dr.value > 0) {
-                (*info->itimer)[which].dr.value = (*info->itimer)[which].dr.value > lag
-                    ? (*info->itimer)[which].dr.value - lag
-                    : 1;
+            if (left > 0 && left <= (*info->itimer)[which].actual.interval) {
+                itimer_charge_elapsed(info, which,
+                                      (*info->itimer)[which].actual.interval - left);
             }
         }
         (*info->itimer)[which].actual.value = 0;
@@ -9643,6 +9652,24 @@ handle_pre_setitimer(dcontext_t *dcontext, int which, const struct itimerval *ne
     if (d_r_safe_read(new_timer, sizeof(val), &val)) {
         if (info->shared_itimer)
             acquire_recursive_lock(&(*info->itimer)[which].lock);
+        /* With a timer of our own, the syscall replaces the kernel's timer while it
+         * may be counting down for us: charge the time it has run to both timers
+         * first, so ours keeps its schedule when itimer_app_installed() re-merges
+         * it rather than restarting its full value from now.
+         */
+        if (((*info->itimer)[which].dr.value > 0 ||
+             (*info->itimer)[which].dr.interval > 0) &&
+            (*info->itimer)[which].actual.value > 0) {
+            struct itimerval now;
+            if (getitimer_syscall(which, &now) == SUCCESS) {
+                uint64 left = timeval_to_usec(&now.it_value);
+                if (left > 0 && left <= (*info->itimer)[which].actual.value) {
+                    itimer_charge_elapsed(info, which,
+                                          (*info->itimer)[which].actual.value - left);
+                    (*info->itimer)[which].actual.value = left;
+                }
+            }
+        }
         /* Save a copy in case the syscall fails, and to report the prior timer.
          * The syscall itself sets the kernel's timer to the app's values:
          * handle_post_setitimer() accounts for that.
