@@ -1226,14 +1226,14 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         }
         if (is_last_instr(drcontext, instr)) {
             // We need our block-final call below.
-            NOTIFY(0, "Block-final exclusive store: may hang");
+            NOTIFY(0, "Block-final exclusive store: may hang\n");
             ud->strex = NULL;
         } else
             return flags;
     } else if (strex != NULL) {
         // Assuming there are no consecutive strex instructions, otherwise we
         // will insert instrumentation code at the second strex instruction.
-        NOTIFY(0, "Consecutive exclusive stores not supported: may hang.");
+        NOTIFY(0, "Consecutive exclusive stores not supported: may hang.\n");
     }
 
     // Optimization: delay the simple instr trace instrumentation if possible.

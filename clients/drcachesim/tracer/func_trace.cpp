@@ -464,7 +464,7 @@ func_trace_init(func_trace_append_entry_vec_t append_entry_vec_,
         std::string name = items[0];
         int arg_num = atoi(items[1].c_str());
         if (name.empty()) {
-            NOTIFY(0, "Error: -record_function name should not be empty");
+            NOTIFY(0, "Error: -record_function name should not be empty\n");
             return false;
         }
         if (existing_names.find(name) != existing_names.end()) {
