@@ -211,6 +211,10 @@ typedef struct {
     bool full_decode;   /* decode every instruction into a separate instr_t? */
     bool follow_direct; /* elide unconditional branches? */
     bool check_vm_area; /* whether to call check_thread_vm_area() */
+    /* Recreating an existing fragment: keep the FRAG_SELFMOD_SANDBOXED state it was
+     * built with (in the initial flags) rather than the vmarea's current one.
+     */
+    bool recreate_keep_sandbox;
     uint num_elide_jmp;
     uint num_elide_call;
     app_pc last_page;
@@ -706,10 +710,24 @@ eflags_analysis(instr_t *instr, int status, uint *eflags_6)
   starting there.
  */
 
+/* When recreating a fragment, its code must come out as it was built: a write
+ * elsewhere on its page can have made the area selfmod since (or sandbox2ro the
+ * reverse), and an ilist with different sandboxing does not match the fragment.
+ */
+static inline void
+recreate_restore_sandbox_flag(build_bb_t *bb, uint flags_before)
+{
+    if (bb->recreate_keep_sandbox) {
+        bb->flags = (bb->flags & ~FRAG_SELFMOD_SANDBOXED) |
+            (flags_before & FRAG_SELFMOD_SANDBOXED);
+    }
+}
+
 static inline void
 check_new_page_start(dcontext_t *dcontext, build_bb_t *bb)
 {
     DEBUG_DECLARE(bool ok;)
+    uint flags_before = bb->flags;
     if (!bb->check_vm_area)
         return;
     DEBUG_DECLARE(ok =)
@@ -717,6 +735,7 @@ check_new_page_start(dcontext_t *dcontext, build_bb_t *bb)
                          (bb->record_vmlist ? &bb->vmlist : NULL), &bb->flags,
                          &bb->checked_end, false /*!xfer*/);
     ASSERT(ok); /* cannot return false on non-xfer */
+    recreate_restore_sandbox_flag(bb, flags_before);
     bb->last_page = bb->start_pc;
     if (bb->overlap_info != NULL)
         reset_overlap_info(dcontext, bb);
@@ -739,6 +758,11 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
     if (bb->checked_end == NULL) {
         ASSERT(new_pc == bb->start_pc);
     } else if (new_pc >= bb->checked_end) {
+        uint flags_before = bb->flags;
+        /* A recreation must not stop where the original did not only because the
+         * area's flags changed since: it merges them like a first instruction.
+         */
+        bool xfer = !is_first_instr && !bb->recreate_keep_sandbox;
         if (!check_thread_vm_area(dcontext, new_pc, bb->start_pc,
                                   (bb->record_vmlist ? &bb->vmlist : NULL), &bb->flags,
                                   &bb->checked_end,
@@ -749,9 +773,10 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
                                    * false to forcibly merge in the vmarea
                                    * flags.
                                    */
-                                  !is_first_instr /*xfer*/)) {
+                                  xfer)) {
             return false;
         }
+        recreate_restore_sandbox_flag(bb, flags_before);
     }
     if (bb->overlap_info != NULL)
         update_overlap_info(dcontext, bb, new_pc, false /*not jmp*/);
@@ -5289,6 +5314,10 @@ recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_
      */
     bb.stop_pc = stop_pc;
     bb.check_vm_area = check_vm_area;
+    /* The callers that check vm areas recreate an existing fragment and pass its
+     * FRAG_SELFMOD_SANDBOXED state in flags.
+     */
+    bb.recreate_keep_sandbox = check_vm_area;
     if (check_vm_area && vmlist_out != NULL)
         bb.record_vmlist = true;
     if (check_vm_area && !bb.record_vmlist)
@@ -5408,10 +5437,10 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
 
     if ((f->flags & FRAG_IS_TRACE) == 0) {
         /* easy case: just a bb */
-        ilist = recreate_bb_ilist(dcontext, (byte *)f->tag, (byte *)f->tag,
-                                  NULL /*default stop*/, 0 /*no pre flags*/, &flags, NULL,
-                                  true /*check vm area*/, mangle, NULL, call_client,
-                                  false /*not for_trace*/);
+        ilist = recreate_bb_ilist(
+            dcontext, (byte *)f->tag, (byte *)f->tag, NULL /*default stop*/,
+            f->flags & FRAG_SELFMOD_SANDBOXED /*as built*/, &flags, NULL,
+            true /*check vm area*/, mangle, NULL, call_client, false /*not for_trace*/);
         ASSERT(ilist != NULL);
         if (ilist == NULL) /* a race */
             goto recreate_fragment_done;

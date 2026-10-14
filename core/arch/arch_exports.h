@@ -1510,6 +1510,8 @@ expand_should_set_translation(dcontext_t *dcontext);
  *   check selfmod and native_exec for elision, but otherwise will
  *   follow ubrs to the limit.  Currently used for
  *   record_translation_info() (case 3559).
+ * If check_vm_area is true, the bb recreates an existing fragment and keeps the
+ *   FRAG_SELFMOD_SANDBOXED state given in flags whatever the vm area's is now.
  */
 instrlist_t *
 recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc,
