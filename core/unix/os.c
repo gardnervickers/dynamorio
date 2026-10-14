@@ -8359,9 +8359,14 @@ pre_system_call(dcontext_t *dcontext)
             }
             execute_syscall = false;
         } else {
-            /* FIXME Store state for undo if the syscall fails. */
-            IF_NO_MEMQUERY(memcache_update_locked(addr, addr + len, new_memprot,
-                                                  -1 /*type unchanged*/, exists));
+            /* XXX Store state for undo if the syscall fails. */
+            /* An mprotect starting at an unmapped page fails with ENOMEM and
+             * changes nothing: do not add an entry for it.
+             */
+            if (exists) {
+                IF_NO_MEMQUERY(memcache_update_locked(addr, addr + len, new_memprot,
+                                                      -1 /*type unchanged*/, exists));
+            }
         }
         break;
     }
@@ -10089,8 +10094,20 @@ post_system_call(dcontext_t *dcontext)
         if (!success) {
             uint memprot = 0;
             /* Revert the prot bits if needed. */
-            if (!get_memory_info_from_os(base, NULL, NULL, &memprot))
+            bool mapped = get_memory_info_from_os(base, NULL, NULL, &memprot);
+            if (!mapped)
                 memprot = PROT_NONE;
+#ifndef HAVE_MEMINFO_QUERY
+            if (!mapped) {
+                /* Nothing is there (another thread may have unmapped it since
+                 * pre_system_call() looked): keep no entry for it.
+                 */
+                memcache_lock();
+                memcache_remove((app_pc)ALIGN_BACKWARD(base, PAGE_SIZE),
+                                (app_pc)ALIGN_FORWARD(base + size, PAGE_SIZE));
+                memcache_unlock();
+            }
+#endif
             LOG(THREAD, LOG_SYSCALLS, 3,
                 "syscall: mprotect failed: " PFX "-" PFX " prot->%d\n", base, base + size,
                 osprot_to_memprot(prot));
@@ -10120,8 +10137,11 @@ post_system_call(dcontext_t *dcontext)
                  * each mprotect syscall to guard against a rare theoretical bug.
                  */
                 ASSERT_CURIOSITY(!dcontext->mprot_multi_areas);
-                IF_NO_MEMQUERY(memcache_update_locked(
-                    base, base + size, memprot, -1 /*type unchanged*/, true /*exists*/));
+                if (mapped) {
+                    IF_NO_MEMQUERY(memcache_update_locked(base, base + size, memprot,
+                                                          -1 /*type unchanged*/,
+                                                          true /*exists*/));
+                }
             }
         }
         break;
