@@ -9278,7 +9278,19 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
         if (OWN_MUTEX(&innermost_lock))
             return pass_to_app;
 #endif
-        if (self_owns_recursive_lock(&(*info->itimer)[which].lock)) {
+        bool own_itimer_mutex = false;
+#ifdef DEADLOCK_AVOIDANCE
+        /* Interrupted while holding an itimer lock of another type, or while
+         * acquiring or releasing this one (the mutex is ours but the recursive
+         * lock's owner is not yet or no longer): the per-type locks share a rank,
+         * so trying this one trips the rank order check.
+         */
+        for (int t = 0; t < NUM_ITIMERS; t++) {
+            if (OWN_MUTEX(&(*info->itimer)[t].lock.lock))
+                own_itimer_mutex = true;
+        }
+#endif
+        if (self_owns_recursive_lock(&(*info->itimer)[which].lock) || own_itimer_mutex) {
             /* What can we do?  We just go ahead and hope conflicting writes work out.
              * We don't re-acquire in case app was in middle of acquiring.
              */
