@@ -126,6 +126,14 @@ typedef struct _per_thread_t {
     /* bb-local values */
     drreg_bb_properties_t bb_props;
     bool bb_has_internal_flow;
+    /* Slots holding tool values around one app instr or clean call, from their
+     * spill before it until their restore after it (which is inserted before
+     * other instrumentation for the same point is): released by
+     * release_tmp_slots() once all of that is inserted, so that no other spill
+     * for the same point reuses them.
+     */
+    uint tmp_slots[2 * DR_NUM_GPR_REGS];
+    uint num_tmp_slots;
 } per_thread_t;
 
 static drreg_options_t ops;
@@ -462,6 +470,23 @@ drreg_event_bb_instru2instru_late(void *drcontext, void *tag, instrlist_t *bb,
     return DR_EMIT_DEFAULT;
 }
 
+/* Keeps a tool-value slot taken until release_tmp_slots(). */
+static void
+hold_tmp_slot(per_thread_t *pt, uint slot)
+{
+    ASSERT(pt->num_tmp_slots < sizeof(pt->tmp_slots) / sizeof(pt->tmp_slots[0]),
+           "too many tool-value slots");
+    pt->tmp_slots[pt->num_tmp_slots++] = slot;
+}
+
+static void
+release_tmp_slots(per_thread_t *pt)
+{
+    for (uint i = 0; i < pt->num_tmp_slots; i++)
+        pt->slot_use[pt->tmp_slots[i]] = DR_REG_NULL;
+    pt->num_tmp_slots = 0;
+}
+
 /* 'regs_restored' holds one slot per GPR using GPR_IDX() (no aflags slot). */
 static drreg_status_t
 drreg_insert_restore_all(void *drcontext, instrlist_t *bb, instr_t *inst,
@@ -590,7 +615,9 @@ drreg_insert_restore_all(void *drcontext, instrlist_t *bb, instr_t *inst,
                     spill_reg(drcontext, pt, reg, tmp_slot, bb, inst);
                     restore_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, bb, inst,
                                 false /*keep slot*/);
-                    restore_reg(drcontext, pt, reg, tmp_slot, bb, next, true);
+                    restore_reg(drcontext, pt, reg, tmp_slot, bb, next,
+                                false /*see release_tmp_slots()*/);
+                    hold_tmp_slot(pt, tmp_slot);
                     /* Share the tool val spill if this inst writes too */
                     if (regs_restored != NULL)
                         regs_restored[GPR_IDX(reg)] = true;
@@ -725,8 +752,11 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                               next /*after*/);
                 }
                 pt->reg[GPR_IDX(reg)].ever_spilled = true;
-                if (!restored_for_read[GPR_IDX(reg)])
-                    restore_reg(drcontext, pt, reg, tmp_slot, bb, next /*after*/, true);
+                if (!restored_for_read[GPR_IDX(reg)]) {
+                    restore_reg(drcontext, pt, reg, tmp_slot, bb, next /*after*/,
+                                false /*see release_tmp_slots()*/);
+                    hold_tmp_slot(pt, tmp_slot);
+                }
             }
         } else if (!pt->reg[GPR_IDX(reg)].native &&
                    instr_writes_to_reg(inst, reg, DR_QUERY_INCLUDE_ALL)) {
@@ -781,6 +811,7 @@ drreg_event_bb_insert_late(void *drcontext, void *tag, instrlist_t *bb, instr_t 
         drreg_insert_respill_all(drcontext, pt, bb, inst, next, false, restored_for_read);
     if (res != DRREG_SUCCESS)
         drreg_report_error(res, "failed to update for writes");
+    release_tmp_slots(pt);
 
 #ifdef DEBUG
     if (drmgr_is_last_instr(drcontext, inst)) {
@@ -806,8 +837,10 @@ drreg_event_bb_insert_late(void *drcontext, void *tag, instrlist_t *bb, instr_t 
 drreg_status_t
 drreg_restore_all(void *drcontext, instrlist_t *bb, instr_t *where)
 {
-    return drreg_insert_restore_all(drcontext, bb, where, true,
-                                    NULL /* do not need to track reg restores */);
+    drreg_status_t res = drreg_insert_restore_all(
+        drcontext, bb, where, true, NULL /* do not need to track reg restores */);
+    release_tmp_slots(get_tls_data(drcontext));
+    return res;
 }
 
 static void
@@ -865,6 +898,7 @@ drreg_event_clean_call_insertion(void *drcontext, instrlist_t *ilist, instr_t *w
         if (res != DRREG_SUCCESS)
             drreg_report_error(res, "failed to update for clean call");
     }
+    release_tmp_slots(get_tls_data(drcontext));
 }
 
 /***************************************************************************
