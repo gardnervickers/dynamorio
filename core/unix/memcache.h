@@ -88,4 +88,16 @@ memcache_unmap_begin(void);
 void
 memcache_unmap_end(void);
 
+/* A count of unmap begins and ends (memcache_unmap_begin(), memcache_unmap_end()). */
+uint
+memcache_unmap_generation(void);
+
+/* Like memcache_update_locked(), but if an unmap is in flight, or one began or
+ * completed since memcache_unmap_generation() returned gen, updates only the
+ * parts of [start, end) already in the cache.  Returns whether it updated all of
+ * it.
+ */
+bool
+memcache_update_unless_unmapped(app_pc start, app_pc end, uint prot, int type, uint gen);
+
 #endif /* _MEMCACHE_H_ */

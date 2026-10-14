@@ -8323,6 +8323,12 @@ pre_system_call(dcontext_t *dcontext)
         dcontext->sys_param0 = (reg_t)addr;
         dcontext->sys_param1 = len;
         dcontext->sys_param2 = prot;
+#ifndef HAVE_MEMINFO_QUERY
+        /* Before we look at the memory: see memcache_update_unless_unmapped(). */
+        dcontext->sys_param3 = memcache_unmap_generation();
+        /* Non-zero: 1 + the prot post_system_call() records (see below). */
+        dcontext->sys_param4 = 0;
+#endif
         LOG(THREAD, LOG_SYSCALLS, 2,
             "syscall: mprotect addr=" PFX " size=" PFX " prot=%s\n", addr, len,
             memprot_string(osprot_to_memprot(prot)));
@@ -8363,10 +8369,18 @@ pre_system_call(dcontext_t *dcontext)
             /* An mprotect starting at an unmapped page fails with ENOMEM and
              * changes nothing: do not add an entry for it.
              */
+#ifndef HAVE_MEMINFO_QUERY
             if (exists) {
-                IF_NO_MEMQUERY(memcache_update_locked(addr, addr + len, new_memprot,
-                                                      -1 /*type unchanged*/, exists));
+                /* While an unmap is in flight, only the parts already in the cache:
+                 * post_system_call() records the rest if no unmap was in flight
+                 * meanwhile, else a later query fetches it from the OS.
+                 */
+                if (!memcache_update_unless_unmapped(addr, addr + len, new_memprot,
+                                                     -1 /*type unchanged*/,
+                                                     (uint)dcontext->sys_param3))
+                    dcontext->sys_param4 = (reg_t)new_memprot + 1;
             }
+#endif
         }
         break;
     }
@@ -10088,7 +10102,18 @@ post_system_call(dcontext_t *dcontext)
             SYSLOG_INTERNAL_WARNING_ONCE("re-doing mprotect for PR 475111, PR 107872");
         }
 #endif
-        /* FIXME i#143: we need to tweak the returned oldprot for
+#ifndef HAVE_MEMINFO_QUERY
+        if (success && dcontext->sys_param4 != 0) {
+            /* pre_system_call() left parts to us (an unmap was in flight): the
+             * syscall mapped the whole range with the new prot, which still holds
+             * unless an unmap was in flight or began or completed since.
+             */
+            memcache_update_unless_unmapped(
+                base, base + size, (uint)(dcontext->sys_param4 - 1),
+                -1 /*type unchanged*/, (uint)dcontext->sys_param3);
+        }
+#endif
+        /* XXX i#143: we need to tweak the returned oldprot for
          * writable areas we've made read-only
          */
         if (!success) {
@@ -10137,11 +10162,14 @@ post_system_call(dcontext_t *dcontext)
                  * each mprotect syscall to guard against a rare theoretical bug.
                  */
                 ASSERT_CURIOSITY(!dcontext->mprot_multi_areas);
+#ifndef HAVE_MEMINFO_QUERY
                 if (mapped) {
-                    IF_NO_MEMQUERY(memcache_update_locked(base, base + size, memprot,
-                                                          -1 /*type unchanged*/,
-                                                          true /*exists*/));
+                    /* As in pre_system_call(): not a part an unmap may have removed. */
+                    memcache_update_unless_unmapped(base, base + size, memprot,
+                                                    -1 /*type unchanged*/,
+                                                    (uint)dcontext->sys_param3);
                 }
+#endif
             }
         }
         break;

@@ -97,17 +97,33 @@ DECLARE_CXTSWPROT_VAR(uint all_memory_areas_recursion, 0);
  * from the OS's view, which the syscall is about to change.
  */
 DECLARE_NEVERPROT_VAR(static int unmaps_in_flight, 0);
+/* Counts memcache_unmap_begin() and memcache_unmap_end() calls: unchanged across a
+ * look at the memory means no unmap was in flight or began or completed meanwhile
+ * (see memcache_update_unless_unmapped()).
+ */
+DECLARE_NEVERPROT_VAR(static int unmap_generation, 0);
 
 void
 memcache_unmap_begin(void)
 {
+    /* Before munmap's pre-syscall memcache_remove() takes the memcache lock, so
+     * memcache_update_unless_unmapped() sees one that has removed anything.
+     */
+    ATOMIC_INC(int, unmap_generation);
     ATOMIC_INC(int, unmaps_in_flight);
+}
+
+uint
+memcache_unmap_generation(void)
+{
+    return (uint)atomic_aligned_read_int(&unmap_generation);
 }
 
 void
 memcache_unmap_end(void)
 {
     ATOMIC_DEC(int, unmaps_in_flight);
+    ATOMIC_INC(int, unmap_generation);
 }
 
 void
@@ -364,6 +380,45 @@ memcache_update_locked(app_pc start, app_pc end, uint prot, int type, bool exist
 }
 
 bool
+memcache_update_unless_unmapped(app_pc start, app_pc end, uint prot, int type, uint gen)
+{
+    bool whole;
+    memcache_lock();
+    /* Under the lock, so an unmap that has not started yet removes its range
+     * after this update.
+     */
+    whole = atomic_aligned_read_int(&unmaps_in_flight) == 0 &&
+        (uint)atomic_aligned_read_int(&unmap_generation) == gen;
+    LOG(GLOBAL, LOG_VMAREAS, 3,
+        "\tupdating all_memory_areas " PFX "-" PFX " prot->%d%s\n", start, end, prot,
+        whole ? "" : " (cached parts only)");
+    if (whole)
+        memcache_update(start, end, prot, type);
+    else {
+        /* A part not in the cache may be one an unmap removed: leave it to a
+         * later query to fetch from the OS.
+         */
+        app_pc pc = start;
+        while (pc < end) {
+            app_pc sub_start, sub_end, next;
+            if (vmvector_lookup_data(all_memory_areas, pc, &sub_start, &sub_end, NULL)) {
+                if (sub_end > end)
+                    sub_end = end;
+                memcache_update(pc, sub_end, prot, type);
+                pc = sub_end;
+            } else if (vmvector_lookup_prev_next(all_memory_areas, pc, NULL, NULL, &next,
+                                                 NULL) &&
+                       next > pc && next < end)
+                pc = next;
+            else
+                break;
+        }
+    }
+    memcache_unlock();
+    return whole;
+}
+
+bool
 memcache_remove(app_pc start, app_pc end)
 {
     bool ok;
@@ -464,6 +519,8 @@ memcache_query_memory(const byte *pc, DR_PARAM_OUT dr_mem_info_t *out_info)
         byte *from_os_base_pc;
         size_t from_os_size;
         uint from_os_prot;
+        /* Before we look: see the re-add below. */
+        uint unmap_gen = memcache_unmap_generation();
         if (get_memory_info_from_os(pc, &from_os_base_pc, &from_os_size, &from_os_prot) &&
             /* maps file shows our reserved-but-not-committed regions, which
              * are holes in all_memory_areas
@@ -479,10 +536,13 @@ memcache_query_memory(const byte *pc, DR_PARAM_OUT dr_mem_info_t *out_info)
             out_info->prot = from_os_prot;
             out_info->type = DR_MEMTYPE_DATA; /* hopefully we won't miss an image */
             /* Update our list to avoid coming back here again (i#2037), unless an
-             * unmap is in flight: the region may be one it has removed, and adding
-             * it back would leave it in the cache after the syscall unmaps it.
+             * unmap was in flight or began or completed meanwhile: the region may be
+             * one it removed, and adding it back would leave it in the cache after
+             * the syscall unmaps it.  (We hold the memcache lock, which an unmap
+             * needs to remove its range, from here on.)
              */
-            if (atomic_aligned_read_int(&unmaps_in_flight) == 0) {
+            if (atomic_aligned_read_int(&unmaps_in_flight) == 0 &&
+                memcache_unmap_generation() == unmap_gen) {
                 memcache_update_locked(from_os_base_pc, from_os_base_pc + from_os_size,
                                        from_os_prot, -1, false /*!exists*/);
             }
