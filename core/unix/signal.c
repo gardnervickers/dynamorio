@@ -6498,15 +6498,102 @@ sig_should_swap_stack(struct clone_and_swap_args *args, kernel_ucontext_t *ucxt)
 }
 #endif
 
+#if defined(LINUX) && defined(AARCH64)
+/* Returns whether sig, delivered with info, was raised by the instruction at the
+ * pc it interrupted, so that executing that instruction again raises it again.
+ */
+static bool
+sig_raised_by_instr(int sig, kernel_siginfo_t *info)
+{
+    /* Codes <= 0 (SI_USER, SI_QUEUE, SI_TKILL, ...) are sent signals. */
+    if (info->si_code <= 0)
+        return false;
+    switch (sig) {
+    case SIGSEGV:
+    case SIGBUS:
+    case SIGILL:
+    case SIGFPE: return true;
+    case SIGTRAP: return info->si_code == 1 /* TRAP_BRKPT: BRK */;
+    default: return false;
+    }
+}
+
+/* Sends sig with info to this thread, blocked first (our handlers block neither
+ * SIGSEGV nor SUSPEND_SIGNAL), so it stays pending until a mask without it is
+ * installed.
+ */
+static void
+sig_send_to_self_blocked(int sig, kernel_siginfo_t *info)
+{
+    kernel_sigset_t set;
+    kernel_sigemptyset(&set);
+    kernel_sigaddset(&set, sig);
+    sigprocmask_syscall(SIG_BLOCK, &set, NULL, sizeof(set));
+    dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(), get_sys_thread_id(),
+                      sig, info);
+}
+
+/* Returns whether mask is the one our handlers start with: every signal blocked
+ * but SUSPEND_SIGNAL and maybe SIGSEGV (see set_handler_sigact()); app code does
+ * not run with it.
+ */
+static bool
+sig_mask_is_our_handlers(kernel_sigset_t *mask)
+{
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (sig == SIGKILL || sig == SIGSTOP || sig == SIGSEGV)
+            continue;
+        if (kernel_sigismember(mask, sig) != (sig != SUSPEND_SIGNAL))
+            return false;
+    }
+    return true;
+}
+#endif
+
 /* Helper that takes over the current thread signaled via SUSPEND_SIGNAL.  Kept
  * separate mostly to keep the priv_mcontext_t allocation out of
  * main_signal_handler_C.
  * If it returns, it returns false, and the signal should be squashed.
  */
 static bool
-sig_take_over(kernel_ucontext_t *uc)
+sig_take_over(kernel_siginfo_t *siginfo, kernel_ucontext_t *uc)
 {
     priv_mcontext_t mc;
+#if defined(LINUX) && defined(AARCH64)
+    sigcontext_t *sc = SIGCXT_FROM_UCXT(uc);
+    if (sc->SC_XIP == (ptr_uint_t)main_signal_handler) {
+        /* SUSPEND_SIGNAL arrived together with another signal the kernel delivered
+         * to this native thread, and interrupted our handler for that signal before
+         * its first instruction (our handlers do not block SUSPEND_SIGNAL).  Taking
+         * over here would run our own handler as app code (os_thread_take_over()'s
+         * is_dynamo_address() check does not cover a static DR's code), with the
+         * thread then seen as both native and under DR.  We take over where that
+         * signal interrupted the app instead, and abandon our handler's frame for it
+         * just like our own: the signal is raised again under DR, a fault by
+         * executing its instruction again, any other signal by sending it again
+         * (it stays pending until the app's mask is in place).
+         */
+        int other_sig = (int)sc->SC_R0;
+        kernel_siginfo_t *other_info = (kernel_siginfo_t *)sc->SC_R1;
+        kernel_ucontext_t *other_uc = (kernel_ucontext_t *)sc->SC_R2;
+        if (other_sig > 0 && other_sig <= MAX_SIGNUM && other_sig != SUSPEND_SIGNAL &&
+            other_info != NULL && other_uc != NULL && other_info->si_signo == other_sig) {
+            if (!sig_raised_by_instr(other_sig, other_info))
+                sig_send_to_self_blocked(other_sig, other_info);
+            uc = other_uc;
+        }
+    } else if (sig_mask_is_our_handlers(SIGMASK_FROM_UCXT(uc))) {
+        /* SUSPEND_SIGNAL interrupted our handler for another signal delivered to
+         * this native thread before the handler blocked SUSPEND_SIGNAL (see
+         * main_signal_handler_C()): we cannot take over in there.  Block it where
+         * we return to and send it again: it stays pending until our handler
+         * returns to the app, with the app's mask, and we take over there.
+         */
+        kernel_sigaddset(SIGMASK_FROM_UCXT(uc), SUSPEND_SIGNAL);
+        sig_send_to_self_blocked(SUSPEND_SIGNAL, siginfo);
+        return false;
+    }
+#endif
     ucontext_to_mcontext(&mc, uc);
     /* We don't want our own blocked signals: we want the app's, stored in the frame. */
     if (!os_thread_take_over(&mc, SIGMASK_FROM_UCXT(uc)))
@@ -6693,6 +6780,18 @@ main_signal_handler_C(byte *xsp)
         (dcontext != GLOBAL_DCONTEXT &&
          (dcontext->signal_field == NULL ||
           !((thread_sig_info_t *)dcontext->signal_field)->fully_initialized))) {
+        if (sig != SUSPEND_SIGNAL) {
+            /* Our handlers do not block SUSPEND_SIGNAL, but taking this thread
+             * over in here would run the rest of this handler as app code: hold
+             * it until we return to the app, whose mask our sigreturn installs.
+             * (If it arrived before our first instruction, sig_take_over() takes
+             * over where this signal interrupted the app.)
+             */
+            kernel_sigset_t suspend_set;
+            kernel_sigemptyset(&suspend_set);
+            kernel_sigaddset(&suspend_set, SUSPEND_SIGNAL);
+            sigprocmask_syscall(SIG_BLOCK, &suspend_set, NULL, sizeof(suspend_set));
+        }
         /* XXX i#26: this could be a signal arbitrarily sent to this thread.
          * We could try to route it to another thread, using a global queue
          * of pending signals.  But what if it was targeted to this thread
@@ -6713,7 +6812,7 @@ main_signal_handler_C(byte *xsp)
              * dcontext), which means we want to take over.
              */
             ASSERT(!doing_detach);
-            if (!sig_take_over(ucxt))
+            if (!sig_take_over(siginfo, ucxt))
                 return;
             ASSERT_NOT_REACHED(); /* else, shouldn't return */
         } else {
@@ -9757,7 +9856,7 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
 
     if (!doing_detach && is_thread_currently_native(dcontext->thread_record) &&
         !IS_CLIENT_THREAD(dcontext) IF_APP_EXPORTS(&&!dr_api_exit)) {
-        if (!sig_take_over(ucxt))
+        if (!sig_take_over(siginfo, ucxt))
             return false;
         ASSERT_NOT_REACHED(); /* else, shouldn't return */
     }
@@ -9891,7 +9990,7 @@ handle_suspend_signal(dcontext_t *dcontext, kernel_siginfo_t *siginfo,
 
     if (ostd->retakeover) {
         ostd->retakeover = false;
-        sig_take_over(ucxt); /* shouldn't return for this case */
+        sig_take_over(siginfo, ucxt); /* shouldn't return for this case */
         ASSERT_NOT_REACHED();
     } else if (ostd->do_detach) {
         ostd->do_detach = false;
