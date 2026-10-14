@@ -3159,6 +3159,11 @@ client_process_bb(dcontext_t *dcontext, build_bb_t *bb)
     if (last_app_instr != NULL) {
         bool adjusted_cur_pc = false;
         app_pc xl8 = instr_get_translation(last_app_instr);
+        if (bb->pretend_pc != NULL && xl8 >= bb->pretend_pc &&
+            xl8 <= bb->pretend_pc + (bb->end_pc - bb->start_pc)) {
+            /* We gave the client app pcs (see build_bb_ilist()): we decode the copy. */
+            xl8 = bb->start_pc + (xl8 - bb->pretend_pc);
+        }
 #ifdef ANNOTATIONS
         if (annotation_label != NULL) {
             if (found_instrumentation_pc) {
@@ -4333,6 +4338,20 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         return;
     }
 #endif
+    if (bb->pretend_pc != NULL && bb->record_translation) {
+        /* We decoded a copy of the app code (see recreate_bb_ilist()).  Give the
+         * client, and our mangling after it, the app pcs the fragment was built
+         * from: a client that instruments by app pc, or passes one to a clean call
+         * (whose immediate's encoding depends on its value), must produce the same
+         * code as it did for the fragment, or the cache pcs we walk do not match.
+         */
+        instr_t *in;
+        for (in = instrlist_first(bb->ilist); in != NULL; in = instr_get_next(in)) {
+            app_pc xl8 = instr_get_translation(in);
+            if (xl8 >= bb->start_pc && xl8 <= bb->end_pc)
+                instr_set_translation(in, bb->pretend_pc + (xl8 - bb->start_pc));
+        }
+    }
     if (!client_process_bb(dcontext, bb)) {
         bb_build_abort(dcontext, true /*free vmlist*/, false /*don't unlock*/);
         return;
@@ -5462,7 +5481,8 @@ recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_
                           * ilist building time.  Alternatively, we could store
                           * bb->pass_to_client in the fragment.
                           */
-                         !os_module_get_flag(pc, MODULE_NULL_INSTRUMENT));
+                         /* For a copy, the code it was taken from. */
+                         !os_module_get_flag(pretend_pc, MODULE_NULL_INSTRUMENT));
     /* PR 299808: we call bb hook again when translating a trace that
      * didn't have DR_EMIT_STORE_TRANSLATIONS on itself (or on any
      * for_trace bb if there was no trace hook).
@@ -5470,8 +5490,13 @@ recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_
     bb.for_trace = for_trace;
     /* instrument_basic_block, called by build_bb_ilist, verifies that all
      * non-meta instrs have translation fields */
-    if (pretend_pc != pc)
+    if (pretend_pc != pc) {
         bb.pretend_pc = pretend_pc;
+        /* A copy holds one contiguous range of code: following a direct cti would
+         * decode the app's code at its target.
+         */
+        bb.follow_direct = false;
+    }
 
     build_bb_ilist(dcontext, &bb);
 
