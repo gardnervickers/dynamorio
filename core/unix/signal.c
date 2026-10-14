@@ -2749,10 +2749,15 @@ signal_swap_mask(dcontext_t *dcontext, bool to_app)
             DOLOG(4, LOG_ASYNCH, dump_unmasked(dcontext, __FUNCTION__););
             return;
         }
+        /* Not holding the lock in the syscall: a signal it unblocks is delivered
+         * at once, and our handler for it may take locks of lower rank (e.g., to
+         * deliver it natively to a thread going native).
+         */
+        kernel_sigset_t app_mask;
         d_r_mutex_lock(&info->sigblocked_lock);
-        sigprocmask_syscall(SIG_SETMASK, &info->app_sigblocked, NULL,
-                            sizeof(info->app_sigblocked));
+        app_mask = info->app_sigblocked;
         d_r_mutex_unlock(&info->sigblocked_lock);
+        sigprocmask_syscall(SIG_SETMASK, &app_mask, NULL, sizeof(app_mask));
     } else {
         /* Normally we get here just once at takeover, but if we have threads
          * going native we don't consider them unmasked as we can't rely on their
