@@ -164,6 +164,18 @@ drreg_restore_aflags(void *drcontext, instrlist_t *ilist, instr_t *where,
 static drreg_status_t
 drreg_spill_aflags(void *drcontext, instrlist_t *ilist, instr_t *where, per_thread_t *pt);
 
+/* Marks a load of an app value by drreg_get_app_value() that does not end the
+ * register's spill: into another register, or into a register that stays
+ * reserved.  State restoration ignores such loads.
+ */
+static int get_app_value_note_tag[2];
+#define GET_APP_VALUE_NOTE ((void *)&get_app_value_note_tag[0])
+/* The same for a reload of a reserved register into itself. */
+#define GET_APP_VALUE_INPLACE_NOTE ((void *)&get_app_value_note_tag[1])
+#define IS_GET_APP_VALUE_NOTE(inst)                \
+    (instr_get_note(inst) == GET_APP_VALUE_NOTE || \
+     instr_get_note(inst) == GET_APP_VALUE_INPLACE_NOTE)
+
 static bool
 is_our_spill_or_restore(void *drcontext, instr_t *instr, bool *spill,
                         reg_id_t *reg_spilled, uint *slot_out, uint *offs_out);
@@ -1267,7 +1279,9 @@ drreg_restore_app_value(void *drcontext, instrlist_t *ilist, instr_t *where,
         }
     } else if (dst_reg != app_reg) {
         /* Load the spilled app value into dst_reg, leaving app_reg (which may
-         * hold a tool value) and its spill state alone.
+         * hold a tool value) and its spill state alone.  The load looks like a
+         * restore of dst_reg from app_reg's slot: mark it so that state
+         * restoration does not take it for one.
          */
         uint slot = pt->reg[GPR_IDX(app_reg)].slot;
         if (slot < ops.num_spill_slots) {
@@ -1277,11 +1291,24 @@ drreg_restore_app_value(void *drcontext, instrlist_t *ilist, instr_t *where,
             dr_restore_reg(drcontext, ilist, where, dst_reg,
                            (dr_spill_slot_t)(slot - ops.num_spill_slots));
         }
+        if (where != NULL && instr_get_prev(where) != NULL)
+            instr_set_note(instr_get_prev(where), GET_APP_VALUE_NOTE);
     } else {
         restore_reg(drcontext, pt, app_reg, pt->reg[GPR_IDX(app_reg)].slot, ilist, where,
                     stateful && !pt->reg[GPR_IDX(app_reg)].in_use);
         if (stateful && !pt->reg[GPR_IDX(app_reg)].in_use)
             pt->reg[GPR_IDX(app_reg)].native = true;
+        else if (stateful && pt->reg[GPR_IDX(app_reg)].in_use && where != NULL &&
+                 instr_get_prev(where) != NULL) {
+            /* The register stays reserved and the tool may overwrite it: for
+             * state restoration this is not the end of its spill.  If the tool
+             * unreserves it without writing it first, drreg_unreserve_register()
+             * removes the mark.  A stateless restore (before a multi-path clean
+             * call) is left unmarked: the register holds the app value from it
+             * on the path that executes it.
+             */
+            instr_set_note(instr_get_prev(where), GET_APP_VALUE_INPLACE_NOTE);
+        }
     }
     instrlist_set_auto_predicate(ilist, pred);
     return DRREG_SUCCESS;
@@ -1470,6 +1497,20 @@ drreg_unreserve_register(void *drcontext, instrlist_t *ilist, instr_t *where,
         return DRREG_ERROR_INVALID_PARAMETER;
     LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX " %s\n", __FUNCTION__, pt->live_idx,
         get_where_app_pc(where), get_register_name(reg));
+    /* A drreg_get_app_value() reload of reg into itself that the tool did not
+     * overwrite before unreserving it does end the spill as far as the value
+     * in reg goes: state restoration may take it for a restore.
+     */
+    for (instr_t *in = where == NULL ? instrlist_last(ilist) : instr_get_prev(where);
+         in != NULL && !instr_is_app(in); in = instr_get_prev(in)) {
+        if (instr_get_note(in) == GET_APP_VALUE_INPLACE_NOTE &&
+            instr_writes_to_exact_reg(in, reg, DR_QUERY_DEFAULT)) {
+            instr_set_note(in, NULL);
+            break;
+        }
+        if (instr_writes_to_reg(in, reg, DR_QUERY_INCLUDE_ALL))
+            break;
+    }
     if (drmgr_current_bb_phase(drcontext) != DRMGR_PHASE_INSERTION) {
         /* We have no way to lazily restore.  We do not bother at this point
          * to try and eliminate back-to-back spill/restore pairs.
@@ -2395,7 +2436,8 @@ drreg_event_restore_state_with_ilist(void *drcontext, bool restore_memory,
         /* DR's own mangling (which has a translation) can use the DR slots that
          * we also use once we run out of ours: only consider tool instrs.
          */
-        if (!instr_is_app(inst) && instr_get_app_pc(inst) == NULL) {
+        if (!instr_is_app(inst) && instr_get_app_pc(inst) == NULL &&
+            !IS_GET_APP_VALUE_NOTE(inst)) {
             if (is_our_spill_or_restore(drcontext, inst, &spill, &reg, &slot, NULL)) {
                 if (!spill) {
                     /* If we find a restore for app aflags/gpr, we'll record it now. While
@@ -2528,6 +2570,8 @@ drreg_event_restore_state_with_ilist(void *drcontext, bool restore_memory,
     }
     for (inst = instrlist_first(info->fragment_info.ilist);
          inst != NULL && inst != fault_inst; inst = instr_get_next(inst)) {
+        if (IS_GET_APP_VALUE_NOTE(inst))
+            continue; /* the register holds a tool value, as before */
         if (instr_is_app(inst)) {
             if (TESTALL(EFLAGS_WRITE_ARITH,
                         instr_get_arith_flags(inst, DR_QUERY_INCLUDE_ALL))) {
@@ -2575,7 +2619,15 @@ drreg_event_restore_state_with_ilist(void *drcontext, bool restore_memory,
         } else {
             bool tls;
             uint offs;
-            if (instr_is_reg_spill_or_restore(drcontext, inst, &tls, &spill, &reg,
+            /* DR's mangling carries its app instr's translation.  A tool's own
+             * TLS stores and loads (e.g., dr_insert_write_raw_tls() of a
+             * reserved register) look the same but are not DR saving a
+             * scratch: taking them for one hid a later mangling write of the
+             * app value (e.g., the LR of an elided call), so a translation
+             * restored a stale app value over it.
+             */
+            if (instr_get_app_pc(inst) != NULL &&
+                instr_is_reg_spill_or_restore(drcontext, inst, &tls, &spill, &reg,
                                               &offs) &&
                 reg >= DR_REG_START_GPR && reg <= DR_REG_STOP_GPR) {
                 /* DR (not us) saving or restoring a gpr it uses as a scratch. */
