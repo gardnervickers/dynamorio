@@ -517,14 +517,19 @@ insert_parameter_preparation(dcontext_t *dcontext, instrlist_t *ilist, instr_t *
             opnd_t *arg1 = i + 1 < n ? &args[NUM_REGPARM + i + 1] : NULL;
             if (i == 0) {
                 if (i + 1 < n && opnd_is_reglike(*arg1)) {
-                    /* stp x(...), x(...), [sp, #-(stack_inc)]! */
+                    /* stp x(...), x(...), [sp, #-(stack_inc)]!
+                     * arg0 may be SP or a non-zero constant, which STP cannot
+                     * store: XZR holds its place until the loop below.
+                     */
                     PRE(ilist, instr,
                         instr_create_2dst_4src(
                             dcontext, OP_stp,
                             opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0, -stack_inc,
                                                   OPSZ_16),
                             opnd_create_reg(DR_REG_XSP),
-                            opnd_is_reg(*arg0) ? *arg0 : opnd_create_reg(DR_REG_XZR),
+                            opnd_is_reglike(*arg0) && opnd_is_reg(*arg0)
+                                ? *arg0
+                                : opnd_create_reg(DR_REG_XZR),
                             opnd_is_reg(*arg1) ? *arg1 : opnd_create_reg(DR_REG_XZR),
                             opnd_create_reg(DR_REG_XSP),
                             opnd_create_immed_int(-stack_inc, OPSZ_PTR)));
