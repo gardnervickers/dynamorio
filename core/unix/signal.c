@@ -1820,6 +1820,7 @@ signal_thread_exit(dcontext_t *dcontext, bool other_thread)
 #endif
     IF_LINUX(signalfd_thread_exit(dcontext, info));
     special_heap_exit(info->sigheap);
+    IF_LINUX(IF_AARCH64(signal_extra_bufs_exit(dcontext, info)));
     DELETE_LOCK(info->sigblocked_lock);
     DELETE_LOCK(info->child_lock);
 #ifdef HAVE_SIGALTSTACK
@@ -4209,7 +4210,7 @@ get_sigstack_frame_ptr(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
             IF_LINUX(IF_X86((sc->fpstate == NULL ? 0
                                                  : signal_frame_extra_size(
                                                        true)) +)) 64 /* align + slop */;
-        IF_LINUX(IF_AARCH64(frame_sz_max += signal_frame_extra_used(frame)));
+        IF_LINUX(IF_AARCH64(frame_sz_max += signal_frame_extra_used(frame, false)));
         if (sp > (byte *)frame && sp < (byte *)frame + frame_sz_max) {
             sp = (byte *)frame;
             /* We're probably *on* the stack right where we want to put the frame! */
@@ -4247,8 +4248,8 @@ get_sigstack_frame_ptr(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
     sp -= get_app_frame_size(info, sig);
 #if defined(LINUX) && defined(AARCH64)
     /* An EXTRA record's data follows the frame. */
-    sp -=
-        signal_frame_extra_used(frame == NULL ? &info->sigpending[sig]->rt_frame : frame);
+    sp -= signal_frame_extra_used(
+        frame == NULL ? &info->sigpending[sig]->rt_frame : frame, frame == NULL);
 #endif
 #if defined(LINUX) && defined(X86)
     if (frame == NULL) {
@@ -4523,11 +4524,12 @@ memcpy_rt_frame(sigframe_rt_t *frame, byte *dst, bool from_pending)
     }
 #endif
 #if defined(LINUX) && defined(AARCH64)
-    /* An EXTRA record's data follows the frame and moves with it. */
-    size_t size = sizeof(sigframe_rt_t) + signal_frame_extra_used(frame);
+    /* An EXTRA record's data goes after the frame. */
+    DEBUG_DECLARE(size_t size = sizeof(sigframe_rt_t) +
+                      signal_frame_extra_used(frame, from_pending));
     ASSERT(dst >= (byte *)frame + size || dst + size <= (byte *)frame);
-    memcpy(dst, frame, size);
-    signal_frame_extra_relocate((sigframe_rt_t *)dst, frame);
+    memcpy(dst, frame, sizeof(sigframe_rt_t));
+    signal_frame_extra_copy((sigframe_rt_t *)dst, frame, from_pending);
 #else
     /* Ensure no overlap. */
     ASSERT(dst >= (byte *)(frame + 1) + signal_frame_extra_size(true) ||
@@ -4562,7 +4564,7 @@ copy_frame_to_stack(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
     sigcontext_t *sc = get_sigcontext_from_rt_frame(frame);
     size += (sc->fpstate == NULL ? 0 : signal_frame_extra_size(true));
 #endif /* LINUX && X86 */
-    IF_LINUX(IF_AARCH64(size += signal_frame_extra_used(frame)));
+    IF_LINUX(IF_AARCH64(size += signal_frame_extra_used(frame, from_pending)));
 
     LOG(THREAD, LOG_ASYNCH, 3, "copy_frame_to_stack: rt=%d, src=" PFX ", sp=" PFX "\n",
         rtframe, frame, sp);
@@ -4719,7 +4721,14 @@ copy_frame_to_pending(dcontext_t *dcontext, sigpending_t *pend, sigframe_rt_t *f
                       byte *access_address)
 {
     sigframe_rt_t *dst = &pend->rt_frame;
+#if defined(LINUX) && defined(AARCH64)
+    /* An EXTRA record's data goes to a separate buffer. */
+    memcpy(dst, frame, sizeof(*dst));
+    signal_frame_extra_to_pending((thread_sig_info_t *)dcontext->signal_field, dst,
+                                  frame);
+#else
     memcpy_rt_frame(frame, (byte *)dst, false /*!already pending*/);
+#endif
 
 #if defined(LINUX) && defined(X86)
     /* For lazy fpstate, it's possible there was no fpstate when the kernel
@@ -6123,6 +6132,16 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                            get_application_pid(), max_string);
                 });
             }
+#if defined(LINUX) && defined(AARCH64)
+        } else if (!signal_frame_extra_fits(info, frame) && kernel_blockable &&
+                   requeue_signal_in_kernel(sig, &frame->info)) {
+            /* No buffer for its EXTRA data yet: leave it pending in the kernel,
+             * blocked until receive_pending_signal() has added one.
+             */
+            LOG(THREAD, LOG_ASYNCH, 2,
+                "no EXTRA buffer: signal %d left pending in the kernel\n", sig);
+            kernel_sigaddset(SIGMASK_FROM_UCXT(ucxt), sig);
+#endif
         } else {
             /* To avoid accumulating signals if we're slow in presence of
              * a high-rate itimer we only keep 2 alarm signals (PR 596768).
@@ -8313,6 +8332,7 @@ receive_pending_signal(dcontext_t *dcontext)
      * handler mask now blocks.  A kernel-pending signal unblocked here arrives
      * right away and is queued for the next pass.
      */
+    IF_LINUX(IF_AARCH64(signal_extra_bufs_grow(dcontext, info)));
     signal_sync_kernel_mask(dcontext);
 }
 

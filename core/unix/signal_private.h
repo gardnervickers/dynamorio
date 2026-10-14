@@ -335,6 +335,7 @@ typedef struct rt_sigframe {
  * in rt form.
  */
 typedef struct _sigpending_t {
+    sigframe_rt_t rt_frame;
     /* i#182/PR 449996: we provide the faulting access address for SIGSEGV, etc. */
     byte *access_address;
     /* use the sigcontext, not the mcontext (used to restart syscalls for i#1145) */
@@ -342,10 +343,6 @@ typedef struct _sigpending_t {
     /* Was this unblocked at receive time? */
     bool unblocked_at_receipt;
     struct _sigpending_t *next;
-    /* Last but for x86's xstate: on AArch64 an EXTRA record's data follows the
-     * frame, in the signal_frame_extra_size() bytes at the end of each unit.
-     */
-    sigframe_rt_t rt_frame;
 #if defined(LINUX) && defined(X86)
     /* fpstate is no longer kept inside the frame, and is not always present.
      * if we delay we need to ensure we have room for it.
@@ -543,6 +540,16 @@ typedef struct _thread_sig_info_t {
     byte *xstate_buf;   /* xstate_alloc aligned */
     byte *xstate_alloc; /* unaligned */
 #endif
+#if defined(LINUX) && defined(AARCH64)
+    /* Buffers for the EXTRA record data of queued frames, which does not fit in
+     * a sigpending_t: see signal_linux_aarch64.c.
+     */
+    struct _extra_buf_t *extra_bufs;
+    /* The size of the largest EXTRA data that found no free buffer, which
+     * receive_pending_signal() adds a buffer for.
+     */
+    size_t extra_want;
+#endif
 
 #ifdef RETURN_AFTER_CALL
     app_pc signal_restorer_retaddr; /* last signal restorer, known ret exception */
@@ -688,15 +695,41 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame);
 void
 sigcontext_set_app_pstate(sigcontext_t *sc);
 
-/* Returns how many bytes of frame's contents lie beyond sizeof(sigframe_rt_t):
- * the data of an EXTRA record, which follows the frame's terminator.
+/* Returns how many bytes beyond sizeof(sigframe_rt_t) frame needs on a stack:
+ * an EXTRA record's data goes right after the terminator that follows it and
+ * can run past the frame.  A queued frame (pending) keeps the data in a
+ * separate buffer.
  */
 size_t
-signal_frame_extra_used(sigframe_rt_t *frame);
+signal_frame_extra_used(sigframe_rt_t *frame, bool pending);
 
-/* Points the EXTRA record of copy, a copy of orig, at copy's own data. */
+/* Copies the EXTRA data of src (queued if src_pending) to its place in dst,
+ * which holds a copy of src's sigframe_rt_t and room for
+ * signal_frame_extra_used(src, src_pending) more bytes, and points dst's
+ * record at it.
+ */
 void
-signal_frame_extra_relocate(sigframe_rt_t *copy, sigframe_rt_t *orig);
+signal_frame_extra_copy(sigframe_rt_t *dst, sigframe_rt_t *src, bool src_pending);
+
+/* Returns false if the kernel frame has EXTRA data and no free buffer can hold
+ * it, after asking receive_pending_signal() for one.
+ */
+bool
+signal_frame_extra_fits(thread_sig_info_t *info, sigframe_rt_t *frame);
+
+/* Moves the EXTRA data of the kernel frame src to a free buffer for dst, a copy
+ * of src being queued, or detaches it if there is none.
+ */
+void
+signal_frame_extra_to_pending(thread_sig_info_t *info, sigframe_rt_t *dst,
+                              sigframe_rt_t *src);
+
+/* At a safe point: adds the buffer signal_frame_extra_fits() asked for. */
+void
+signal_extra_bufs_grow(dcontext_t *dcontext, thread_sig_info_t *info);
+
+void
+signal_extra_bufs_exit(dcontext_t *dcontext, thread_sig_info_t *info);
 #endif
 
 #ifdef DEBUG

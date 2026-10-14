@@ -502,58 +502,30 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
 #endif
 }
 
-/* The most the kernel's signal frames can extend beyond sigframe_rt_t: with
- * SVE or SME state that does not fit in __reserved, an EXTRA record's data
- * follows the frame (see frame_extra_record()).
- */
-static size_t frame_extra_max;
-
 size_t
 signal_frame_extra_size(bool include_alignment)
 {
-    return frame_extra_max;
+    return 0;
 }
-
-#define AUXV_AT_HWCAP 16
-#define AUXV_AT_HWCAP2 26
-#define AUXV_HWCAP_SVE (1ULL << 22)
-#define AUXV_HWCAP2_SME (1ULL << 23)
-/* The kernel's limit on a signal frame's size, EXTRA data included. */
-#define SIGFRAME_MAXSZ (64 * 1024)
 
 void
 signal_arch_init(void)
 {
-    /* Only SVE and SME state can overflow __reserved.  Its size depends on
-     * vector lengths the application can change (and the kernel's
-     * AT_MINSIGSTKSZ has been seen not to account for SME), so we allow for
-     * the kernel's limit.
-     */
-    uint64 hwcap = 0, hwcap2 = 0;
-    file_t f = os_open("/proc/self/auxv", OS_OPEN_READ);
-    if (f != INVALID_FILE) {
-        uint64 auxv[2];
-        while (os_read(f, auxv, sizeof(auxv)) == sizeof(auxv) && auxv[0] != 0) {
-            if (auxv[0] == AUXV_AT_HWCAP)
-                hwcap = auxv[1];
-            else if (auxv[0] == AUXV_AT_HWCAP2)
-                hwcap2 = auxv[1];
-        }
-        os_close(f);
-    }
-    if (TESTANY(AUXV_HWCAP_SVE, hwcap) || TESTANY(AUXV_HWCAP2_SME, hwcap2) ||
-        proc_has_feature(FEATURE_SVE))
-        frame_extra_max = SIGFRAME_MAXSZ - sizeof(sigframe_rt_t);
+    /* Nothing. */
 }
 
-/* Returns frame's EXTRA record if it has a well-formed one whose data fits in
- * frame_extra_max bytes past sigframe_rt_t, and sets *extra_used to how many
- * bytes the data extends past it.  The kernel puts the data at the first
- * 16-byte aligned address after the terminator following the record, which may
- * be inside __reserved, and rejects any other datap at rt_sigreturn.
+/* The kernel's limit on a signal frame's size, EXTRA data included. */
+#define SIGFRAME_MAXSZ (64 * 1024)
+
+/* Returns frame's EXTRA record if it has a well-formed one, with in *data_off
+ * the offset from frame at which the kernel puts the data: the first 16-byte
+ * aligned address after the terminator that follows the record, which may be
+ * inside __reserved.  The kernel rejects any other datap at rt_sigreturn, so
+ * we require it unless the frame is queued (pending), where datap points to a
+ * buffer of ours or is 0 if there was none.
  */
 static struct extra_context *
-frame_extra_record(sigframe_rt_t *frame, size_t *extra_used)
+frame_extra_record(sigframe_rt_t *frame, bool pending, size_t *data_off)
 {
     sigcontext_t *sc = &frame->uc.uc_mcontext;
     size_t offset = 0;
@@ -566,17 +538,11 @@ frame_extra_record(sigframe_rt_t *frame, size_t *extra_used)
                 ALIGN_FORWARD(sizeof(struct _aarch64_ctx), 16);
             if (record->size < sizeof(*extra) ||
                 data > (byte *)sc->__reserved + sizeof(sc->__reserved) ||
-                extra->datap != (uint64)data)
+                !ALIGNED(extra->size, 16) ||
+                data + extra->size > (byte *)frame + SIGFRAME_MAXSZ ||
+                (pending ? extra->datap == 0 : extra->datap != (uint64)data))
                 return NULL;
-            byte *end = data + extra->size;
-            byte *frame_end = (byte *)(frame + 1);
-            if (end > frame_end + frame_extra_max) {
-                SYSLOG_INTERNAL_WARNING_ONCE("Signal frame EXTRA data (%u bytes) is "
-                                             "larger than expected",
-                                             extra->size);
-                return NULL;
-            }
-            *extra_used = end > frame_end ? end - frame_end : 0;
+            *data_off = data - (byte *)frame;
             return extra;
         }
         offset += record->size;
@@ -585,21 +551,139 @@ frame_extra_record(sigframe_rt_t *frame, size_t *extra_used)
 }
 
 size_t
-signal_frame_extra_used(sigframe_rt_t *frame)
+signal_frame_extra_used(sigframe_rt_t *frame, bool pending)
 {
-    size_t used = 0;
-    frame_extra_record(frame, &used);
-    return used;
+    size_t data_off;
+    struct extra_context *extra = frame_extra_record(frame, pending, &data_off);
+    if (extra == NULL || data_off + extra->size <= sizeof(*frame))
+        return 0;
+    return data_off + extra->size - sizeof(*frame);
 }
 
 void
-signal_frame_extra_relocate(sigframe_rt_t *copy, sigframe_rt_t *orig)
+signal_frame_extra_copy(sigframe_rt_t *dst, sigframe_rt_t *src, bool src_pending)
 {
-    size_t used;
-    struct extra_context *extra = frame_extra_record(orig, &used);
+    size_t data_off;
+    struct extra_context *extra = frame_extra_record(src, src_pending, &data_off);
     if (extra == NULL)
         return;
-    /* The record and its data moved together. */
-    extra = (struct extra_context *)((byte *)copy + ((byte *)extra - (byte *)orig));
-    extra->datap += (byte *)copy - (byte *)orig;
+    struct extra_context *dst_extra =
+        (struct extra_context *)((byte *)dst + ((byte *)extra - (byte *)src));
+    byte *data = (byte *)dst + data_off;
+    if ((uint64)data != extra->datap)
+        memmove(data, (byte *)extra->datap, extra->size);
+    dst_extra->datap = (uint64)data;
+}
+
+/* A buffer for the EXTRA data of a queued frame.  The buffers belong to the
+ * thread; one is in use while a queued frame's EXTRA record points to it.
+ * They are only added at a safe point (signal_extra_bufs_grow()) and only read
+ * from our signal handler, which cannot allocate.
+ */
+typedef struct _extra_buf_t {
+    struct _extra_buf_t *next;
+    size_t size;
+    byte data[];
+} extra_buf_t;
+
+static bool
+extra_buf_in_use(thread_sig_info_t *info, extra_buf_t *buf)
+{
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        for (sigpending_t *p = info->sigpending[sig]; p != NULL; p = p->next) {
+            size_t data_off;
+            struct extra_context *extra =
+                frame_extra_record(&p->rt_frame, true, &data_off);
+            if (extra != NULL && extra->datap == (uint64)buf->data)
+                return true;
+        }
+    }
+    return false;
+}
+
+static extra_buf_t *
+extra_buf_find(thread_sig_info_t *info, size_t size)
+{
+    for (extra_buf_t *buf = info->extra_bufs; buf != NULL; buf = buf->next) {
+        if (buf->size >= size && !extra_buf_in_use(info, buf))
+            return buf;
+    }
+    return NULL;
+}
+
+bool
+signal_frame_extra_fits(thread_sig_info_t *info, sigframe_rt_t *frame)
+{
+    size_t data_off;
+    struct extra_context *extra = frame_extra_record(frame, false, &data_off);
+    if (extra == NULL || extra_buf_find(info, extra->size) != NULL)
+        return true;
+    if (extra->size > info->extra_want)
+        info->extra_want = extra->size;
+    return false;
+}
+
+void
+signal_frame_extra_to_pending(thread_sig_info_t *info, sigframe_rt_t *dst,
+                              sigframe_rt_t *src)
+{
+    size_t data_off;
+    struct extra_context *extra = frame_extra_record(src, false, &data_off);
+    if (extra == NULL)
+        return;
+    struct extra_context *dst_extra =
+        (struct extra_context *)((byte *)dst + ((byte *)extra - (byte *)src));
+    extra_buf_t *buf = extra_buf_find(info, extra->size);
+    if (buf == NULL) {
+        /* Delivered without its SVE/SME state the frame fails at rt_sigreturn,
+         * as it would have before we handled EXTRA records at all.
+         */
+        SYSLOG_INTERNAL_WARNING_ONCE("No buffer for a queued signal frame's "
+                                     "%u-byte EXTRA data",
+                                     extra->size);
+        dst_extra->datap = 0;
+        return;
+    }
+    memcpy(buf->data, (byte *)extra->datap, extra->size);
+    dst_extra->datap = (uint64)buf->data;
+}
+
+void
+signal_extra_bufs_grow(dcontext_t *dcontext, thread_sig_info_t *info)
+{
+    size_t want = info->extra_want;
+    if (want == 0)
+        return;
+    info->extra_want = 0;
+    /* Replace the free buffers too small for it.  One buffer per frame we can
+     * queue is the most we need.
+     */
+    uint count = 0;
+    for (extra_buf_t **prev = &info->extra_bufs; *prev != NULL;) {
+        extra_buf_t *buf = *prev;
+        if (buf->size < want && !extra_buf_in_use(info, buf)) {
+            *prev = buf->next;
+            heap_free(dcontext, buf, sizeof(*buf) + buf->size HEAPACCT(ACCT_OTHER));
+        } else {
+            prev = &buf->next;
+            count++;
+        }
+    }
+    if (count >= DYNAMO_OPTION(max_pending_signals))
+        return;
+    extra_buf_t *buf = heap_alloc(dcontext, sizeof(*buf) + want HEAPACCT(ACCT_OTHER));
+    buf->size = want;
+    buf->next = info->extra_bufs;
+    /* A single store publishes it to our signal handler. */
+    info->extra_bufs = buf;
+}
+
+void
+signal_extra_bufs_exit(dcontext_t *dcontext, thread_sig_info_t *info)
+{
+    while (info->extra_bufs != NULL) {
+        extra_buf_t *buf = info->extra_bufs;
+        info->extra_bufs = buf->next;
+        heap_free(dcontext, buf, sizeof(*buf) + buf->size HEAPACCT(ACCT_OTHER));
+    }
 }
