@@ -652,6 +652,15 @@ analyze_clean_call_inline(dcontext_t *dcontext, clean_call_info_t *cci,
             info->start);
         opt_inline = false;
     }
+#ifdef AARCH64
+    /* insert_inline_arg_setup() only passes immediates (XXX i#2796). */
+    if (cci->save_all_regs) {
+        LOG(THREAD, LOG_CLEANCALL, 2,
+            "CLEANCALL: fail inlining clean call " PFX ", register argument.\n",
+            info->start);
+        opt_inline = false;
+    }
+#endif
     if (!info->opt_inline) {
         LOG(THREAD, LOG_CLEANCALL, 2,
             "CLEANCALL: fail inlining clean call " PFX ", complex callee.\n",
