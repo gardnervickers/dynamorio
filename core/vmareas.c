@@ -7717,8 +7717,22 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
                               "please report this transparency violation");
             }
 #endif
+            /* AArch64 always enforces execute permission (there is no
+             * READ_IMPLIES_EXEC), so code on a readable page without PROT_EXEC
+             * must fault rather than run from the code cache.  Our cached
+             * protection can be stale (e.g., after a pkey_mprotect we do not
+             * intercept), so ask the OS before refusing.
+             */
+            bool non_exec = false;
+#if defined(AARCH64) && defined(HAVE_MEMINFO)
+            if (is_allocated_mem && prot != 0 && !TESTANY(MEMPROT_EXEC, prot)) {
+                uint os_prot;
+                non_exec = !get_memory_info_from_os(pc, NULL, NULL, &os_prot) ||
+                    !TESTANY(MEMPROT_EXEC, os_prot);
+            }
+#endif
             if ((is_in_dr IF_WINDOWS(&&!in_private_library(pc))) || !is_allocated_mem ||
-                prot == 0 /*no access flags*/ || is_being_unloaded) {
+                prot == 0 /*no access flags*/ || is_being_unloaded || non_exec) {
                 if (xfer) {
                     /* don't follow cti, wait for app to get there and then
                      * handle this (might be pathological case where cti is
@@ -7756,14 +7770,17 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
                         SYSLOG_INTERNAL_INFO("non-bb-build app decode found "
                                              "unreadable memory");
                     }
+                    const char *what UNUSED = is_in_dr
+                        ? "dr"
+                        : (non_exec && prot != 0 ? "non-executable" : "unreadable");
                     LOG(GLOBAL, LOG_VMAREAS, 1,
                         "application tried to execute from %s " PFX
                         " is_allocated_mem=%d prot=0x%x\n",
-                        is_in_dr ? "dr" : "unreadable", pc, is_allocated_mem, prot);
+                        what, pc, is_allocated_mem, prot);
                     LOG(THREAD, LOG_VMAREAS, 1,
                         "application tried to execute from %s " PFX
                         " is_allocated_mem=%d prot=0x%x\n",
-                        is_in_dr ? "dr" : "unreadable", pc, is_allocated_mem, prot);
+                        what, pc, is_allocated_mem, prot);
                     DOLOG(1, LOG_VMAREAS, {
                         dump_callstack(pc,
                                        (app_pc)get_mcontext_frame_ptr(
@@ -7777,7 +7794,7 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
                         "Application tried to execute from %s memory " PFX ".\n"
                         "This may be a result of an unsuccessful attack or a potential "
                         "application vulnerability.",
-                        is_in_dr ? "dr" : "unreadable", pc);
+                        what, pc);
                     /* Not logged as a security violation, but still an
                      * external warning, We don't want to take blame for all
                      * program bugs that overwrite EIP with invalid addresses,

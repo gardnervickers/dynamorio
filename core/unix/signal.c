@@ -324,6 +324,9 @@ static bool
 execute_handler_from_dispatch(dcontext_t *dcontext, int sig);
 
 static void
+forge_exception(app_pc target_pc, dr_exception_type_t type, int si_code);
+
+static void
 execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
                        byte *cur_xsp);
 
@@ -4584,7 +4587,7 @@ copy_frame_to_stack(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
          * same sigcontext, like the kernel does.
          */
         free_pending_signal(info, sig);
-        os_forge_exception(0, UNREADABLE_MEMORY_EXECUTION_EXCEPTION);
+        forge_exception(0, UNREADABLE_MEMORY_EXECUTION_EXCEPTION, SI_KERNEL);
         ASSERT_NOT_REACHED();
     }
 
@@ -8612,6 +8615,21 @@ is_signal_restorer_code(byte *pc, size_t *len)
 void
 os_forge_exception(app_pc target_pc, dr_exception_type_t type)
 {
+    int code = IF_LINUX_ELSE(SI_KERNEL, 0);
+#if defined(LINUX) && defined(AARCH64)
+    /* An instruction abort: SEGV_MAPERR for an unmapped page and SEGV_ACCERR
+     * for a mapped one without execute permission, as the kernel reports them.
+     */
+    if (type == UNREADABLE_MEMORY_EXECUTION_EXCEPTION)
+        code = get_memory_info(target_pc, NULL, NULL, NULL) ? SEGV_ACCERR : SEGV_MAPERR;
+#endif
+    forge_exception(target_pc, type, code);
+}
+
+/* Delivers a signal of the given type and si_code at target_pc. */
+static void
+forge_exception(app_pc target_pc, dr_exception_type_t type, int si_code)
+{
     /* PR 205136:
      * We want to deliver now, and the caller expects us not to return.
      * We have two alternatives:
@@ -8655,11 +8673,11 @@ os_forge_exception(app_pc target_pc, dr_exception_type_t type)
      */
     memset(frame, 0, sizeof(*frame));
     frame->info.si_signo = sig;
-    /* Set si_code to match what would happen natively.  We also need this to
-     * avoid the !is_sys_kill() check in record_pending_signal() to avoid an
-     * infinite loop (i#3171).
+    /* Set si_code to match what would happen natively.  We also need a
+     * non-user code to avoid the !is_sys_kill() check in
+     * record_pending_signal() to avoid an infinite loop (i#3171).
      */
-    frame->info.si_code = IF_LINUX_ELSE(SI_KERNEL, 0);
+    frame->info.si_code = si_code;
     frame->info.si_addr = target_pc;
 #ifdef X86_32
     frame->sig = sig;
