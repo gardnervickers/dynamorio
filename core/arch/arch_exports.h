@@ -1528,6 +1528,8 @@ app_pc
 find_app_bb_end(dcontext_t *dcontext, byte *start_pc, uint flags);
 byte *
 bb_build_selfmod_copy(dcontext_t *dcontext, app_pc tag, size_t *size DR_PARAM_OUT);
+app_pc
+bb_code_copy_end(dcontext_t *dcontext, app_pc tag);
 bool
 app_bb_overlaps(dcontext_t *dcontext, byte *start_pc, uint flags, byte *region_start,
                 byte *region_end, overlap_info_t *info_res);

@@ -2401,6 +2401,13 @@ OPTION_DEFAULT_INTERNAL(bool, safe_translate_flushed, false,
                         "store info at flush time for safe post-flush translation")
 PC_OPTION_INTERNAL(bool, store_translations,
                    "store info at emit time for fragment translation")
+/* Without -hw_cache_consistency an app can rewrite code before it has us flush the
+ * fragments built from it: keep a copy of the code of each block from writable pages
+ * and translate a fragment's state from that copy rather than from the app's code.
+ */
+OPTION_DEFAULT_INTERNAL(bool, xl8_code_copy, true,
+                        "without -hw_cache_consistency, translate blocks from writable "
+                        "pages from a copy of their code")
 /* i#698: our fpu state xl8 is a perf hit for some apps */
 PC_OPTION(bool, translate_fpu_pc,
           "translate the saved last floating-point pc when FPU state is saved")

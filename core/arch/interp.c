@@ -235,6 +235,10 @@ typedef struct {
     size_t selfmod_copy_len; /* bytes from start_pc copied so far */
     size_t selfmod_copy_cap;
     bool selfmod_copy_incomplete; /* some instr was decoded from the app code */
+    /* -xl8_code_copy: the end of the code [start_pc, app_copy_end) that the fragment
+     * stores a copy of, to translate from, or NULL.
+     */
+    app_pc app_copy_end;
 #ifdef ARM
     dr_pred_type_t svc_pred; /* predicate for conditional svc */
 #endif
@@ -828,6 +832,9 @@ check_new_page_start(dcontext_t *dcontext, build_bb_t *bb)
  * i#993: new_pc points to the last byte of the current instruction and is not
  * an open-ended endpoint.
  */
+static bool
+code_may_change(app_pc pc);
+
 static inline bool
 check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
 {
@@ -838,6 +845,13 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
         ASSERT(new_pc == bb->start_pc);
     } else if (new_pc >= bb->checked_end) {
         uint flags_before = bb->flags;
+        /* A block that elided a cti does not fall through into code the app can
+         * rewrite unseen: we keep a copy of such code to translate from
+         * (-xl8_code_copy), which needs the block's code to be one range.
+         */
+        if (!is_first_instr && TESTANY(FRAG_HAS_DIRECT_CTI, bb->flags) &&
+            INTERNAL_OPTION(xl8_code_copy) && code_may_change(new_pc))
+            return false;
         /* A recreation must not stop where the original did not only because the
          * area's flags changed since: it merges them like a first instruction.
          */
@@ -880,13 +894,25 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
  * target's code is its own block, so its instructions keep their addresses.
  */
 static bool
-elided_cti_may_change(app_pc cti_pc, app_pc target)
+code_may_change(app_pc pc)
 {
     uint prot;
     if (INTERNAL_OPTION(hw_cache_consistency))
         return false;
-    return (get_memory_info(cti_pc, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot)) ||
-        (get_memory_info(target, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot));
+    return get_memory_info(pc, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot);
+}
+
+/* The block's own start counts too: we keep a copy of the code of a block from
+ * writable pages (-xl8_code_copy) to translate from, which needs the block's code to
+ * be one contiguous range.
+ */
+static bool
+elided_cti_may_change(build_bb_t *bb, app_pc cti_pc, app_pc target)
+{
+    if (INTERNAL_OPTION(hw_cache_consistency))
+        return false;
+    return code_may_change(cti_pc) || code_may_change(target) ||
+        (INTERNAL_OPTION(xl8_code_copy) && code_may_change(bb->start_pc));
 }
 
 /* Direct cti from prev_pc to new_pc */
@@ -1114,7 +1140,7 @@ bb_process_ubr(dcontext_t *dcontext, build_bb_t *bb)
         if (bb->follow_direct && !must_not_be_entered(tgt) &&
             bb->num_elide_jmp < DYNAMO_OPTION(max_elide_jmp) &&
             (DYNAMO_OPTION(elide_back_jmps) || bb->cur_pc <= tgt) &&
-            !elided_cti_may_change(bb->instr_start, tgt)) {
+            !elided_cti_may_change(bb, bb->instr_start, tgt)) {
             if (check_new_page_jmp(dcontext, bb, tgt)) {
                 /* Elide unconditional branch and follow target */
                 bb->num_elide_jmp++;
@@ -1224,7 +1250,7 @@ bb_process_call_direct(dcontext_t *dcontext, build_bb_t *bb)
         if (bb->follow_direct && !must_not_be_entered(callee) &&
             bb->num_elide_call < DYNAMO_OPTION(max_elide_call) &&
             (DYNAMO_OPTION(elide_back_calls) || bb->cur_pc <= callee) &&
-            !elided_cti_may_change(bb->instr_start, callee)) {
+            !elided_cti_may_change(bb, bb->instr_start, callee)) {
             if (check_new_page_jmp(dcontext, bb, callee)) {
                 bb->num_elide_call++;
                 STATS_INC(total_elided_calls);
@@ -5312,6 +5338,9 @@ exit_interp_build_bb(dcontext_t *dcontext, build_bb_t *bb)
     instrlist_clear_and_destroy(dcontext, bb->ilist);
 }
 
+static bool
+bb_needs_code_copy(build_bb_t *bb);
+
 /* Interprets the application's instructions until the end of a basic
  * block is found, and then creates a fragment for the basic block.
  * DOES NOT look in the hashtable to see if such a fragment already exists!
@@ -5380,6 +5409,14 @@ build_basic_block_fragment(dcontext_t *dcontext, app_pc start, uint initial_flag
         jitopt_add_dgc_bb(bb.start_pc, bb.end_pc, TEST(FRAG_IS_TRACE_HEAD, bb.flags));
     }
 
+    if (!for_trace && !bb.native_exec && bb_needs_code_copy(&bb)) {
+        /* The translation info we store with the fragment is a copy of its code
+         * (record_translation_info() asks for it with bb_code_copy_end()).
+         */
+        bb.flags |= FRAG_HAS_TRANSLATION_INFO | FRAG_CANNOT_BE_TRACE;
+        bb.app_copy_end = bb.end_pc;
+    }
+
     /* emit fragment into fcache */
     KSTART(bb_emit);
     f = emit_fragment_ex(dcontext, start, bb.ilist, bb.flags, bb.vmlist, link, visible);
@@ -5425,6 +5462,51 @@ build_basic_block_fragment_done:
     dcontext->whereami = wherewasi;
     KSTOP(bb_building);
     return f;
+}
+
+/* Returns whether we keep a copy of the code of bb, whose ilist is built, to
+ * translate its state from.  Without -hw_cache_consistency an app writes code and only
+ * then has us flush the fragments built from it (AArch64 IC IVAU), so a thread can
+ * still run, and fault or be interrupted in, a fragment built from the old code.
+ * Re-decoding the app's code then describes code the fragment was not built from, and
+ * translation info we stored instead lacks what a client's state restoration may need
+ * from the ilist (drreg's restoration needs its own marks on instrs): from a copy we
+ * rebuild the very ilist, client instrumentation included.  Contiguous code only: we
+ * do not elide a cti in, into, or out of, writable code (see elided_cti_may_change()).
+ * Such blocks do not become part of traces (which would need a copy per block).
+ */
+static bool
+bb_needs_code_copy(build_bb_t *bb)
+{
+    app_pc pc;
+    if (!INTERNAL_OPTION(xl8_code_copy) || INTERNAL_OPTION(hw_cache_consistency))
+        return false;
+    /* A client's DR_EMIT_STORE_TRANSLATIONS (or -store_translations) asks for stored
+     * translations, and not to be called to translate.  A sandboxed block keeps its
+     * own copy (recreate_selfmod_ilist()).
+     */
+    if (TESTANY(FRAG_HAS_TRANSLATION_INFO | FRAG_SELFMOD_SANDBOXED | FRAG_HAS_DIRECT_CTI |
+                    FRAG_COARSE_GRAIN | FRAG_IS_TRACE,
+                bb->flags) ||
+        bb->end_pc == NULL || bb->end_pc <= bb->start_pc)
+        return false;
+    for (pc = (app_pc)PAGE_START(bb->start_pc); pc < bb->end_pc; pc += PAGE_SIZE) {
+        if (code_may_change(pc))
+            return true;
+    }
+    return false;
+}
+
+/* Returns the end of the code from tag of which the fragment being emitted keeps a
+ * copy, or NULL if it keeps none.
+ */
+app_pc
+bb_code_copy_end(dcontext_t *dcontext, app_pc tag)
+{
+    build_bb_t *bb = (build_bb_t *)dcontext->bb_build_info;
+    if (bb == NULL || bb->app_copy_end == NULL || bb->start_pc != tag)
+        return NULL;
+    return bb->app_copy_end;
 }
 
 /* Builds an instrlist_t as though building a bb from pretend_pc, but decodes

@@ -1329,6 +1329,63 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
     return RECREATE_FAILURE;
 }
 
+static byte *
+translation_info_code_copy(const translation_info_t *info);
+
+/* Rebuilds the ilist of f, which keeps a copy of its code (-xl8_code_copy), from that
+ * copy: the code the fragment was built from even if the app has rewritten it since.
+ */
+static instrlist_t *
+recreate_ilist_from_code_copy(dcontext_t *dcontext, fragment_t *f)
+{
+    const translation_info_t *info = FRAGMENT_TRANSLATION_INFO(f);
+    byte *copy = translation_info_code_copy(info);
+    instrlist_t *ilist;
+    instr_t *inst;
+    ASSERT(copy != NULL);
+    ASSERT(
+        !TESTANY(FRAG_IS_TRACE | FRAG_HAS_DIRECT_CTI | FRAG_SELFMOD_SANDBOXED, f->flags));
+    /* As for a sandboxed fragment: we decode our own memory as though it were at
+     * f->tag, without checking vm areas, and stop at the copy's end.  We ask for a full
+     * decode (which the stop needs) by passing FRAG_HAS_TRANSLATION_INFO, as the
+     * fragment has.
+     */
+    ilist = recreate_bb_ilist(dcontext, copy, (byte *)f->tag, copy + info->code_copy_size,
+                              FRAG_HAS_TRANSLATION_INFO, NULL, NULL,
+                              false /*don't check vm areas!*/, true /*mangle*/, NULL,
+                              true /*call client*/, false /*!for_trace*/);
+    if (ilist == NULL)
+        return NULL;
+    /* Translations the bb builder set after the client (e.g., of the final jump) are
+     * still in the copy.
+     */
+    for (inst = instrlist_first(ilist); inst != NULL; inst = instr_get_next(inst)) {
+        app_pc app = instr_get_translation(inst);
+        if (app >= copy && app <= copy + info->code_copy_size)
+            instr_set_translation(inst, app - copy + f->tag);
+    }
+    if (PAD_FRAGMENT_JMPS(f->flags))
+        nop_pad_ilist(dcontext, f, ilist, false /* set translation */);
+    STATS_INC(recreate_via_code_copy);
+    return ilist;
+}
+
+/* Returns whether the app's code still matches the copy that f keeps of it. */
+static bool
+code_copy_matches_app(fragment_t *f)
+{
+    const translation_info_t *info = FRAGMENT_TRANSLATION_INFO(f);
+    byte buf[256];
+    uint offs;
+    for (offs = 0; offs < info->code_copy_size; offs += sizeof(buf)) {
+        uint n = MIN(sizeof(buf), info->code_copy_size - offs);
+        if (!d_r_safe_read(f->tag + offs, n, buf) ||
+            memcmp(buf, translation_info_code_copy(info) + offs, n) != 0)
+            return false;
+    }
+    return true;
+}
+
 static instrlist_t *
 recreate_selfmod_ilist(dcontext_t *dcontext, fragment_t *f)
 {
@@ -1693,6 +1750,13 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
         if (f == NULL) {
             ilist = recreate_fragment_ilist(tdcontext, mcontext->pc, &f, &alloc,
                                             true /*mangle*/, true /*client*/);
+        } else if (FRAGMENT_TRANSLATION_INFO(f) != NULL &&
+                   translation_info_code_copy(FRAGMENT_TRANSLATION_INFO(f)) != NULL) {
+            ilist = recreate_ilist_from_code_copy(tdcontext, f);
+            if (ilist == NULL) {
+                res = RECREATE_FAILURE;
+                goto recreate_app_state_done;
+            }
         } else if (FRAGMENT_TRANSLATION_INFO(f) == NULL) {
             if (TEST(FRAG_SELFMOD_SANDBOXED, f->flags)) {
                 ilist = recreate_selfmod_ilist(tdcontext, f);
@@ -1799,7 +1863,10 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
             client_info.fragment_info.cache_start_pc = FCACHE_ENTRY_PC(f);
             client_info.fragment_info.is_trace = TEST(FRAG_IS_TRACE, f->flags);
             client_info.fragment_info.app_code_consistent =
-                !TEST(FRAG_WAS_DELETED | FRAG_SELFMOD_SANDBOXED, f->flags);
+                !TESTANY(FRAG_WAS_DELETED | FRAG_SELFMOD_SANDBOXED, f->flags) &&
+                (FRAGMENT_TRANSLATION_INFO(f) == NULL ||
+                 translation_info_code_copy(FRAGMENT_TRANSLATION_INFO(f)) == NULL ||
+                 code_copy_matches_app(f));
             client_info.fragment_info.ilist = ilist;
             /* i#220/PR 480565: client has option of failing the translation */
             if (!instrument_restore_state(tdcontext, restore_memory, &client_info))
@@ -1939,21 +2006,23 @@ recreate_app_state(dcontext_t *tdcontext, priv_mcontext_t *mcontext, bool restor
 }
 
 static inline uint
-translation_info_alloc_size(uint num_entries)
+translation_info_alloc_size(uint num_entries, uint code_copy_size)
 {
-    return (sizeof(translation_info_t) + sizeof(translation_entry_t) * num_entries);
+    return (sizeof(translation_info_t) + sizeof(translation_entry_t) * num_entries +
+            code_copy_size);
 }
 
 /* we save space by inlining the array with the struct holding the length */
 static translation_info_t *
-translation_info_alloc(dcontext_t *dcontext, uint num_entries)
+translation_info_alloc(dcontext_t *dcontext, uint num_entries, uint code_copy_size)
 {
     /* we need to use global heap since pending-delete fragments become
      * shared entities
      */
-    translation_info_t *info =
-        global_heap_alloc(translation_info_alloc_size(num_entries) HEAPACCT(ACCT_OTHER));
+    translation_info_t *info = global_heap_alloc(
+        translation_info_alloc_size(num_entries, code_copy_size) HEAPACCT(ACCT_OTHER));
     info->num_entries = num_entries;
+    info->code_copy_size = code_copy_size;
     return info;
 }
 
@@ -1961,7 +2030,18 @@ void
 translation_info_free(dcontext_t *dcontext, translation_info_t *info)
 {
     global_heap_free(info,
-                     translation_info_alloc_size(info->num_entries) HEAPACCT(ACCT_OTHER));
+                     translation_info_alloc_size(info->num_entries, info->code_copy_size)
+                         HEAPACCT(ACCT_OTHER));
+}
+
+/* Returns the copy of the fragment's app code that info holds, or NULL. */
+static byte *
+translation_info_code_copy(const translation_info_t *info)
+{
+    if (info->code_copy_size == 0)
+        return NULL;
+    ASSERT(info->num_entries == 0);
+    return (byte *)&info->translation[1];
 }
 
 static inline void
@@ -2033,6 +2113,28 @@ record_translation_info(dcontext_t *dcontext, fragment_t *f, instrlist_t *existi
 
     LOG(THREAD, LOG_FRAGMENT, 3, "record_translation_info: F%d(" PFX ")." PFX "\n", f->id,
         f->tag, f->start_pc);
+
+    if (!TESTANY(FRAG_IS_TRACE, f->flags)) {
+        app_pc copy_end = bb_code_copy_end(dcontext, f->tag);
+        if (copy_end != NULL) {
+            /* We translate from a copy of the code instead (-xl8_code_copy): see
+             * bb_needs_code_copy().
+             * XXX: like a sandboxed fragment's copy, this is taken after we decoded
+             * the code: a write in between leaves a copy of code the fragment was
+             * not built from.
+             */
+            uint size = (uint)(copy_end - (app_pc)f->tag);
+            ASSERT(CHECK_TRUNCATE_TYPE_uint(copy_end - (app_pc)f->tag));
+            info = translation_info_alloc(dcontext, 0, size);
+            if (!d_r_safe_read(f->tag, size, translation_info_code_copy(info))) {
+                /* Unmapped since we decoded it: the fragment will not run. */
+                memset(translation_info_code_copy(info), 0, size);
+            }
+            STATS_INC(num_fragment_code_copies);
+            STATS_ADD(fragment_code_copy_bytes, size);
+            return info;
+        }
+    }
 
     if (existing_ilist != NULL)
         ilist = existing_ilist;
@@ -2189,7 +2291,7 @@ record_translation_info(dcontext_t *dcontext, fragment_t *f, instrlist_t *existi
         instrlist_clear_and_destroy(dcontext, ilist);
 
     /* now copy into right-sized array */
-    info = translation_info_alloc(dcontext, i);
+    info = translation_info_alloc(dcontext, i, 0);
     memcpy(info->translation, entries, sizeof(translation_entry_t) * i);
     HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, entries, translation_entry_t, num_entries,
                     ACCT_OTHER, PROTECTED);

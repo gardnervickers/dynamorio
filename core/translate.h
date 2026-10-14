@@ -78,6 +78,11 @@ typedef struct _translation_entry_t {
  */
 typedef struct _translation_info_t {
     uint num_entries;
+    /* If non-zero, the info is instead a copy of the fragment's app code from its tag,
+     * of this many bytes, that follows the struct (-xl8_code_copy): we translate by
+     * rebuilding the fragment's ilist from it.  num_entries is then 0.
+     */
+    uint code_copy_size;
     /* an array of num_entries elements */
     translation_entry_t translation[1]; /* variable-sized */
 } translation_info_t;
