@@ -196,6 +196,8 @@ bool
 os_thread_suspend_unless_vfork(thread_record_t *tr, bool *skipped);
 void
 os_thread_wait_resumed(thread_record_t *tr);
+bool
+os_thread_resumed_not_run(thread_record_t *tr);
 #endif
 bool
 os_thread_resume(thread_record_t *tr);

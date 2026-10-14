@@ -102,6 +102,10 @@ typedef struct _thread_synch_data_t {
      * safe spot only when it wakes up: see synch_event_signal().
      */
     volatile bool in_synch_all_entry;
+    /* How many synch-alls in a row found this thread not yet run since the previous
+     * one resumed it.  Only accessed while holding all_threads_synch_lock.
+     */
+    uint unrun_synchs;
     /* Only valid while holding all_threads_synch_lock and thread_initexit_lock.  Set
      * to whether synch_with_all_threads was successful in synching this thread.
      */
@@ -183,6 +187,7 @@ synch_thread_init(dcontext_t *dcontext)
     tsd->synch_perm = THREAD_SYNCH_NONE;
     tsd->synch_with_success = false;
     tsd->in_synch_all_entry = false;
+    tsd->unrun_synchs = 0;
     tsd->set_mcontext = NULL;
     tsd->set_context = NULL;
     /* the synch_lock is in unprotected memory so that check_wait_at_safe_spot
@@ -941,6 +946,11 @@ set_synched_thread_context(thread_record_t *trec,
  */
 #define SYNCH_ALL_DEFER_MAX 100
 
+/* How many synch-alls in a row may ask a thread to wait for them before it has run
+ * since the previous one resumed it: see synch_with_all_threads().
+ */
+#define SYNCH_UNRUN_MAX 16
+
 /* Amt of time in ms to wait for threads to get to a safe spot per a loop,
  * see comments in synch_with_yield() on value.  Our default value is 5ms which,
  * depending on the tick resolution could end up being as long as 10 ms. */
@@ -1578,17 +1588,27 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
         synch_array_temp = synch_array;
 
 #ifdef UNIX
-        /* Let each thread that has not run since a previous synch resumed it do so
-         * before we ask any to wait for us.  Such a thread would otherwise find
-         * itself wanted again as soon as it ran, and stay at its safe spot or go
+        /* A thread that has not run since a previous synch resumed it finds itself
+         * wanted again as soon as it runs, and stays at its safe spot or goes
          * straight back to one (a flush sends threads in the cache to
-         * d_r_dispatch): a thread that synchs over and over, such as one flushing
-         * for each of an app's code writes, would keep the others from running for
-         * as long as it went on.  We would wait for each when we suspend it anyway.
+         * d_r_dispatch).  A thread that synchs over and over, such as one flushing
+         * for each of an app's code writes, can thus keep the others from running
+         * for as long as it goes on.  After SYNCH_UNRUN_MAX such synchs in a row,
+         * let the thread run before we ask any to wait for us.  Not every time:
+         * that hands each busy thread the CPU for the rest of its time slice for
+         * each synch, and a flusher waits for all of them.
          */
         for (i = 0; i < num_threads; i++) {
-            if (synch_array[i] == SYNCH_WITH_ALL_NEW && threads[i]->id != my_id)
-                os_thread_wait_resumed(threads[i]);
+            if (synch_array[i] == SYNCH_WITH_ALL_NEW && threads[i]->id != my_id) {
+                thread_synch_data_t *tsd =
+                    (thread_synch_data_t *)threads[i]->dcontext->synch_field;
+                if (!os_thread_resumed_not_run(threads[i]))
+                    tsd->unrun_synchs = 0;
+                else if (++tsd->unrun_synchs >= SYNCH_UNRUN_MAX) {
+                    os_thread_wait_resumed(threads[i]);
+                    tsd->unrun_synchs = 0;
+                }
+            }
         }
 #endif
         for (i = 0; i < num_threads; i++) {

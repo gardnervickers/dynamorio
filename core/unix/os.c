@@ -4080,6 +4080,22 @@ os_thread_wait_resumed(thread_record_t *tr)
     d_r_mutex_unlock(&ostd->suspend_lock);
 }
 
+/* Returns whether this thread has not yet run since our last os_thread_resume() of
+ * it, without waiting for it to.
+ */
+bool
+os_thread_resumed_not_run(thread_record_t *tr)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)tr->dcontext->os_field;
+    bool not_run;
+    d_r_mutex_lock(&ostd->suspend_lock);
+    not_run = ostd->resume_pending && ksynch_get_value(&ostd->resumed) == 0;
+    if (!not_run)
+        os_thread_finish_resume(ostd); /* Does not wait. */
+    d_r_mutex_unlock(&ostd->suspend_lock);
+    return not_run;
+}
+
 bool
 os_thread_suspend(thread_record_t *tr)
 {
