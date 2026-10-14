@@ -917,7 +917,12 @@ d_r_mutex_trylock(mutex_t *lock)
        old value may be >=0 when several threads are trying to acquire lock,
        so we should return false
      */
-    DEADLOCK_AVOIDANCE_LOCK(lock, acquired, ownable);
+    /* A failed try does not wait, so failing on a lock we hold ourselves is no
+     * deadlock: e.g., handle_alarm() tries an itimer lock that a signal
+     * interrupted this thread in the middle of acquiring (mutex taken, recursive
+     * owner not yet set).
+     */
+    DEADLOCK_AVOIDANCE_LOCK(lock, acquired, acquired ? ownable : false);
     return acquired;
 }
 
