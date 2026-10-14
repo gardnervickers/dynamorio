@@ -1134,9 +1134,17 @@ options_enable_code_api_dependences(options_t *options)
     /* We assume that clients avoid private library code, within reason, and
      * don't need as much space when handling signals.  We still raise the
      * limit a little while saving some per-thread space.
+     * On AArch64 we raise it to the stack size: translating a fault in the cache
+     * rebuilds the block on this stack, client instrumentation included, under frames
+     * that hold whole contexts (a sigcontext_t is over 4KB, an mcontext over 2KB with
+     * the SVE slots).  Under a drreg client inserting a clean call, a translation
+     * in a JVM took 31KB of the 32KB, the kernel's 4.5KB frame included; a failed one,
+     * which rebuilds the block again from deeper (recreate_app_pc()), overflowed into
+     * the guard page, and an SVE or SME frame from the kernel is larger still.
      */
     options->signal_stack_size =
-        MAX(options->signal_stack_size, ALIGN_FORWARD(32 * 1024, PAGE_SIZE));
+        MAX(options->signal_stack_size,
+            ALIGN_FORWARD(IF_AARCH64_ELSE(56, 32) * 1024, PAGE_SIZE));
 #endif
 
     /* For CI builds we'll disable elision by default since we
