@@ -8188,6 +8188,12 @@ pre_system_call(dcontext_t *dcontext)
          */
         app_pc addr = (void *)sys_param(dcontext, 0);
         size_t len = (size_t)sys_param(dcontext, 1);
+        /* The kernel unmaps every page the range touches: a length that is not a
+         * page multiple must not leave the rest of the last page (and its code) in
+         * our areas and memory cache.  (An unaligned addr fails with EINVAL.)
+         */
+        if (ALIGNED(addr, PAGE_SIZE) && ALIGN_FORWARD(len, PAGE_SIZE) >= len)
+            len = ALIGN_FORWARD(len, PAGE_SIZE);
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: munmap addr=" PFX " size=" PFX "\n", addr,
             len);
         RSTATS_INC(num_app_munmaps);
