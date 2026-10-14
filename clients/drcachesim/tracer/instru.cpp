@@ -150,13 +150,12 @@ instru_t::get_aarch64_prefetch_type(ptr_int_t prfop)
         break;
     }
 
-#    ifdef DEBUG
-    // Some AArch64 prefetch operation encodings are not accessible using prfop.
-    // For debug builds, we throw an error if we encounter any such prefetch operation.
-    // For release builds, we map them to the default TRACE_TYPE_PREFETCH.
-    DR_ASSERT_MSG(false, "Unsupported AArch64 prefetch operation.");
-#    endif
-
+    // The remaining prfop values have no <prfop> name: type 0b11, and target
+    // 0b11 (the system level cache with FEAT_PRFMSLC).  They are valid
+    // instructions (the architecture executes an unallocated prfop as a hint
+    // with no effect), so an application may contain them: they must not be
+    // fatal (they used to assert in debug builds).  Like every other
+    // prefetch we cannot classify more precisely, they are general prefetches.
     return TRACE_TYPE_PREFETCH;
 }
 #endif
