@@ -462,6 +462,19 @@ check_callee_ilist_inline(dcontext_t *dcontext, callee_info_t *ci)
             break;
         }
 
+        /* The inline save and restore cover GPRs and NZCV but not FPSR or
+         * FPCR (XXX i#2796), so a callee that writes them (e.g., MSR FPSR,
+         * which needs no SIMD register) must not be inlined.  Callees using
+         * SIMD registers, i.e. other FP instructions, are not inlined anyway.
+         */
+        if (instr_uses_reg(instr, DR_REG_FPSR) || instr_uses_reg(instr, DR_REG_FPCR)) {
+            LOG(THREAD, LOG_CLEANCALL, 1,
+                "CLEANCALL: callee " PFX " cannot be inlined: FPSR or FPCR accessed.\n",
+                ci->start);
+            opt_inline = false;
+            break;
+        }
+
         /* For now, any accesses to SP or X29, if it is used as frame pointer,
          * prevent inlining.
          * FIXME i#2796: Some access to SP or X29 can be re-written.
