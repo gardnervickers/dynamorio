@@ -1431,9 +1431,10 @@ raw2trace_t::analyze_elidable_addresses(raw2trace_thread_data_t *tdata, uint64 m
 
 bool
 raw2trace_t::interrupted_by_kernel_event(raw2trace_thread_data_t *tdata, uint64_t cur_pc,
-                                         uint64_t cur_offs)
+                                         uint64_t cur_offs, int max_cur_memrefs)
 {
     bool is_interrupted = false;
+    int memrefs = 0;
     std::deque<offline_entry_t> pre_read_buffer;
 
     const offline_entry_t *next_entry = get_next_entry(tdata);
@@ -1441,6 +1442,7 @@ raw2trace_t::interrupted_by_kernel_event(raw2trace_thread_data_t *tdata, uint64_
         pre_read_buffer.push_front(*next_entry);
         if (next_entry->addr.type == OFFLINE_TYPE_MEMREF ||
             next_entry->addr.type == OFFLINE_TYPE_MEMREF_HIGH) {
+            ++memrefs;
             next_entry = get_next_entry(tdata);
             continue;
         }
@@ -1476,6 +1478,18 @@ raw2trace_t::interrupted_by_kernel_event(raw2trace_thread_data_t *tdata, uint64_
                 } else {
                     if (marker_val == cur_pc)
                         is_interrupted = true;
+                }
+                // A kernel event right after a block whose later instructions
+                // recorded addresses did not interrupt that block at cur_pc: the
+                // block completed and the event happened when execution went
+                // back to cur_pc (a loop), which also starts the next block.
+                if (is_interrupted && max_cur_memrefs >= 0 &&
+                    memrefs > max_cur_memrefs) {
+                    log(4,
+                        "Kernel event at " PFX " follows %d memrefs (> %d for that "
+                        "instr): not an interruption of this block\n",
+                        (ptr_uint_t)cur_pc, memrefs, max_cur_memrefs);
+                    is_interrupted = false;
                 }
             }
         }
@@ -1698,7 +1712,13 @@ raw2trace_t::append_bb_entries(raw2trace_thread_data_t *tdata,
         // The trace is recording instruction retirement, premmpted instructions
         // and the corresponding memrefs, and instructions casuing a fault are
         // removed.
-        const bool interrupted = interrupted_by_kernel_event(tdata, cur_pc, cur_offs);
+        // Rep strings and scatter/gather have no fixed address-record bound.
+        int max_cur_memrefs = instr->type() == TRACE_TYPE_INSTR_MAYBE_FETCH ||
+                instr->is_scatter_or_gather()
+            ? -1
+            : static_cast<int>(instr->num_mem_srcs() + instr->num_mem_dests());
+        const bool interrupted =
+            interrupted_by_kernel_event(tdata, cur_pc, cur_offs, max_cur_memrefs);
         if (interrupted) {
             // Insert the TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION marker to
             // indicate an instruction is removed from the trace because it was

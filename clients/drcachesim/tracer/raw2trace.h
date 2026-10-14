@@ -1163,10 +1163,13 @@ private:
 
     // Returns true if a kernel interrupt happened at cur_pc. The check skips
     // memrefs to search for a kernel event marker. If the kernel event marker has
-    // the value of cur_pc, it returns true.
+    // the value of cur_pc, it returns true, unless max_cur_memrefs is
+    // non-negative and more memrefs than that precede the marker: those belong
+    // to later instructions of the block, so the block ran past cur_pc and the
+    // event happened after it (e.g., at a loop back-edge to cur_pc).
     bool
     interrupted_by_kernel_event(raw2trace_thread_data_t *tdata, uint64_t cur_pc,
-                                uint64_t cur_offs);
+                                uint64_t cur_offs, int max_cur_memrefs = -1);
 
     bool
     append_bb_entries(raw2trace_thread_data_t *tdata, const offline_entry_t *in_entry,
