@@ -10179,7 +10179,26 @@ vm_area_allsynch_flush_fragments(dcontext_t *dcontext, dcontext_t *del_dcontext,
             if (v->buf[i].custom.frags != NULL) {
                 for (entry = v->buf[i].custom.frags; entry != NULL; entry = next) {
                     next = FRAG_NEXT(entry);
-                    if (dcontext == del_dcontext) {
+                    if (dcontext == del_dcontext &&
+                        TESTANY(FRAG_WAS_DELETED, FRAG_FRAG(entry)->flags)) {
+                        /* The first stage of an earlier, not synchall, flush
+                         * already unlinked this private fragment and removed it
+                         * from the tables and from other areas; it stays on this
+                         * VM_DELETE_ME area's list until its thread processes its
+                         * flush queue.  Delete it as vm_area_flush_fragments()
+                         * would, not a second time from the start.
+                         */
+                        ASSERT(del_dcontext != GLOBAL_DCONTEXT);
+                        ASSERT_CURIOSITY(TESTANY(VM_DELETE_ME, v->buf[i].vm_flags));
+                        LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 5,
+                            "\tremoving already unlinked " PFX " F%d(" PFX ")\n", entry,
+                            FRAG_ID(entry), FRAG_PC(entry));
+                        fragment_delete(dcontext, FRAG_FRAG(entry),
+                                        FRAGDEL_NO_OUTPUT | FRAGDEL_NO_UNLINK |
+                                            FRAGDEL_NO_HTABLE | FRAGDEL_NO_VMAREA);
+                        STATS_INC(num_fragments_deleted_consistency);
+                        DODEBUG({ num_fine++; });
+                    } else if (dcontext == del_dcontext) {
                         LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 5,
                             "\tremoving " PFX "%s F%d(" PFX ")\n", entry,
                             FRAG_MULTI(entry) ? " multi" : "", FRAG_ID(entry),
