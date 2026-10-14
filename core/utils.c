@@ -806,7 +806,11 @@ spinmutex_unlock(spin_mutex_t *spin_lock)
     ASSERT(lock->lock_requests > LOCK_FREE_STATE && "lock not owned");
     ASSERT(lock->lock_requests == LOCK_SET_STATE);
     DEADLOCK_AVOIDANCE_UNLOCK(lock, LOCK_OWNABLE);
-    lock->lock_requests = LOCK_FREE_STATE;
+    /* A release: the critical section's stores (and the owner reset above) must be
+     * visible before the lock is seen free (a plain store is not ordered so on
+     * weakly ordered hardware).
+     */
+    ATOMIC_4BYTE_ALIGNED_WRITE(&lock->lock_requests, LOCK_FREE_STATE, false);
     /* NOTE - check_wait_at_safe_spot requires that no system calls be made
      * after we release the lock */
     return;

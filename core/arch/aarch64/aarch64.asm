@@ -536,11 +536,14 @@ GLOBAL_LABEL(dr_longjmp:)
         br       x30
         END_FUNC(dr_longjmp)
 
-        /* int atomic_swap(int *adr, int val) */
+        /* int atomic_swap(int *adr, int val)
+         * Acquire and release, like x86's xchg: spinmutex_trylock() and the
+         * initstack_mutex take locks with it.
+         */
         DECLARE_FUNC(atomic_swap)
 GLOBAL_LABEL(atomic_swap:)
-1:      ldxr     w2, [x0]
-        stxr     w3, w1, [x0]
+1:      ldaxr    w2, [x0]
+        stlxr    w3, w1, [x0]
         cbnz     w3, 1b
         mov      w0, w2
         ret
