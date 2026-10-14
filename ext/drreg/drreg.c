@@ -603,15 +603,14 @@ drreg_insert_restore_all(void *drcontext, instrlist_t *bb, instr_t *inst,
     return DRREG_SUCCESS;
 }
 
-/* 'restored_for_read' holds one slot per GPR using GPR_IDX() (no aflags slot). */
+/* After an app write of the arithmetic flags, updates their spilled app value
+ * (inserting at next).
+ */
 static drreg_status_t
-drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
-                         instr_t *inst, instr_t *next, bool force_respill,
-                         bool *restored_for_read)
+drreg_respill_aflags_after_write(void *drcontext, per_thread_t *pt, instrlist_t *bb,
+                                 instr_t *inst, instr_t *next, bool force_respill)
 {
     drreg_status_t res = DRREG_SUCCESS;
-    reg_id_t reg;
-    /* After aflags write by app, update spilled app value */
     if ((force_respill ||
          TESTANY(EFLAGS_WRITE_ARITH, instr_get_eflags(inst, DR_QUERY_INCLUDE_ALL))) &&
         /* Is everything written later? */
@@ -648,6 +647,27 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
         }
     }
 
+    return res;
+}
+
+/* 'restored_for_read' holds one slot per GPR using GPR_IDX() (no aflags slot). */
+static drreg_status_t
+drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
+                         instr_t *inst, instr_t *next, bool force_respill,
+                         bool *restored_for_read)
+{
+    drreg_status_t res = DRREG_SUCCESS;
+    reg_id_t reg;
+#ifdef X86
+    res = drreg_respill_aflags_after_write(drcontext, pt, bb, inst, next, force_respill);
+#else
+    /* Update the GPRs first: on AArchXX the aflags spill below picks a scratch
+     * GPR and leaves it pending a lazy restore, which the GPR pass would take
+     * for a pending state that predates inst (and drop if inst writes that
+     * GPR), and its instructions at next would also come between the tool
+     * restores and next, where a GPR re-spill below expects to find them.
+     */
+#endif
     /* After each app write, update spilled app values: */
     for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
         if (pt->reg[GPR_IDX(reg)].in_use) {
@@ -688,13 +708,18 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                 }
                 /* If the instr reads and writes both, make sure that the app-spill
                  * instr is added **before** the tool-restore instrs added by
-                 * drreg_insert_restore_all called earlier in this routine.
+                 * drreg_insert_restore_all called earlier in this routine: right
+                 * after inst, where reg holds the app value and those restores
+                 * begin.  For a clean call, inst is the label ending the call,
+                 * and the call is inserted before that label after we return:
+                 * inserting before inst (the old instr_get_prev(next)) would
+                 * spill before the callee's dr_set_mcontext() changes.
                  */
                 if (restored_for_read[GPR_IDX(reg)]) {
-                    ASSERT(instr_get_prev(next) != NULL,
+                    ASSERT(instr_get_next(inst) != NULL,
                            "missing tool value restore after app read");
                     spill_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, bb,
-                              instr_get_prev(next));
+                              instr_get_next(inst));
                 } else {
                     spill_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, bb,
                               next /*after*/);
@@ -720,6 +745,12 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
             pt->pending_unreserved--;
         }
     }
+#ifndef X86
+    if (res == DRREG_SUCCESS) {
+        res = drreg_respill_aflags_after_write(drcontext, pt, bb, inst, next,
+                                               force_respill);
+    }
+#endif
     return res;
 }
 
