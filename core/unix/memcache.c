@@ -91,6 +91,25 @@ allmem_info_merge(void *dst_data, void *src_data);
  */
 DECLARE_CXTSWPROT_VAR(uint all_memory_areas_recursion, 0);
 
+/* App munmap and mremap syscalls between their pre- and post-syscall handling
+ * (memcache_unmap_begin() and memcache_unmap_end()).  munmap removes its range
+ * from the cache before the syscall: a query in between must not add it back
+ * from the OS's view, which the syscall is about to change.
+ */
+DECLARE_NEVERPROT_VAR(static int unmaps_in_flight, 0);
+
+void
+memcache_unmap_begin(void)
+{
+    ATOMIC_INC(int, unmaps_in_flight);
+}
+
+void
+memcache_unmap_end(void)
+{
+    ATOMIC_DEC(int, unmaps_in_flight);
+}
+
 void
 memcache_init(void)
 {
@@ -459,9 +478,14 @@ memcache_query_memory(const byte *pc, DR_PARAM_OUT dr_mem_info_t *out_info)
             out_info->size = from_os_size;
             out_info->prot = from_os_prot;
             out_info->type = DR_MEMTYPE_DATA; /* hopefully we won't miss an image */
-            /* Update our list to avoid coming back here again (i#2037). */
-            memcache_update_locked(from_os_base_pc, from_os_base_pc + from_os_size,
-                                   from_os_prot, -1, false /*!exists*/);
+            /* Update our list to avoid coming back here again (i#2037), unless an
+             * unmap is in flight: the region may be one it has removed, and adding
+             * it back would leave it in the cache after the syscall unmaps it.
+             */
+            if (atomic_aligned_read_int(&unmaps_in_flight) == 0) {
+                memcache_update_locked(from_os_base_pc, from_os_base_pc + from_os_size,
+                                       from_os_prot, -1, false /*!exists*/);
+            }
         }
 #else
         /* We now have nested probes, but currently probing sometimes calls

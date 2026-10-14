@@ -81,4 +81,11 @@ memcache_handle_app_brk(byte *lowest_brk /*if known*/, byte *old_brk, byte *new_
 void
 memcache_update_all_from_os(void);
 
+/* Bracket an app munmap or mremap syscall, from pre- to post-syscall handling. */
+void
+memcache_unmap_begin(void);
+
+void
+memcache_unmap_end(void);
+
 #endif /* _MEMCACHE_H_ */

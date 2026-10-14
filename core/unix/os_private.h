@@ -166,6 +166,12 @@ typedef struct _os_thread_data_t {
      */
     bool vfork_waiting;
     int vfork_skips;
+#ifndef HAVE_MEMINFO_QUERY
+    /* Between pre- and post-syscall handling of an app munmap or mremap, which
+     * memcache_unmap_begin() counts.
+     */
+    bool memcache_unmap_in_flight;
+#endif
     /* The dstack of the clone record for a thread-creating clone that this thread
      * is about to make or is waiting in, until the clone returns here; see
      * os_fork_forget_thread().
