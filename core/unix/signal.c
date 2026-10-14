@@ -8485,6 +8485,18 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
         sigframe_rt_t *frame = (sigframe_rt_t *)(xsp IF_X86(-sizeof(char *)));
         /* use si_signo instead of sig, less likely to be clobbered by app */
         sig = frame->info.si_signo;
+#    ifdef AARCH64
+        /* The kernel fills in the siginfo only for a handler with SA_SIGINFO.  We
+         * see a frame it built for another handler if we took over the thread while
+         * the handler ran, delivered natively (e.g., while we attached): we do not
+         * know its signal number, and nothing below needs it on AArch64.
+         */
+        if (sig <= 0 || sig > MAX_SIGNUM) {
+            LOG(THREAD, LOG_ASYNCH, 2, "\tframe has no signal number (si_signo %d)\n",
+                sig);
+            sig = 0;
+        }
+#    endif
 #    ifdef X86_32
         LOG(THREAD, LOG_ASYNCH, 3, "\tsignal was %d (did == param %d)\n", sig,
             frame->sig);
@@ -8525,7 +8537,8 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
         LOG(THREAD, LOG_ASYNCH, 3, "\tsignal was %d\n", sig);
         sc = SIGCXT_FROM_UCXT(ucxt);
 #endif
-        ASSERT(sig > 0 && sig <= MAX_SIGNUM && IS_RT_FOR_APP(info, sig));
+        ASSERT((sig > 0 && sig <= MAX_SIGNUM && IS_RT_FOR_APP(info, sig))
+                   IF_AARCH64(|| sig == 0));
         /* Re-set sigstack from the value stored in the frame.  Silently ignore failure,
          * just like the kernel does.
          */
