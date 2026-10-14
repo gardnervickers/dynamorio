@@ -351,6 +351,26 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
     reg_id_t reg, r;
     bool spill, spill_tls;
 
+#ifdef AARCH64
+    /* mangle_exclusive_store() saves the store-exclusive's status register in
+     * TLS_LDSTEX_STATUS_SLOT, which we track as a spill so that a fault on the
+     * store reports the register's original value.  Once the application's store
+     * has executed, the register holds the application's status: restoring it
+     * from that slot at a later pc would bring back the stale original.
+     */
+    if (instr_is_app(inst) && instr_is_exclusive_store(inst)) {
+        for (r = 0; r < REG_SPILL_NUM; r++) {
+            if (walk->reg_spill_offs[r] != UINT_MAX && walk->reg_tls[r] &&
+                walk->reg_spill_offs[r] ==
+                    os_tls_offset((ushort)TLS_LDSTEX_STATUS_SLOT)) {
+                LOG(THREAD_GET, LOG_INTERP, 4, "\tstatus of %s now the app's\n",
+                    reg_names[r + REG_START_SPILL]);
+                walk->reg_spill_offs[r] = UINT_MAX;
+            }
+        }
+    }
+#endif
+
     if (instr_is_label(inst)) {
         if (instr_get_note(inst) == (void *)DR_NOTE_CALL_SEQUENCE_START)
             walk->in_clean_call = true;
