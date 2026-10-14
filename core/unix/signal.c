@@ -1810,6 +1810,19 @@ signal_thread_exit(dcontext_t *dcontext, bool other_thread)
                              sizeof(int) HEAPACCT(ACCT_OTHER));
         }
     }
+    if (!other_thread && doing_detach && info->num_pending > 0) {
+        /* The thread detaching the process returns to the app (with the app's
+         * mask, installed below): like the others (sig_detach()), it hands the
+         * signals we queued for it back to the kernel instead of dropping them.
+         */
+        kernel_sigset_t all;
+        kernel_sigfillset(&all);
+        sigprocmask_syscall(SIG_BLOCK, &all, NULL, sizeof(all));
+        for (i = 1; i <= MAX_SIGNUM; i++) {
+            while (info->sigpending[i] != NULL)
+                resend_pending_signal_at_detach(dcontext, info, i);
+        }
+    }
     for (i = 1; i <= MAX_SIGNUM; i++) {
         /* pending queue is per-thread and not shared */
         while (info->sigpending[i] != NULL) {
