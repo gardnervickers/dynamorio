@@ -3564,6 +3564,26 @@ instr_create_3dst_6src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, op
 }
 
 instr_t *
+instr_create_3dst_7src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4, opnd_t src5,
+                       opnd_t src6, opnd_t src7)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 3, 7);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    instr_set_src(in, 6, src7);
+    return in;
+}
+
+instr_t *
 instr_create_4dst_1src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
                        opnd_t dst4, opnd_t src)
 {
@@ -3686,6 +3706,28 @@ instr_create_4dst_7src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, op
 }
 
 instr_t *
+instr_create_4dst_8src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4,
+                       opnd_t src5, opnd_t src6, opnd_t src7, opnd_t src8)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 4, 8);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    instr_set_src(in, 6, src7);
+    instr_set_src(in, 7, src8);
+    return in;
+}
+
+instr_t *
 instr_create_5dst_3src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
                        opnd_t dst4, opnd_t dst5, opnd_t src1, opnd_t src2, opnd_t src3)
 {
@@ -3761,6 +3803,31 @@ instr_create_5dst_8src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, op
     instr_set_src(in, 5, src6);
     instr_set_src(in, 6, src7);
     instr_set_src(in, 7, src8);
+    return in;
+}
+
+instr_t *
+instr_create_5dst_9src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t dst5, opnd_t src1, opnd_t src2, opnd_t src3,
+                       opnd_t src4, opnd_t src5, opnd_t src6, opnd_t src7, opnd_t src8,
+                       opnd_t src9)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 5, 9);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_dst(in, 4, dst5);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    instr_set_src(in, 6, src7);
+    instr_set_src(in, 7, src8);
+    instr_set_src(in, 8, src9);
     return in;
 }
 

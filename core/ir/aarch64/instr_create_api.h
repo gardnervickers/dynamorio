@@ -944,13 +944,15 @@
 #define INSTR_CREATE_fmov_general(dc, Rd, Rn) instr_create_1dst_1src(dc, OP_fmov, Rd, Rn)
 
 /**
- * Creates an FMOV instruction to move between GPRs and floating point registers.
- * \param dc   The void * dcontext used to allocate memory for the instr_t.
- * \param Rd   The output register.
- * \param Rn   The first input vector register.
+ * Creates an FMOV instruction to move a GPR to the upper 64 bits of a vector register,
+ * e.g. FMOV V0.D[1], X1.
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The output register, Q (quadword, 128 bits). The instruction also reads
+ *             this register as it only writes the upper 64 bits.
+ * \param Rn   The input X register.
  */
-#define INSTR_CREATE_fmov_upper_vec(dc, Rd, Rn)                                    \
-    instr_create_2dst_2src(dc, OP_fmov, Rd, opnd_create_immed_int(1, OPSZ_2b), Rn, \
+#define INSTR_CREATE_fmov_upper_vec(dc, Rd, Rn)                                        \
+    instr_create_2dst_3src(dc, OP_fmov, Rd, opnd_create_immed_int(1, OPSZ_2b), Rd, Rn, \
                            OPND_CREATE_DOUBLE())
 
 /* -------- Advanced SIMD three same including fp16 versions ----------------
@@ -1129,15 +1131,15 @@
 
 /**
  * Creates a SABA vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_saba_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_saba, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_saba, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a ADD vector instruction.
@@ -1716,8 +1718,8 @@
  * \param dc      The void * dcontext used to allocate memory for the instr_t.
  * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
- * \param Rn      The second input register.
- * \param index   The first input register's vector element index.
+ * \param Rn      The second input register, Q (quadword, 128 bits).
+ * \param index   The vector element index of Rn.
  */
 #define INSTR_CREATE_fmlsl_vector_idx(dc, Rd, Rm, Rn, index) \
     instr_create_1dst_5src(dc, OP_fmlsl, Rd, Rd, Rm, Rn, index, OPND_CREATE_HALF())
@@ -1964,15 +1966,15 @@
 
 /**
  * Creates a UABA vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_uaba_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_uaba, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_uaba, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SUB vector instruction.
@@ -2072,8 +2074,8 @@
  * \param dc      The void * dcontext used to allocate memory for the instr_t.
  * \param Rd      The output register.
  * \param Rm      The first input register.
- * \param Rn      The second input register.
- * \param index   The first input register's vector element index.
+ * \param Rn      The second input register, Q (quadword, 128 bits).
+ * \param index   The vector element index of Rn.
  * \param elsz    The vector element size. Use either OPND_CREATE_HALF() or
  *                OPND_CREATE_SINGLE().
  */
@@ -2097,8 +2099,8 @@
  * \param dc      The void * dcontext used to allocate memory for the instr_t.
  * \param Rd      The output register.
  * \param Rm      The first input register.
- * \param Rn      The second input register.
- * \param index   The first input register's vector element index.
+ * \param Rn      The second input register, Q (quadword, 128 bits).
+ * \param index   The vector element index of Rn.
  * \param elsz    The vector element size. Use either OPND_CREATE_HALF() or
  *                OPND_CREATE_SINGLE().
  */
@@ -2115,10 +2117,10 @@
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
  * \param Rd   The first source and destination vector register,
  *             D (doubleword, 64 bits) or Q (quadword, 128 bits)
- * \param Rn   The second source vector register, S (singleword, 32 bits) or
- *             D (doubleword, 64 bits)
- * \param Rm   The third source vector register, S (singleword, 32 bits) or
- *             D (doubleword, 64 bits)
+ * \param Rn   The second source vector register, D (doubleword, 64 bits) or
+ *             Q (quadword, 128 bits), the same size as Rd: its upper half is read
+ * \param Rm   The third source vector register, D (doubleword, 64 bits) or
+ *             Q (quadword, 128 bits), the same size as Rd: its upper half is read
  */
 #define INSTR_CREATE_fmlal2_vector(dc, Rd, Rn, Rm) \
     instr_create_1dst_4src(dc, OP_fmlal2, Rd, Rd, Rn, Rm, OPND_CREATE_HALF())
@@ -2133,8 +2135,8 @@
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
  * \param Rd   The first source and destination vector register,
  *             D (doubleword, 64 bits) or Q (quadword, 128 bits)
- * \param Rn   The second source vector register, S (singleword, 32 bits) or
- *             D (doubleword, 64 bits)
+ * \param Rn   The second source vector register, D (doubleword, 64 bits) or
+ *             Q (quadword, 128 bits), the same size as Rd: its upper half is read
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param index   The immediate index for Rm
  */
@@ -2421,13 +2423,13 @@
 
 /**
  * Creates a BSL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  */
 #define INSTR_CREATE_bsl_vector(dc, Rd, Rm, Rn) \
-    instr_create_1dst_2src(dc, OP_bsl, Rd, Rm, Rn)
+    instr_create_1dst_3src(dc, OP_bsl, Rd, Rd, Rm, Rn)
 
 /**
  * Creates a FMINNMP instruction.
@@ -2492,8 +2494,10 @@
  * Creates a FMLSL2 vector instruction.
  * \param dc      The void * dcontext used to allocate memory for the instr_t.
  * \param Rd      The output register. The instruction also reads this register.
- * \param Rm      The first input register.
- * \param Rn      The second input register.
+ * \param Rm      The first input register, the same size as Rd: its upper half is
+ *                read.
+ * \param Rn      The second input register, the same size as Rd: its upper half is
+ *                read.
  */
 #define INSTR_CREATE_fmlsl2_vector(dc, Rd, Rm, Rn) \
     instr_create_1dst_4src(dc, OP_fmlsl2, Rd, Rd, Rm, Rn, OPND_CREATE_HALF())
@@ -2501,9 +2505,10 @@
  * Creates a FMLSL2 indexed vector instruction.
  * \param dc      The void * dcontext used to allocate memory for the instr_t.
  * \param Rd      The output register. The instruction also reads this register.
- * \param Rm      The first input register.
- * \param Rn      The second input register.
- * \param index   The first input register's vector element index.
+ * \param Rm      The first input register, the same size as Rd: its upper half is
+ *                read.
+ * \param Rn      The second input register, Q (quadword, 128 bits).
+ * \param index   The vector element index of Rn.
  */
 #define INSTR_CREATE_fmlsl2_vector_idx(dc, Rd, Rm, Rn, index) \
     instr_create_1dst_5src(dc, OP_fmlsl2, Rd, Rd, Rm, Rn, index, OPND_CREATE_HALF())
@@ -2678,23 +2683,23 @@
 
 /**
  * Creates a BIT vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  */
 #define INSTR_CREATE_bit_vector(dc, Rd, Rm, Rn) \
-    instr_create_1dst_2src(dc, OP_bit, Rd, Rm, Rn)
+    instr_create_1dst_3src(dc, OP_bit, Rd, Rd, Rm, Rn)
 
 /**
  * Creates a BIF vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  */
 #define INSTR_CREATE_bif_vector(dc, Rd, Rm, Rn) \
-    instr_create_1dst_2src(dc, OP_bif, Rd, Rm, Rn)
+    instr_create_1dst_3src(dc, OP_bif, Rd, Rd, Rm, Rn)
 
 /**
  * Creates an FCVTAS vector instruction.
@@ -2822,14 +2827,14 @@
 /**
  * Creates an SLI shift left and insert instruction.
  * \param dc      The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd      The output register.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rn      The input register.
  * \param width   The output vector element width. Use OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF(), OPND_CREATE_SINGLE() or OPND_CREATE_DOUBLE().
  * \param shift   The number of bits to shift the result by.
  */
 #define INSTR_CREATE_sli_vector(dc, Rd, Rn, width, shift) \
-    instr_create_1dst_3src(dc, OP_sli, Rd, Rn, width, shift)
+    instr_create_1dst_4src(dc, OP_sli, Rd, Rd, Rn, width, shift)
 
 /**
  * Creates an UQSHRN vector unsigned saturating shift right narrow (immediate)
@@ -3538,7 +3543,9 @@
 /**
  * Creates an Advanced SIMD (NEON) LD2 instruction to load a 2-element
  * structure to the index of two vector registers, e.g. LD2 {V0.4H, V1.4H}[5], [X0].
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
+ * The destination registers are also sources as only one element of each
+ * is written.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
  * \param Vt1     The first destination vector register operand.
  * \param Vt2     The second destination vector register operand.
  * \param Xn      The stack-pointer or GPR to load into Vt1 and Vt2.
@@ -3546,13 +3553,15 @@
  * \param elsz    The vector element size
  */
 #define INSTR_CREATE_ld2(dc, Vt1, Vt2, Xn, index, elsz) \
-    instr_create_2dst_3src(dc, OP_ld2, Vt1, Vt2, Xn, index, elsz)
+    instr_create_2dst_5src(dc, OP_ld2, Vt1, Vt2, Vt1, Vt2, Xn, index, elsz)
 
 /**
  * Creates an Advanced SIMD (NEON) LD2 instruction to load a 2-element
  * structure to the index of two vector registers with post-indexing,
  * e.g. LD2 {V0.4H, V1.4H}[5], [X0], X1.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
+ * The destination registers are also sources as only one element of each
+ * is written.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
  * \param Vt1     The first destination vector register operand.
  * \param Vt2     The second destination vector register operand.
  * \param Xn      The stack-pointer or register to load into Vt and Vt2.
@@ -3561,8 +3570,9 @@
  * \param offset  The post-index offset.
  * \param elsz    The vector element size
  */
-#define INSTR_CREATE_ld2_2(dc, Vt1, Vt2, Xn, Xnd, index, offset, elsz) \
-    instr_create_3dst_5src(dc, OP_ld2, Vt1, Vt2, Xn, Xnd, index, Xn, offset, elsz)
+#define INSTR_CREATE_ld2_2(dc, Vt1, Vt2, Xn, Xnd, index, offset, elsz)                 \
+    instr_create_3dst_7src(dc, OP_ld2, Vt1, Vt2, Xn, Vt1, Vt2, Xnd, index, Xn, offset, \
+                           elsz)
 
 /**
  * Creates an Advanced SIMD (NEON) LD2R instruction to load and replicate a
@@ -3625,7 +3635,10 @@
 /**
  * Creates an Advanced SIMD (NEON) LD3 instruction to load a single 3-element
  * structure to the index of three vector registers, e.g. LD3 {V0.4H, V1.4H, V2.4H}[15],
- * [X0]. \param dc      The void * dcontext used to allocate memory for the instr_t.
+ * [X0].
+ * The destination registers are also sources as only one element of each
+ * is written.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
  * \param Vt1     The first destination vector register operand.
  * \param Vt2     The second destination vector register operand.
  * \param Vt3     The third destination vector register operand.
@@ -3634,13 +3647,15 @@
  * \param elsz    The vector element size
  */
 #define INSTR_CREATE_ld3(dc, Vt1, Vt2, Vt3, Xn, index, elsz) \
-    instr_create_3dst_3src(dc, OP_ld3, Vt1, Vt2, Vt3, Xn, index, elsz)
+    instr_create_3dst_6src(dc, OP_ld3, Vt1, Vt2, Vt3, Vt1, Vt2, Vt3, Xn, index, elsz)
 
 /**
  * Creates an Advanced SIMD (NEON) LD3 instruction to load a single 3-element
  * structure to the index of three vector registers with post-index offset,
  * e.g. LD3 {V0.4H, V1.4H, V2.4H}[15], [X0], X1.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
+ * The destination registers are also sources as only one element of each
+ * is written.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
  * \param Vt1     The first destination vector register operand.
  * \param Vt2     The second destination vector register operand.
  * \param Vt3     The third destination vector register operand.
@@ -3650,8 +3665,9 @@
  * \param offset  The immediate or GPR post-index offset.
  * \param elsz    The vector element size
  */
-#define INSTR_CREATE_ld3_2(dc, Vt1, Vt2, Vt3, Xn, Xnd, index, offset, elsz) \
-    instr_create_4dst_5src(dc, OP_ld3, Vt1, Vt2, Vt3, Xn, Xnd, index, Xn, offset, elsz)
+#define INSTR_CREATE_ld3_2(dc, Vt1, Vt2, Vt3, Xn, Xnd, index, offset, elsz)              \
+    instr_create_4dst_8src(dc, OP_ld3, Vt1, Vt2, Vt3, Xn, Vt1, Vt2, Vt3, Xnd, index, Xn, \
+                           offset, elsz)
 
 /**
  * Creates an Advanced SIMD (NEON) LD3 instruction to load and replicate a single
@@ -3717,7 +3733,9 @@
 /**
  * Creates an Advanced SIMD (NEON) LD4 instruction to load single or multiple 4-element
  * structures to four vector registers, e.g. LD4 {V0.4H, V1.4H, V2.4H, V3.4H}, [X0].
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
+ * The destination registers are also sources as only one element of each
+ * is written.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
  * \param Vt1     The first destination vector register operand.
  * \param Vt2     The second destination vector register operand.
  * \param Vt3     The third destination vector register operand.
@@ -3726,14 +3744,17 @@
  * \param index   The immediate or GPR post-index offset.
  * \param elsz    The vector element size
  */
-#define INSTR_CREATE_ld4(dc, Vt1, Vt2, Vt3, Vt4, Xn, index, elsz) \
-    instr_create_4dst_3src(dc, OP_ld4, Vt1, Vt2, Vt3, Vt4, Xn, index, elsz)
+#define INSTR_CREATE_ld4(dc, Vt1, Vt2, Vt3, Vt4, Xn, index, elsz)                  \
+    instr_create_4dst_7src(dc, OP_ld4, Vt1, Vt2, Vt3, Vt4, Vt1, Vt2, Vt3, Vt4, Xn, \
+                           index, elsz)
 
 /**
  * Creates an Advanced SIMD (NEON) LD4 instruction to load a single 4-element
  * structures to four vector registers with post-index,
  * e.g. LD4 {V0.4H, V1.4H, V2.4H, V3.4H}, [X0], X1.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
+ * The destination registers are also sources as only one element of each
+ * is written.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
  * \param Vt1     The first destination vector register operand.
  * \param Vt2     The second destination vector register operand.
  * \param Vt3     The third destination vector register operand.
@@ -3744,9 +3765,9 @@
  * \param offset  The post-index offset.
  * \param elsz    The vector element size
  */
-#define INSTR_CREATE_ld4_2(dc, Vt1, Vt2, Vt3, Vt4, Xn, Xnd, index, offset, elsz)       \
-    instr_create_5dst_5src(dc, OP_ld4, Vt1, Vt2, Vt3, Vt4, Xn, Xnd, index, Xn, offset, \
-                           elsz)
+#define INSTR_CREATE_ld4_2(dc, Vt1, Vt2, Vt3, Vt4, Xn, Xnd, index, offset, elsz)        \
+    instr_create_5dst_9src(dc, OP_ld4, Vt1, Vt2, Vt3, Vt4, Xn, Vt1, Vt2, Vt3, Vt4, Xnd, \
+                           index, Xn, offset, elsz)
 
 /**
  * Creates an Advanced SIMD (NEON) LD4R instruction to load
@@ -3912,39 +3933,39 @@
 
 /**
  * Creates a ADDHN2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_addhn2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_addhn2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_addhn2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SABAL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_sabal_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_sabal, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_sabal, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SABAL2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_sabal2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_sabal2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_sabal2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SUBHN vector instruction.
@@ -3960,15 +3981,15 @@
 
 /**
  * Creates a SUBHN2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_subhn2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_subhn2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_subhn2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SABDL vector instruction.
@@ -3996,99 +4017,99 @@
 
 /**
  * Creates a SMLAL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_smlal_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_smlal, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_smlal, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SMLAL2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_smlal2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_smlal2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_smlal2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SQDMLAL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_HALF() or
  *                OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_sqdmlal_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_sqdmlal, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_sqdmlal, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SQDMLAL2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_HALF() or
  *                OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_sqdmlal2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_sqdmlal2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_sqdmlal2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SMLSL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_smlsl_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_smlsl, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_smlsl, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SMLSL2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_smlsl2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_smlsl2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_smlsl2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SQDMLSL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_HALF() or
  *                OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_sqdmlsl_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_sqdmlsl, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_sqdmlsl, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SQDMLSL2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_HALF() or
  *                OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_sqdmlsl2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_sqdmlsl2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_sqdmlsl2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a SMULL vector instruction.
@@ -4272,39 +4293,39 @@
 
 /**
  * Creates a RADDHN2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_raddhn2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_raddhn2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_raddhn2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a UABAL vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_uabal_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_uabal, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_uabal, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a UABAL2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_uabal2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_uabal2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_uabal2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a RSUBHN vector instruction.
@@ -4320,15 +4341,15 @@
 
 /**
  * Creates a RSUBHN2 vector instruction.
- * \param dc      The void * dcontext used to allocate memory for the instr_t.
- * \param Rd      The output register.
+ * \param dc      The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd      The output register. The instruction also reads this register.
  * \param Rm      The first input register.
  * \param Rn      The second input register.
  * \param width   The input vector element width. Use either OPND_CREATE_BYTE(),
  *                OPND_CREATE_HALF() or OPND_CREATE_SINGLE().
  */
 #define INSTR_CREATE_rsubhn2_vector(dc, Rd, Rm, Rn, width) \
-    instr_create_1dst_3src(dc, OP_rsubhn2, Rd, Rm, Rn, width)
+    instr_create_1dst_4src(dc, OP_rsubhn2, Rd, Rd, Rm, Rn, width)
 
 /**
  * Creates a UABDL vector instruction.
@@ -4580,13 +4601,14 @@
  *    SM3PARTW1 <Sd>.4S, <Sn>.4S, <Sm>.4S
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param Rm_elsz   The element size for Rm, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm3partw1_vector(dc, Rd, Rn, Rm, Rm_elsz) \
-    instr_create_1dst_3src(dc, OP_sm3partw1, Rd, Rn, Rm, Rm_elsz)
+    instr_create_1dst_4src(dc, OP_sm3partw1, Rd, Rd, Rn, Rm, Rm_elsz)
 
 /**
  * Creates a SM3PARTW2 instruction.
@@ -4596,13 +4618,14 @@
  *    SM3PARTW2 <Sd>.4S, <Sn>.4S, <Sm>.4S
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param Rm_elsz   The element size for Rm, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm3partw2_vector(dc, Rd, Rn, Rm, Rm_elsz) \
-    instr_create_1dst_3src(dc, OP_sm3partw2, Rd, Rn, Rm, Rm_elsz)
+    instr_create_1dst_4src(dc, OP_sm3partw2, Rd, Rd, Rn, Rm, Rm_elsz)
 
 /**
  * Creates a SM3SS1 instruction.
@@ -4629,14 +4652,15 @@
  *    SM3TT1A <Sd>.4S, <Sn>.4S, <Sm>.S[<index>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param imm2   The immediate index for Rm
  * \param Rm_elsz   The element size for Rm, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm3tt1a_vector_indexed(dc, Rd, Rn, Rm, imm2, Rm_elsz) \
-    instr_create_1dst_4src(dc, OP_sm3tt1a, Rd, Rn, Rm, imm2, Rm_elsz)
+    instr_create_1dst_5src(dc, OP_sm3tt1a, Rd, Rd, Rn, Rm, imm2, Rm_elsz)
 
 /**
  * Creates a SM3TT1B instruction.
@@ -4646,14 +4670,15 @@
  *    SM3TT1B <Sd>.4S, <Sn>.4S, <Sm>.S[<index>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param imm2   The immediate index for Rm
  * \param Rm_elsz   The element size for Rm, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm3tt1b_vector_indexed(dc, Rd, Rn, Rm, imm2, Rm_elsz) \
-    instr_create_1dst_4src(dc, OP_sm3tt1b, Rd, Rn, Rm, imm2, Rm_elsz)
+    instr_create_1dst_5src(dc, OP_sm3tt1b, Rd, Rd, Rn, Rm, imm2, Rm_elsz)
 
 /**
  * Creates a SM3TT2A instruction.
@@ -4663,14 +4688,15 @@
  *    SM3TT2A <Sd>.4S, <Sn>.4S, <Sm>.S[<index>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param imm2   The immediate index for Rm
  * \param Rm_elsz   The element size for Rm, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm3tt2a_vector_indexed(dc, Rd, Rn, Rm, imm2, Rm_elsz) \
-    instr_create_1dst_4src(dc, OP_sm3tt2a, Rd, Rn, Rm, imm2, Rm_elsz)
+    instr_create_1dst_5src(dc, OP_sm3tt2a, Rd, Rd, Rn, Rm, imm2, Rm_elsz)
 
 /**
  * Creates a SM3TT2B instruction.
@@ -4680,14 +4706,15 @@
  *    SM3TT2B <Sd>.4S, <Sn>.4S, <Sm>.S[<index>]
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rm   The third source vector register, Q (quadword, 128 bits)
  * \param imm2   The immediate index for Rm
  * \param Rm_elsz   The element size for Rm, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm3tt2b_vector_indexed(dc, Rd, Rn, Rm, imm2, Rm_elsz) \
-    instr_create_1dst_4src(dc, OP_sm3tt2b, Rd, Rn, Rm, imm2, Rm_elsz)
+    instr_create_1dst_5src(dc, OP_sm3tt2b, Rd, Rd, Rn, Rm, imm2, Rm_elsz)
 
 /**
  * Creates a SM4E instruction.
@@ -4697,12 +4724,13 @@
  *    SM4E    <Sd>.4S, <Sn>.4S
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
- * \param Rd   The first destination vector register, Q (quadword, 128 bits)
+ * \param Rd   The first destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The second source vector register, Q (quadword, 128 bits)
  * \param Rn_elsz   The element size for Rn, OPND_CREATE_SINGLE()
  */
 #define INSTR_CREATE_sm4e_vector(dc, Rd, Rn, Rn_elsz) \
-    instr_create_1dst_2src(dc, OP_sm4e, Rd, Rn, Rn_elsz)
+    instr_create_1dst_3src(dc, OP_sm4e, Rd, Rd, Rn, Rn_elsz)
 
 /**
  * Creates a SM4EKEY instruction.
@@ -5005,10 +5033,11 @@
  * \endverbatim
  * \param dc   The void * dcontext used to allocate memory for the #instr_t.
  * \param Rd   The destination vector register, Q (quadword, 128 bits).
+ *             The instruction also reads this register.
  * \param Rn   The source vector register, Q (quadword, 128 bits).
  */
 #define INSTR_CREATE_bfcvtn2_vector(dc, Rd, Rn) \
-    instr_create_1dst_2src(dc, OP_bfcvtn2, Rd, Rn, OPND_CREATE_SINGLE())
+    instr_create_1dst_3src(dc, OP_bfcvtn2, Rd, Rd, Rn, OPND_CREATE_SINGLE())
 
 /**
  * Creates a BFCVTN instruction.

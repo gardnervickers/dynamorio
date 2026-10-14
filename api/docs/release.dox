@@ -126,6 +126,28 @@ clients.
 
 The changes between version \DR_VERSION and 11.3.0 include the following compatibility
 changes:
+ - On AArch64, Advanced SIMD instructions that write only part of their destination
+   register or accumulate into it now list the destination as a source too, as their
+   first source operands, like FMLA and MLA (vector) already did.  This covers the
+   narrowing "2" forms (ADDHN2, SHRN2, XTN2, SQXTN2, FCVTN2, FCVTXN2, BFCVTN2...),
+   BIC and ORR (vector, immediate), BIF, BIT, BSL, MLA and MLS (by element), SABA,
+   UABA, SABAL{2}, UABAL{2}, SADALP, UADALP, SMLAL{2}, SMLSL{2}, SQDMLAL{2},
+   SQDMLSL{2}, SLI, SRI, SSRA, USRA, SRSRA, URSRA, SUQADD, USQADD, the SHA1, SHA256,
+   SM3 and SM4E instructions that read their destination, TBX, INS (element and
+   general), FMOV to the upper half of a vector register, and single-structure LD1-LD4
+   to one lane.  The corresponding INSTR_CREATE_ macros keep their parameters and pass
+   the destination as a source themselves.  Added instr_create_3dst_7src(),
+   instr_create_4dst_8src() and instr_create_5dst_9src() for the lane loads.
+ - On AArch64, operands that are always 128 bits wide are now Q registers in the
+   64-bit (D) forms too: the indexed register of by-element instructions (e.g. FMLA,
+   MUL, SMULL, SQDMULH by element), whose index can select an element of the upper
+   half; the source of DUP (element), XTN, SQXTN, SQXTUN and UQXTN; and the
+   destination of SHLL and of SMLAL (by element).  INSTR_CREATE_fmla_vector_idx() and
+   the other indexed-element macros now require a Q register for the indexed source.
+   The half-width sources of FMLAL2 and FMLSL2, which read their upper halves, now have
+   the destination's size (D or Q) instead of S or D.  TBL and TBX now list every table
+   register (as Q registers, wrapping from V31 to V0) instead of the first one plus a
+   length immediate.
  - Added #OPSZ_18, #OPSZ_22, #OPSZ_26, #OPSZ_30, #OPSZ_144, #OPSZ_160, #OPSZ_176,
    #OPSZ_208, #OPSZ_224 and #OPSZ_240 at the end of the OPSZ_ enum, so that AArch64
    SVE Z and P registers and their memory operands have a size at every vector length

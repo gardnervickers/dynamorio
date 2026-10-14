@@ -1492,23 +1492,23 @@ encode_opnd_memreg_size(opnd_size_t size, opnd_t opnd, OUT uint *enc_out)
     return true;
 }
 
-/* q0p: used for q0p1, q0p2, q0p3 */
+/* qp: used for q0p1, q0p2, q0p3, q5p1, q5p2, q5p3 */
 
 static bool
-decode_opnd_q0p(int add, uint enc, OUT opnd_t *opnd)
+decode_opnd_qp(int pos, int add, uint enc, OUT opnd_t *opnd)
 {
-    *opnd = opnd_create_reg(decode_vreg(4, (extract_uint(enc, 0, 5) + add) % 32));
+    *opnd = opnd_create_reg(decode_vreg(4, (extract_uint(enc, pos, 5) + add) % 32));
     return true;
 }
 
 static bool
-encode_opnd_q0p(int add, opnd_t opnd, OUT uint *enc_out)
+encode_opnd_qp(int pos, int add, opnd_t opnd, OUT uint *enc_out)
 {
     opnd_size_t size = OPSZ_NA;
     uint r;
     if (!is_vreg(&size, &r, opnd) || size != OPSZ_16)
         return false;
-    *enc_out = (r - add) % 32;
+    *enc_out = ((r - add) % 32) << pos;
     return true;
 }
 
@@ -2492,13 +2492,13 @@ encode_opnd_z_q_0(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out
 static inline bool
 decode_opnd_q0p1(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
-    return decode_opnd_q0p(1, enc, opnd);
+    return decode_opnd_qp(0, 1, enc, opnd);
 }
 
 static inline bool
 encode_opnd_q0p1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
-    return encode_opnd_q0p(1, opnd, enc_out);
+    return encode_opnd_qp(0, 1, opnd, enc_out);
 }
 
 /* q0p2: as q0 but add 2 mod 32 to reg number */
@@ -2506,13 +2506,13 @@ encode_opnd_q0p1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 static inline bool
 decode_opnd_q0p2(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
-    return decode_opnd_q0p(2, enc, opnd);
+    return decode_opnd_qp(0, 2, enc, opnd);
 }
 
 static inline bool
 encode_opnd_q0p2(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
-    return encode_opnd_q0p(2, opnd, enc_out);
+    return encode_opnd_qp(0, 2, opnd, enc_out);
 }
 
 /* q0p3: as q0 but add 3 mod 32 to reg number */
@@ -2520,13 +2520,13 @@ encode_opnd_q0p2(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 static inline bool
 decode_opnd_q0p3(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 {
-    return decode_opnd_q0p(3, enc, opnd);
+    return decode_opnd_qp(0, 3, enc, opnd);
 }
 
 static inline bool
 encode_opnd_q0p3(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
-    return encode_opnd_q0p(3, opnd, enc_out);
+    return encode_opnd_qp(0, 3, opnd, enc_out);
 }
 
 /* prfop: prefetch operation, such as PLDL1KEEP */
@@ -2801,6 +2801,48 @@ static inline bool
 encode_opnd_q5(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
     return encode_opnd_vector_reg(5, 4, opnd, enc_out);
+}
+
+/* q5p1: as q5 but add 1 mod 32 to reg number */
+
+static inline bool
+decode_opnd_q5p1(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    return decode_opnd_qp(5, 1, enc, opnd);
+}
+
+static inline bool
+encode_opnd_q5p1(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_qp(5, 1, opnd, enc_out);
+}
+
+/* q5p2: as q5 but add 2 mod 32 to reg number */
+
+static inline bool
+decode_opnd_q5p2(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    return decode_opnd_qp(5, 2, enc, opnd);
+}
+
+static inline bool
+encode_opnd_q5p2(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_qp(5, 2, opnd, enc_out);
+}
+
+/* q5p3: as q5 but add 3 mod 32 to reg number */
+
+static inline bool
+decode_opnd_q5p3(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    return decode_opnd_qp(5, 3, enc, opnd);
+}
+
+static inline bool
+encode_opnd_q5p3(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_qp(5, 3, opnd, enc_out);
 }
 
 /* z5: Z register at bit position 5. */
@@ -3405,20 +3447,6 @@ static inline bool
 encode_opnd_imm2_nesw_13(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
 {
     return encode_imm2_nesw(13, opnd, enc_out);
-}
-
-/* len: imm2 at bits 13 & 14 */
-
-static inline bool
-decode_opnd_len(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
-{
-    return decode_opnd_int(13, 2, false, 0, OPSZ_2b, 0, enc, opnd);
-}
-
-static inline bool
-encode_opnd_len(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
-{
-    return encode_opnd_int(13, 2, false, 0, 0, opnd, enc_out);
 }
 
 /* w10: W register or WZR at bit position 10 */
@@ -4092,10 +4120,11 @@ encode_opnd_q4_16(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out
 {
     opnd_size_t size = OPSZ_NA;
     uint r;
-    IF_RETURN_FALSE(!is_vreg(&size, &r, opnd))
-    IF_RETURN_FALSE(size != OPSZ_16)
-    IF_RETURN_FALSE(r > 15)
-
+    /* Other encodings of the same opcode (e.g. vector FMLA) may be tried first,
+     * so a non-matching operand is not an error.
+     */
+    if (!is_vreg(&size, &r, opnd) || size != OPSZ_16 || r > 15)
+        return false;
     *enc_out = r << 16;
     return true;
 }

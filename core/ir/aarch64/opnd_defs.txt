@@ -125,6 +125,9 @@
 ----------------------xxxxx-----  s5         # S register
 ----------------------xxxxx-----  d5         # D register
 ----------------------xxxxx-----  q5         # Q register
+----------------------xxxxx-----  q5p1       # Q register, add 1 (mod 32)
+----------------------xxxxx-----  q5p2       # Q register, add 2 (mod 32)
+----------------------xxxxx-----  q5p3       # Q register, add 3 (mod 32)
 ----------------------xxxxx-----  z5         # Z register
 ----------------------xxxxx-----  z_b_5      # Z register with b size elements
 ----------------------xxxxx-----  z_b_5p1    # Z register with b size elements, plus 1
@@ -157,7 +160,6 @@
 ------------------xxxx----------  imm4_10 # 4 bit immediate from 10:13
 -----------------xx-------------  cmode_s_sz # Vector shift for 32 bit elements
 -----------------xx-------------  imm2_nesw_13 # 2 bit symbolised imm, representing 0, 90, 180, or 270
------------------xx-------------  len        # imm2 len
 -----------------xxxxx----------  w10        # W register (or WZR)
 -----------------xxxxx----------  x10        # X register (or XZR)
 -----------------xxxxx----------  s10        # S register
