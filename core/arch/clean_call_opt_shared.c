@@ -612,10 +612,21 @@ analyze_clean_call_args(dcontext_t *dcontext, clean_call_info_t *cci, opnd_t *ar
 }
 
 static bool
-analyze_clean_call_inline(dcontext_t *dcontext, clean_call_info_t *cci)
+analyze_clean_call_inline(dcontext_t *dcontext, clean_call_info_t *cci,
+                          bool always_out_of_line)
 {
     callee_info_t *info = cci->callee_info;
     bool opt_inline = true;
+
+    if (always_out_of_line) {
+        /* The caller will not inline: deciding to would clone the callee's
+         * ilist into cci->ilist, which nobody frees.
+         */
+        LOG(THREAD, LOG_CLEANCALL, 2,
+            "CLEANCALL: fail inlining clean call " PFX ", always out of line.\n",
+            info->start);
+        opt_inline = false;
+    }
 
     if (INTERNAL_OPTION(opt_cleancall) <= 1) {
         LOG(THREAD, LOG_CLEANCALL, 2,
@@ -735,7 +746,7 @@ analyze_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instr_t *where,
             /* 7. check arguments */
             analyze_clean_call_args(dcontext, cci, args);
             /* 8. inline optimization analysis */
-            should_inline = analyze_clean_call_inline(dcontext, cci);
+            should_inline = analyze_clean_call_inline(dcontext, cci, always_out_of_line);
         }
     }
 
