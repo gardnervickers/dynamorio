@@ -280,6 +280,10 @@ reader_t::process_input_entry()
         cur_ref_.flush.type = (trace_type_t)input_entry_->type;
         cur_ref_.flush.size = input_entry_->size;
         cur_ref_.flush.addr = input_entry_->addr;
+        // Like a data record, a flush belongs to the preceding instruction.
+        // (Without this, flush.pc kept whatever an earlier record left in that
+        // part of the union: a data record's pc or an instruction's encoding.)
+        cur_ref_.flush.pc = cur_pc_;
         if (cur_ref_.flush.size != 0)
             have_memref = true;
         break;
