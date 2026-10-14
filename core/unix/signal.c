@@ -5260,7 +5260,8 @@ interrupted_inlined_syscall(dcontext_t *dcontext, fragment_t *f,
 /* i#1145: auto-restart syscalls interrupted by signals */
 static bool
 adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
-                           sigcontext_t *sc, fragment_t *f, reg_t orig_retval_reg)
+                           sigcontext_t *sc, fragment_t *f, reg_t orig_retval_reg,
+                           bool not_issued)
 {
     byte *pc = (byte *)sc->SC_XIP;
     int sys_inst_len;
@@ -5273,9 +5274,11 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
          */
         return false;
     }
-    /* Don't restart if the app's handler says not to */
-    if (info->sighand->action[sig] != NULL &&
-        !TEST(SA_RESTART, info->sighand->action[sig]->flags)) {
+    /* Don't restart if the app's handler says not to, unless the syscall was not
+     * issued yet (see is_before_do_syscall()).
+     */
+    if (!not_issued && info->sighand->action[sig] != NULL &&
+        !TESTANY(SA_RESTART, info->sighand->action[sig]->flags)) {
         return false;
     }
     /* XXX i#1145: some syscalls are never restarted when interrupted by a signal.
@@ -5489,6 +5492,32 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
     return f;
 }
 
+#if defined(LINUX) && defined(AARCH64)
+/* Returns whether pc is on our way from d_r_dispatch into do_syscall for a syscall
+ * that we deliver pending signals before (one that is ignorable or an unbounded
+ * wait: see handle_system_call()), but before its syscall instruction: in
+ * fcache_enter, after its check for pending signals, or in do_syscall ahead of the
+ * syscall instruction.  If so, returns that instruction's address in *syscall_pc.
+ */
+static bool
+is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *syscall_pc)
+{
+    generated_code_t *code = THREAD_GENCODE(dcontext);
+    if (code == NULL || dcontext->next_tag != code->do_syscall)
+        return false;
+    cache_pc svc = code->do_syscall + code->do_syscall_offs - syslen;
+    if (!((pc >= code->fcache_enter && pc < code->fcache_return) ||
+          (pc >= code->do_syscall && pc < svc)))
+        return false;
+    if (is_sigreturn_syscall_number(dcontext->sys_num) ||
+        (!ignorable_system_call(dcontext->sys_num, NULL, dcontext) &&
+         !os_syscall_is_unbounded_wait(dcontext)))
+        return false;
+    *syscall_pc = svc;
+    return true;
+}
+#endif
+
 static void
 record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                       sigframe_rt_t *frame, bool forged, byte *access_address)
@@ -5505,6 +5534,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
     bool handled = false;
     bool reroute = false;
     bool at_auto_restart_syscall = false;
+    bool syscall_not_issued = false;
     int syslen = 0;
     reg_t orig_retval_reg = sc->SC_RETURN_REG;
     sigpending_t *pend;
@@ -5758,6 +5788,39 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
              * other than right after the syscall, so we exclude it (it can't be
              * interrupted so we know we haven't executed it yet).
              */
+#if defined(LINUX) && defined(AARCH64)
+            cache_pc syscall_pc;
+            if (is_before_do_syscall(dcontext, pc, syslen, &syscall_pc)) {
+                /* The signal arrived after fcache_enter checked for pending signals,
+                 * on the way to the syscall instruction.  Left queued, it would be
+                 * blocked in the kernel while the syscall, e.g. a read of an empty
+                 * pipe, waited for it forever.  Natively it is delivered before the
+                 * syscall, which then runs: put the thread at the syscall instruction
+                 * with the app state fcache_enter is restoring (all of it is in the
+                 * mcontext), treat the syscall as interrupted there, and restart it
+                 * after the handler whatever its SA_RESTART.
+                 */
+                priv_mcontext_t *mc = get_mcontext(dcontext);
+                LOG(THREAD, LOG_ASYNCH, 2,
+                    "signal %d arrived on the way to the syscall at " PFX
+                    ": interrupting it there\n",
+                    sig, syscall_pc);
+                /* fcache_enter moves the app value of the stolen register from the
+                 * mcontext to its TLS slot, leaving our TLS base in the mcontext.
+                 */
+                reg_t tls_base = (reg_t)*get_dr_tls_base_addr();
+                reg_t app_stolen = get_stolen_reg_val(mc);
+                if (app_stolen == tls_base)
+                    app_stolen = dcontext->local_state->spill_space.reg_stolen;
+                mcontext_to_ucontext(ucxt, mc);
+                dcontext->local_state->spill_space.reg_stolen = app_stolen;
+                set_sigcxt_stolen_reg(sc, tls_base);
+                sc->SC_XIP = (reg_t)syscall_pc;
+                pc = syscall_pc;
+                orig_retval_reg = sc->SC_RETURN_REG;
+                syscall_not_issued = true;
+            }
+#endif
             if (is_after_syscall_address(dcontext, pc + syslen) &&
                 !is_sigreturn_syscall_number(sc->SC_SYSNUM_REG)) {
                 LOG(THREAD, LOG_ASYNCH, 2,
@@ -6044,7 +6107,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 sigframe_rt_t *frame = &pend->rt_frame;
                 sigcontext_t *sc_pend = get_sigcontext_from_rt_frame(frame);
                 if (adjust_syscall_for_restart(dcontext, info, sig, sc_pend, f,
-                                               orig_retval_reg)) {
+                                               orig_retval_reg, syscall_not_issued)) {
                     /* We're going to re-start this syscall after we go
                      * back to d_r_dispatch, run the post-syscall handler (for -EINTR),
                      * and deliver the signal.  We've adjusted the sigcontext
