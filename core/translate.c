@@ -320,9 +320,12 @@ translate_walk_track_pre_instr(dcontext_t *tdcontext, instr_t *inst,
              */
             /* A mangling epilogue is emulated by translate_walk_restore() rather
              * than restored from spill slots, and need not restore every spill.
+             * recreate_app_state_from_info() decodes one instruction at a time
+             * rather than walking a list: there is nothing to look ahead at.
              */
             DOCHECK(1, {
                 if (walk->reg_spill_offs[r] != UINT_MAX &&
+                    (instr_get_prev(inst) != NULL || instr_get_next(inst) != NULL) &&
                     IF_AARCH64_ELSE(!instr_is_our_mangling_epilogue(inst), true)) {
                     instr_t *curr;
                     bool spill_or_restore = false;
