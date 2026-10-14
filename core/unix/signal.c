@@ -9469,19 +9469,25 @@ report_app_itimer(thread_sig_info_t *info, int which, const itimer_info_t *app,
         IF_DEBUG(ok =)
         safe_write_ex(&cur_timer->it_value, sizeof(val), &val, NULL);
         ASSERT(ok);
+    } else if ((*info->itimer)[which].dr.value == 0 &&
+               (*info->itimer)[which].dr.interval == 0) {
+        /* The kernel's timer is the app's: its value is the answer. */
     } else if (d_r_safe_read(&cur_timer->it_value, sizeof(val), &val)) {
         /* Subtract the difference between last-asked-for value
-         * and current value to reflect elapsed time.
+         * and current value to reflect elapsed time.  The kernel can report
+         * no elapsed time, or a little more than was asked for (it samples the
+         * CPU-time timers at ticks): never report its value, which is our own
+         * timer's then.  An app timer about to expire is still armed.
          */
-        if ((*info->itimer)[which].actual.value > timeval_to_usec(&val) &&
-            app->value >= ((*info->itimer)[which].actual.value - timeval_to_usec(&val))) {
-            uint64 left = app->value -
-                ((*info->itimer)[which].actual.value - timeval_to_usec(&val));
-            usec_to_timeval(left, &val);
-            IF_DEBUG(ok =)
-            safe_write_ex(&cur_timer->it_value, sizeof(val), &val, NULL);
-            ASSERT(ok);
-        }
+        uint64 cur = timeval_to_usec(&val);
+        uint64 elapsed = (*info->itimer)[which].actual.value > cur
+            ? (*info->itimer)[which].actual.value - cur
+            : 0;
+        uint64 left = app->value > elapsed ? app->value - elapsed : 1;
+        usec_to_timeval(left, &val);
+        IF_DEBUG(ok =)
+        safe_write_ex(&cur_timer->it_value, sizeof(val), &val, NULL);
+        ASSERT(ok);
     } else
         ASSERT_NOT_REACHED();
 }
