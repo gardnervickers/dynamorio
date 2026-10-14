@@ -370,7 +370,24 @@ cat_no_thread:
 cat_spin:
         CALLC2(GLOBAL_REF(atomic_swap), x26, #1)
         cbz      w0, cat_have_lock
+#ifdef LINUX
+        /* Sleep briefly rather than issue a yield hint, which does not give up the
+         * CPU: the holder can be descheduled in a system call while it frees its
+         * stack, and with no involuntary preemption (a single CPU whose kernel
+         * preempts only at points this loop never reaches, and whose time only
+         * advances when it idles, as in a deterministic simulation) we would spin
+         * forever.  nanosleep({0, 65536ns}) on our dstack, which we still own.
+         */
+        mov      x0, #0x10000
+        stp      xzr, x0, [sp, #-16]!
+        mov      x0, sp
+        mov      x1, #0
+        mov      SYSNUM_REG, #SYS_nanosleep
+        svc      #0
+        add      sp, sp, #16
+#else
         yield
+#endif
         b        cat_spin
 
 cat_have_lock:
