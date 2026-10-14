@@ -7050,8 +7050,12 @@ dr_delay_flush_region(app_pc start, size_t size, uint flush_id,
     /* With the new module load event at 1st execution (i#884), we get a lot of
      * flush requests during creation of a bb from things like drwrap_replace().
      * To avoid them flushing from a new module we check overlap up front here.
+     * A request with a completion callback is still queued, so that the callback
+     * is called as documented (the flush itself returns quickly when nothing was
+     * executed from the region).
      */
-    if (!executable_vm_area_executed_from(start, start + size)) {
+    if (flush_completion_callback == NULL &&
+        !executable_vm_area_executed_from(start, start + size)) {
         return true;
     }
 
