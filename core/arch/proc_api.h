@@ -373,6 +373,7 @@ typedef enum {
     FEATURE_FRINTTS =
         DEF_FEAT(AA64ISAR1, 8, 1, FEAT_EQ), /**< FRINT(32/64)(X/Z) (AArch64) */
     FEATURE_SB = DEF_FEAT(AA64ISAR1, 9, 1, FEAT_EQ), /**< SB (AArch64) */
+    FEATURE_XS = DEF_FEAT(AA64ISAR1, 14, 1, FEAT_EQ), /**< DSB nXS (AArch64) */
     FEATURE_BF16 = DEF_FEAT(AA64ZFR0, 5, 1, FEAT_GR_EQ), /**< SVE BFloat16 (AArch64) */
     FEATURE_I8MM = DEF_FEAT(AA64ZFR0, 11, 1,
                             FEAT_EQ), /**< SVE Int8 matrix multiplication (AArch64) */

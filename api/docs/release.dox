@@ -126,6 +126,9 @@ clients.
 
 The changes between version \DR_VERSION and 11.3.0 include the following compatibility
 changes:
+ - Added the AArch64 DSB <option>nXS instruction (FEAT_XS) as OP_dsbnxs, with
+   INSTR_CREATE_dsbnxs() and #FEATURE_XS.  Like DSB, it completes the application's
+   preceding IC IVAU instructions for DR's code cache consistency.
  - On AArch64, Advanced SIMD instructions that write only part of their destination
    register or accumulate into it now list the destination as a source too, as their
    first source operands, like FMLA and MLA (vector) already did.  This covers the

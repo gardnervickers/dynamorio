@@ -140,6 +140,7 @@
 ----------------------xxxxx-----  simm5_5    # Signed 5 bit immediate from 5 - 9
 ---------------------x----------  imm1_ew_10 # 1 bit symbolised imm, representing 90 or 270
 ---------------------xxxxxx-----  simm6_5    # Signed 6 bit immediate from 5 - 10
+--------------------xx----------  imm2_10    # 2 bit immediate from 10-11
 --------------------xx----------  imm2_nesw_10 # 2 bit symbolised imm, representing 0, 90, 180, or 270
 --------------------xxxx--------  imm4       # option for CLREX, DSB, DMB, ISB, MSR
 -------------------x------------  cmode4_s_sz_msl # MSL bit for 32 bit element shifts

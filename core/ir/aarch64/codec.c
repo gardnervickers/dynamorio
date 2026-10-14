@@ -3038,6 +3038,20 @@ encode_imm2_nesw(uint pos, opnd_t opnd, OUT uint *enc_out)
     return true;
 }
 
+/* imm2_10: 2 bit immediate from 10-11 */
+
+static inline bool
+decode_opnd_imm2_10(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
+{
+    return decode_opnd_int(10, 2, false, 0, OPSZ_2b, 0, enc, opnd);
+}
+
+static inline bool
+encode_opnd_imm2_10(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+{
+    return encode_opnd_int(10, 2, false, 0, 0, opnd, enc_out);
+}
+
 /* imm2_nesw_10: 2 bit symbolised imm, representing 0, 90, 180, or 270 */
 
 static inline bool

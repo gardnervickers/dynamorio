@@ -221,6 +221,7 @@ proc_init_arch(void)
         LOG_FEATURE(FEATURE_LRCPC2);
         LOG_FEATURE(FEATURE_FRINTTS);
         LOG_FEATURE(FEATURE_SB);
+        LOG_FEATURE(FEATURE_XS);
 
         LOG(GLOBAL, LOG_TOP, 1, "ID_AA64ZFR0_EL1 = 0x%016lx\n",
             cpu_info.features.isa_features[AA64ZFR0]);
@@ -288,6 +289,7 @@ proc_set_feature(feature_bit_t feature_bit, bool enable)
 void
 enable_all_test_cpu_features()
 {
+    /* clang-format off */
     const feature_bit_t features[] = {
         FEATURE_LSE,    FEATURE_RDM,         FEATURE_FP16,          FEATURE_DotProd,
         FEATURE_SVE,    FEATURE_LOR,         FEATURE_FHM,           FEATURE_SM3,
@@ -301,7 +303,9 @@ enable_all_test_cpu_features()
         FEATURE_SSBS2,  FEATURE_DIT,         FEATURE_LSE2,          FEATURE_WFxT,
         FEATURE_FPAC,   FEATURE_FPACCOMBINE,
         FEATURE_SB,
+        FEATURE_XS,
     };
+    /* clang-format on */
     for (int i = 0; i < BUFFER_SIZE_ELEMENTS(features); ++i) {
         proc_set_feature(features[i], true);
     }

@@ -3155,13 +3155,15 @@ mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                  instr_t *next_instr, app_pc pc)
 {
     int opc = instr_get_opcode(instr);
-    if (opc == OP_ic_ivau || opc == OP_dsb) {
-        /* A DSB completes the IC IVAU lines before it.  It exits like IC IVAU with
-         * a zero address, after executing the barrier itself, so d_r_dispatch()
-         * flushes the lines this thread has invalidated so far as one range.
+    bool is_dsb = opc == OP_dsb || opc == OP_dsbnxs;
+    if (opc == OP_ic_ivau || is_dsb) {
+        /* A DSB (with or without nXS) completes the IC IVAU lines before it.  It
+         * exits like IC IVAU with a zero address, after executing the barrier
+         * itself, so d_r_dispatch() flushes the lines this thread has invalidated
+         * so far as one range.
          */
-        reg_id_t xt = opc == OP_dsb ? DR_REG_XZR : opnd_get_base(instr_get_src(instr, 0));
-        if (opc == OP_dsb) {
+        reg_id_t xt = is_dsb ? DR_REG_XZR : opnd_get_base(instr_get_src(instr, 0));
+        if (is_dsb) {
             instr_t *barrier = instr_clone(dcontext, instr);
             instr_set_meta(barrier);
             PRE(ilist, instr, barrier);

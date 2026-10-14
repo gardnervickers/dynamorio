@@ -18737,6 +18737,21 @@
 #define INSTR_CREATE_sb(dc) instr_create_0dst_0src(dc, OP_sb)
 
 /**
+ * Creates a DSB (data synchronization barrier) instruction with the nXS qualifier.
+ *
+ * This macro is used to encode the forms:
+   \verbatim
+      DSB     <option>nXS
+      DSB     #<imm>
+   \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param imm2 The shareability domain, as the 2-bit immediate field imm2
+ *             (CRm<3:2>): 0 for OSHnXS, 1 for NSHnXS, 2 for ISHnXS and 3 for SYnXS
+ *             (#<imm> is 16 + 4 * imm2), e.g. opnd_create_immed_uint(3, OPSZ_2b).
+ */
+#define INSTR_CREATE_dsbnxs(dc, imm2) instr_create_0dst_1src(dc, OP_dsbnxs, imm2)
+
+/**
  * Creates a WFE instruction.
  *
  * This macro is used to encode the forms:
