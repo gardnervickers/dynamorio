@@ -2355,6 +2355,32 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
 
     privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, exe_path);
 
+    /* The kernel set up this stack for our own ELF, whose PT_GNU_STACK asks for
+     * no execute permission.  If the app's asks for an executable stack (e.g.,
+     * for nested-function trampolines), give the stack what the kernel would
+     * have given the app.
+     */
+    for (uint i = 0; i < exe_ld.ehdr->e_phnum; i++) {
+        ELF_PROGRAM_HEADER_TYPE *ph =
+            (ELF_PROGRAM_HEADER_TYPE *)((byte *)exe_ld.phdrs +
+                                        i * exe_ld.ehdr->e_phentsize);
+        if (ph->p_type == PT_GNU_STACK && TESTANY(PF_X, ph->p_flags)) {
+            if (memquery_iterator_start(&iter, NULL, false /*no heap*/)) {
+                while (memquery_iterator_next(&iter)) {
+                    if (iter.vm_start <= (app_pc)sp && (app_pc)sp < iter.vm_end) {
+                        dynamorio_syscall(SYS_mprotect, 3, iter.vm_start,
+                                          iter.vm_end - iter.vm_start,
+                                          memprot_to_osprot(MEMPROT_READ | MEMPROT_WRITE |
+                                                            MEMPROT_EXEC));
+                        break;
+                    }
+                }
+                memquery_iterator_stop(&iter);
+            }
+            break;
+        }
+    }
+
     elf_loader_destroy(&exe_ld);
     if (executable_fd != INVALID_FILE) {
         os_close(executable_fd);
