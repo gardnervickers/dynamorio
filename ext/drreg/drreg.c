@@ -1180,6 +1180,23 @@ drreg_restore_app_value(void *drcontext, instrlist_t *ilist, instr_t *where,
     if (pt->aflags.xchg == app_reg) {
         /* Bail on keeping the flags in the reg. */
         drreg_move_aflags_from_reg(drcontext, ilist, where, pt, stateful);
+        if (dst_reg != app_reg) {
+            PRE(ilist, where,
+                XINST_CREATE_move(drcontext, opnd_create_reg(dst_reg),
+                                  opnd_create_reg(app_reg)));
+        }
+    } else if (dst_reg != app_reg) {
+        /* Load the spilled app value into dst_reg, leaving app_reg (which may
+         * hold a tool value) and its spill state alone.
+         */
+        uint slot = pt->reg[GPR_IDX(app_reg)].slot;
+        if (slot < ops.num_spill_slots) {
+            dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg,
+                                   tls_slot_offs + slot * sizeof(reg_t), dst_reg);
+        } else {
+            dr_restore_reg(drcontext, ilist, where, dst_reg,
+                           (dr_spill_slot_t)(slot - ops.num_spill_slots));
+        }
     } else {
         restore_reg(drcontext, pt, app_reg, pt->reg[GPR_IDX(app_reg)].slot, ilist, where,
                     stateful && !pt->reg[GPR_IDX(app_reg)].in_use);
