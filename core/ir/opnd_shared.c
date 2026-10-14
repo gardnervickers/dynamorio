@@ -2728,7 +2728,22 @@ reg_resize_to_opsz(reg_id_t reg, opnd_size_t sz)
     } else if (reg_is_simd(reg)) {
         if (reg_get_size(reg) == sz)
             return reg;
-        /* XXX i#1569: Add aarchxx SIMD conversions here. */
+#ifdef AARCH64
+        /* Bn, Hn, Sn, Dn, Qn and Zn name parts of the same register. */
+        static const reg_id_t simd_base[] = { DR_REG_B0, DR_REG_H0, DR_REG_S0,
+                                              DR_REG_D0, DR_REG_Q0, DR_REG_Z0 };
+        static const opnd_size_t simd_size[] = { OPSZ_1, OPSZ_2,  OPSZ_4,
+                                                 OPSZ_8, OPSZ_16, OPSZ_SCALABLE };
+        for (size_t from = 0; from < sizeof(simd_base) / sizeof(simd_base[0]); from++) {
+            if (reg < simd_base[from] || reg > simd_base[from] + 31)
+                continue;
+            for (size_t to = 0; to < sizeof(simd_size) / sizeof(simd_size[0]); to++) {
+                if (simd_size[to] == sz)
+                    return simd_base[to] + (reg - simd_base[from]);
+            }
+        }
+#endif
+        /* XXX i#1569: Add ARM SIMD conversions here. */
         CLIENT_ASSERT(false, "reg_resize_to_opsz: unsupported reg");
     } else {
         CLIENT_ASSERT(false, "reg_resize_to_opsz: unsupported reg");
