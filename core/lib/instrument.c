@@ -5929,7 +5929,11 @@ dr_merge_arith_flags(reg_t cur_xflags, reg_t saved_xflag)
 {
 #ifdef AARCHXX
     cur_xflags &= ~(EFLAGS_ARITH);
-    cur_xflags |= saved_xflag;
+    /* Only the flags: other PSTATE bits from a value that is not a saved NZCV (e.g.,
+     * a state restoration's misidentified slot) would make the kernel reject the
+     * context.
+     */
+    cur_xflags |= saved_xflag & EFLAGS_ARITH;
 #elif defined(X86)
     uint sahf = (saved_xflag & 0xff00) >> 8;
     cur_xflags &= ~(EFLAGS_ARITH);
