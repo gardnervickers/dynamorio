@@ -9338,6 +9338,29 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
      * there's only one timer
      */
     if (reset_timer_manually) {
+        /* The kernel reloaded its periodic timer at the expiry: the time since
+         * then has run on both timers.  Without charging it, every manual reset
+         * delays them by the signal's latency (an app timer multiplexed with a
+         * DR timer of a few ms ran about a quarter slow).
+         */
+        struct itimerval now;
+        if ((*info->itimer)[which].actual.interval > 0 &&
+            getitimer_syscall(which, &now) == SUCCESS) {
+            uint64 left = timeval_to_usec(&now.it_value);
+            uint64 lag = left > 0 && left <= (*info->itimer)[which].actual.interval
+                ? (*info->itimer)[which].actual.interval - left
+                : 0;
+            if ((*info->itimer)[which].app.value > 0) {
+                (*info->itimer)[which].app.value = (*info->itimer)[which].app.value > lag
+                    ? (*info->itimer)[which].app.value - lag
+                    : 1;
+            }
+            if ((*info->itimer)[which].dr.value > 0) {
+                (*info->itimer)[which].dr.value = (*info->itimer)[which].dr.value > lag
+                    ? (*info->itimer)[which].dr.value - lag
+                    : 1;
+            }
+        }
         (*info->itimer)[which].actual.value = 0;
         itimer_new_settings(dcontext, which, true /*doesn't matter: actual.value==0*/);
     } else
