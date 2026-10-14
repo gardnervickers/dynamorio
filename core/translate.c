@@ -300,6 +300,24 @@ translate_walk_track_pre_instr(dcontext_t *tdcontext, instr_t *inst,
          * mangling region, we're good to go again.
          */
         walk->in_mangle_region = false;
+#ifdef AARCH64
+        /* Past a store-exclusive's mangling region, the store has executed and
+         * its status register holds the application's status: stop treating
+         * TLS_LDSTEX_STATUS_SLOT as its spill.  (Checking for the application's
+         * store-exclusive in translate_walk_track_post_instr() is not enough:
+         * -ldstex2cas can replace the store with meta copies, e.g. for an
+         * exclusive pair, leaving no application store in the list.)
+         */
+        for (reg_id_t r = 0; r < REG_SPILL_NUM; r++) {
+            if (walk->reg_spill_offs[r] != UINT_MAX && walk->reg_tls[r] &&
+                walk->reg_spill_offs[r] ==
+                    os_tls_offset((ushort)TLS_LDSTEX_STATUS_SLOT)) {
+                LOG(THREAD_GET, LOG_INTERP, 4, "\tstatus of %s now the app's\n",
+                    reg_names[r + REG_START_SPILL]);
+                walk->reg_spill_offs[r] = UINT_MAX;
+            }
+        }
+#endif
         walk->in_mangle_region_epilogue = false;
         walk->unsupported_mangle = false;
         walk->xsp_adjust = 0;
