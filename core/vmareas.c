@@ -10855,7 +10855,12 @@ handle_modified_code(dcontext_t *dcontext, cache_pc instr_cache_pc, app_pc instr
                 flush_start + flush_size);
         }
     } else {
-        ASSERT(!info.overlap || (f != NULL && TEST(FRAG_IS_TRACE, f->flags)));
+        /* info.overlap only says that f's vm list overlaps the region and that f
+         * contains the writer: f's vm list holds the areas f was built from, which
+         * can extend past f's own pages into the target region (e.g., an area that
+         * was split since by another thread's selfmod marking), so the writer's bb
+         * pages need not overlap the region even for a bb.
+         */
         /* instr not in region, so move entire region off the executable list */
         flush_start = base_pc;
         flush_size = size;
