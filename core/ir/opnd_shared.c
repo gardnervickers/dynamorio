@@ -1722,7 +1722,19 @@ opnd_same(opnd_t op1, opnd_t op2)
      */
     switch (op1.kind) {
     case NULL_kind: return true;
-    case IMMED_INTEGER_kind: return op1.value.immed_int == op2.value.immed_int;
+    case IMMED_INTEGER_kind:
+#ifdef AARCH64
+        /* A shift type and an extend type can have the same value (LSL and UXTB
+         * are both 0): only the flags tell "add w0, w1, w2, lsl #1" from
+         * "add w0, w1, w2, uxtb #1", and the encoder goes by them.
+         */
+        if (((op1.aux.flags | op2.aux.flags) & (DR_OPND_IS_SHIFT | DR_OPND_IS_EXTEND)) ==
+                (DR_OPND_IS_SHIFT | DR_OPND_IS_EXTEND) &&
+            (op1.aux.flags & (DR_OPND_IS_SHIFT | DR_OPND_IS_EXTEND)) !=
+                (op2.aux.flags & (DR_OPND_IS_SHIFT | DR_OPND_IS_EXTEND)))
+            return false;
+#endif
+        return op1.value.immed_int == op2.value.immed_int;
     case IMMED_FLOAT_kind:
         /* avoid any fp instrs (xref i#386) */
         return *(int *)(&op1.value.immed_float) == *(int *)(&op2.value.immed_float);
@@ -1747,6 +1759,17 @@ opnd_same(opnd_t op1, opnd_t op2)
             op1.value.reg_and_element_size.element_size ==
             op2.value.reg_and_element_size.element_size;
     case BASE_DISP_kind:
+#ifdef AARCH64
+        /* An index's extend and shift are part of the address:
+         * [x1, w2, uxtw] is not [x1, w2, sxtw], nor [x1, x2] [x1, x2, lsl #3].
+         */
+        if (op1.value.base_disp.index_reg != DR_REG_NULL &&
+            (op1.value.base_disp.extend_type != op2.value.base_disp.extend_type ||
+             op1.value.base_disp.scaled != op2.value.base_disp.scaled ||
+             (op1.value.base_disp.scaled &&
+              op1.value.base_disp.scaled_value != op2.value.base_disp.scaled_value)))
+            return false;
+#endif
         return (IF_X86(op1.aux.segment == op2.aux.segment &&)
                         op1.value.base_disp.base_reg == op2.value.base_disp.base_reg &&
                 op1.value.base_disp.index_reg == op2.value.base_disp.index_reg &&
