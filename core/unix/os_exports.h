@@ -482,7 +482,7 @@ typedef struct _kernel_sigset_t {
 void
 receive_pending_signal(dcontext_t *dcontext);
 bool
-os_syscall_is_unbounded_wait(dcontext_t *dcontext);
+os_syscall_is_wait_to_deliver_before(dcontext_t *dcontext);
 bool
 os_syscall_may_wait_restartably(int sysnum, reg_t arg0);
 bool

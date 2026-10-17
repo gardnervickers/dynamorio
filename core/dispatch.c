@@ -2155,12 +2155,12 @@ handle_system_call(dcontext_t *dcontext)
                     !was_thread_create_syscall(dcontext)) ||
                    !is_ignorable);
             if (!is_ignorable && dcontext->signals_pending > 0) {
-                /* A wait that may block indefinitely would hold the signal back
-                 * for that long, with further instances blocked in the kernel while
-                 * we hold this one.  Its pre-syscall handling is safe to repeat, so
-                 * deliver the signal first, as natively, and issue it again after.
+                /* A wait would hold the signal back until it ends by itself, as
+                 * the kernel blocks the signal (and further instances) while we
+                 * hold it.  Its pre-syscall handling is safe to repeat, so deliver
+                 * the signal first, as natively, and issue it again after.
                  */
-                if (IF_LINUX_ELSE(os_syscall_is_unbounded_wait(dcontext), false))
+                if (IF_LINUX_ELSE(os_syscall_is_wait_to_deliver_before(dcontext), false))
                     break;
                 dcontext->signals_pending = -1;
             }
@@ -2187,9 +2187,9 @@ handle_system_call(dcontext_t *dcontext)
             dcontext->next_tag = saved_next_tag;
             set_next_tag_to_prior_syscall(dcontext);
             /* This only happens for ignorable syscalls and the waits of
-             * os_syscall_is_unbounded_wait(), so there is no pre-syscall handling to
-             * undo or worry about duplicating when we re-attempt to execute it after
-             * the app's signal handler.
+             * os_syscall_is_wait_to_deliver_before(), so there is no pre-syscall
+             * handling to undo or worry about duplicating when we re-attempt to
+             * execute it after the app's signal handler.
              */
             LOG(THREAD, LOG_DISPATCH, 2,
                 "Signal arrived in DR: aborting ignorable syscall enter; interrupted " PFX

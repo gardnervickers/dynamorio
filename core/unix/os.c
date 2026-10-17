@@ -5794,28 +5794,40 @@ os_syscall_may_wait_restartably(int sysnum, reg_t arg0)
     }
 }
 
-/* Returns whether the syscall about to run may wait with no timeout and has no
- * temporary signal mask or other pre-syscall handling that could not be repeated
- * (handle_system_call()).
+/* Returns whether the syscall about to run may wait and has no temporary signal
+ * mask or other pre-syscall handling that could not be repeated, so that a signal
+ * pending as we issue it is delivered first (handle_system_call()).
+ *
+ * A timeout does not bound the delay usefully: a signal we hold is blocked in the
+ * kernel until we deliver it, so it cannot interrupt the wait, which runs its
+ * whole timeout (years, for a sleep standing in for an indefinite wait) before
+ * the handler that natively ends it gets to run.
  */
 bool
-os_syscall_is_unbounded_wait(dcontext_t *dcontext)
+os_syscall_is_wait_to_deliver_before(dcontext_t *dcontext)
 {
     switch (dcontext->sys_num) {
+    /* Our pre-syscall handling for timed waits only notes when they start
+     * (os_syscall_restart_pre()).
+     */
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep:
+#    endif
+    case SYS_clock_nanosleep: return true;
     case SYS_futex: {
         int cmd = (int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK;
-        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
-            sys_param(dcontext, 3) == 0;
+        return cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET;
     }
 #    ifdef SYS_epoll_wait
-    case SYS_epoll_wait: return (int)sys_param(dcontext, 3) < 0;
+    case SYS_epoll_wait: return true;
 #    endif
-    case SYS_epoll_pwait: return sys_param(dcontext, 4) == 0 && (int)sys_param(dcontext, 3) < 0;
+    case SYS_epoll_pwait:
 #    ifdef SYS_epoll_pwait2
-    case SYS_epoll_pwait2: return sys_param(dcontext, 4) == 0 && sys_param(dcontext, 3) == 0;
+    case SYS_epoll_pwait2:
 #    endif
-    case SYS_ppoll: return sys_param(dcontext, 3) == 0 && sys_param(dcontext, 2) == 0;
-    case SYS_pselect6: return dcontext->sys_param4 == 0 && sys_param(dcontext, 4) == 0;
+        return sys_param(dcontext, 4) == 0;
+    case SYS_ppoll: return sys_param(dcontext, 3) == 0;
+    case SYS_pselect6: return dcontext->sys_param4 == 0;
     default: return false;
     }
 }

@@ -5746,10 +5746,11 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
 
 #if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
 /* Returns whether pc is on our way from d_r_dispatch into do_syscall for a syscall
- * that we deliver pending signals before (one that is ignorable or an unbounded
- * wait: see handle_system_call()), but before its syscall instruction: in
- * fcache_enter, after its check for pending signals, or in do_syscall ahead of the
- * syscall instruction.  If so, returns that instruction's address in *syscall_pc.
+ * that we deliver pending signals before (one that is ignorable or a wait of
+ * os_syscall_is_wait_to_deliver_before(): see handle_system_call()), but before
+ * its syscall instruction: in fcache_enter, after its check for pending signals,
+ * or in do_syscall ahead of the syscall instruction.  If so, returns that
+ * instruction's address in *syscall_pc.
  */
 static bool
 is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *syscall_pc)
@@ -5763,7 +5764,7 @@ is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *sysca
         return false;
     if (is_sigreturn_syscall_number(dcontext->sys_num) ||
         (!ignorable_system_call(dcontext->sys_num, NULL, dcontext) &&
-         !os_syscall_is_unbounded_wait(dcontext)))
+         !os_syscall_is_wait_to_deliver_before(dcontext)))
         return false;
     *syscall_pc = svc;
     return true;
