@@ -1,0 +1,5 @@
+ITIMER_REAL: signal count ok
+ITIMER_VIRTUAL: signals delivered
+ITIMER_PROF: signals delivered
+values ok
+client timers fired

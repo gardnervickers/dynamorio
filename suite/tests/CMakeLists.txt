@@ -2679,6 +2679,11 @@ if (UNIX)
     tobuild_ci(client.nudge_test client-interface/nudge_test.runall "" "" "")
     # We disable traces to get bb prefixes for testing i#4669.
     tobuild_ci(client.timer client-interface/timer.c "" "-disable_traces" "")
+    if (LINUX)
+      # DR's itimer locks under contention from app threads and alarms.
+      tobuild_ci(client.itimer_threads client-interface/itimer_threads.c "" "" "")
+      link_with_pthread(client.itimer_threads)
+    endif ()
     if (X64)
       tobuild_ci(client.mangle_suspend client-interface/mangle_suspend.c ""
         "-vm_base 0x100000000 -no_vm_base_near_app" "")
