@@ -2679,6 +2679,11 @@ if (UNIX)
     tobuild_ci(client.nudge_test client-interface/nudge_test.runall "" "" "")
     # We disable traces to get bb prefixes for testing i#4669.
     tobuild_ci(client.timer client-interface/timer.c "" "-disable_traces" "")
+    if (AARCH64 AND LINUX)
+      # A client's instrumentation runs in an image fexecve'd from a
+      # close-on-exec memfd, which spins without syscalls.
+      tobuild_ci(client.a64_execveat client-interface/a64_execveat.c "" "" "")
+    endif ()
     if (X64)
       tobuild_ci(client.mangle_suspend client-interface/mangle_suspend.c ""
         "-vm_base 0x100000000 -no_vm_base_near_app" "")
@@ -5423,6 +5428,11 @@ if (UNIX)
   endif ()
 
   tobuild(linux.execve-rec linux/execve-rec.c)
+  if (NOT ANDROID)
+    # SYS_execveat of a close-on-exec memfd or O_PATH fd, a dirfd-relative path,
+    # scripts, and failures.
+    tobuild(linux.execveat linux/execveat.c)
+  endif ()
   if (ANDROID)
     # Times out in 120s in suite (i#2106).
     set(linux.execve-rec_timeout 180)

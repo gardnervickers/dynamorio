@@ -2152,7 +2152,11 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
     char **envp = argv + *argc + 1;
     app_pc entry = NULL;
     char *exe_path;
-    char *exe_basename;
+    /* The kernel's name for the app, for AT_EXECFN and our PR_SET_NAME. */
+    const char *execfn;
+    const char *exe_fd_str;
+    const char *exe_basename;
+    char comm[16];
     app_pc exe_map, exe_end;
     elf_loader_t exe_ld;
     const char *interp;
@@ -2296,6 +2300,23 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
              "Failed to load application.  "
              "Check path and architecture.");
     ASSERT(is_elf_so_header(exe_map, 0));
+    /* For SYS_execveat of an fd or a dirfd-relative path, the parent passed the
+     * app as a /proc/self/fd/ path of an fd it made survive the exec, which we
+     * no longer need now that the app is mapped, followed by the kernel's name for
+     * the app.  We do this after any reload_dynamorio() above, which reads
+     * exe_path again.
+     */
+    execfn = exe_path;
+    exe_fd_str = getenv(DYNAMORIO_VAR_EXE_FD);
+    if (exe_fd_str != NULL) {
+        int exe_fd;
+        if (sscanf(exe_fd_str, "%d", &exe_fd) == 1 && exe_fd >= 0)
+            os_close(exe_fd);
+        if (strchr(exe_fd_str, ':') != NULL)
+            execfn = strchr(exe_fd_str, ':') + 1;
+        /* This leaves the value, which execfn points into, in place. */
+        disable_env(DYNAMORIO_VAR_EXE_FD);
+    }
 
     /* i#1660: the app may have passed a relative path or a symlink to execve,
      * yet the kernel will put a resolved path into /proc/self/maps.
@@ -2318,11 +2339,27 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
     /* Set the process name with prctl PR_SET_NAME.  This makes killall <app>
      * work.
      */
-    exe_basename = strrchr(exe_path, '/');
+    exe_basename = strrchr(execfn, '/');
     if (exe_basename == NULL) {
-        exe_basename = exe_path;
+        exe_basename = execfn;
     } else {
         exe_basename++;
+    }
+    if (exe_fd_str != NULL && strncmp(execfn, "/dev/fd/", 8) == 0 &&
+        strchr(execfn + 8, '/') == NULL) {
+        /* The kernel names the exec of an fd itself (AT_EMPTY_PATH) by its file:
+         * a memfd's is "memfd:<name>", shown as "/memfd:<name> (deleted)" in maps.
+         */
+        const char *deleted;
+        size_t len;
+        exe_basename = strrchr(get_application_name(), '/');
+        exe_basename = exe_basename == NULL ? get_application_name() : exe_basename + 1;
+        deleted = strstr(exe_basename, " (deleted)");
+        len = deleted == NULL ? strlen(exe_basename) : deleted - exe_basename;
+        len = MIN(len, BUFFER_SIZE_ELEMENTS(comm) - 1);
+        memcpy(comm, exe_basename, len);
+        comm[len] = '\0';
+        exe_basename = comm;
     }
     dynamorio_syscall(SYS_prctl, 5, PR_SET_NAME, (ptr_uint_t)exe_basename, 0, 0, 0);
 
@@ -2368,7 +2405,7 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
         entry = (app_pc)exe_ld.ehdr->e_entry + exe_ld.load_delta;
     }
 
-    privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, exe_path);
+    privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, execfn);
 
     /* The kernel set up this stack for our own ELF, whose PT_GNU_STACK asks for
      * no execute permission.  If the app's asks for an executable stack (e.g.,
