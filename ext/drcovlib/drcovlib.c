@@ -294,13 +294,25 @@ global_data_destroy(per_thread_t *data)
  * Event Callbacks
  */
 
+#ifdef UNIX
+static bool
+is_execve(int sysnum)
+{
+#    ifdef SYS_execveat
+    if (sysnum == SYS_execveat)
+        return true;
+#    endif
+    return sysnum == SYS_execve;
+}
+#endif
+
 static bool
 event_filter_syscall(void *drcontext, int sysnum)
 {
 #ifdef WINDOWS
     return false;
 #else
-    return sysnum == SYS_execve;
+    return is_execve(sysnum);
 #endif
 }
 
@@ -308,7 +320,7 @@ static bool
 event_pre_syscall(void *drcontext, int sysnum)
 {
 #ifdef UNIX
-    if (sysnum == SYS_execve) {
+    if (is_execve(sysnum)) {
         /* for !drcov_per_thread, the per-thread data is a copy of global data */
         per_thread_t *data = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
         ASSERT(data != NULL, "data must not be NULL");

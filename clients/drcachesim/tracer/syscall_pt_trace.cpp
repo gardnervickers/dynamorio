@@ -292,6 +292,10 @@ syscall_pt_trace_t::is_syscall_pt_trace_enabled(DR_PARAM_IN int sysnum)
         sysnum == SYS_rt_sigreturn) {
         return false;
     }
+#ifdef SYS_execveat
+    if (sysnum == SYS_execveat)
+        return false;
+#endif
     return true;
 }
 
