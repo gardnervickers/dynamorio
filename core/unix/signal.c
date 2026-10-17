@@ -2915,6 +2915,20 @@ sig_kernel_blockable(int sig)
 #endif
 }
 
+/* Whether the kernel holds sig pending for this thread while the app blocks it.
+ * Not a signal of a signalfd we emulate (see signal_signalfd_in_kernel()): we
+ * write that to its pipe as it arrives.
+ */
+static bool
+sig_kernel_holds(thread_sig_info_t *info, int sig)
+{
+#ifdef LINUX
+    if (info->signalfd[sig] != NULL)
+        return false;
+#endif
+    return sig_kernel_blockable(sig);
+}
+
 /* Computes the kernel mask for a thread whose app mask is app_mask. */
 static void
 compute_kernel_sigmask(thread_sig_info_t *info, const kernel_sigset_t *app_mask,
@@ -2922,7 +2936,7 @@ compute_kernel_sigmask(thread_sig_info_t *info, const kernel_sigset_t *app_mask,
 {
     kernel_sigemptyset(kmask);
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (sig_kernel_blockable(sig) &&
+        if (sig_kernel_holds(info, sig) &&
             (kernel_sigismember((kernel_sigset_t *)app_mask, sig) ||
              info->sigpending[sig] != NULL))
             kernel_sigaddset(kmask, sig);
@@ -2971,12 +2985,13 @@ requeue_signal_to_process(int sig, kernel_siginfo_t *siginfo)
 static void
 block_in_kernel_ahead(dcontext_t *dcontext, const kernel_sigset_t *set)
 {
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     if (!DYNAMO_OPTION(intercept_all_signals) || IS_CLIENT_THREAD(dcontext))
         return;
     kernel_sigset_t kset;
     kernel_sigemptyset(&kset);
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (sig_kernel_blockable(sig) &&
+        if (sig_kernel_holds(info, sig) &&
             (set == NULL || kernel_sigismember((kernel_sigset_t *)set, sig)))
             kernel_sigaddset(&kset, sig);
     }
@@ -3296,22 +3311,46 @@ signal_syscall_kernel_sigmask(dcontext_t *dcontext)
 #endif
 }
 
-/* The mask for a real signalfd: the signals the kernel keeps pending for the app.
- * Returns NULL to pass the app's arguments through unchanged (the kernel fails
- * invalid ones).
+/* signalfd with -intercept_all_signals: the kernel keeps the signals the app
+ * blocks pending (see signal_sync_kernel_mask()), so a real signalfd sees them,
+ * except for those of !sig_kernel_blockable(), which we receive and hold
+ * ourselves.  A new signalfd for any of those is instead a pipe that we write
+ * them to as they arrive (handle_pre_signalfd(), notify_signalfd()), and while a
+ * thread has one, the other signals of its mask reach us too (sig_kernel_holds()).
+ * Returns whether to issue the syscall, with *kset the mask to pass it, or NULL to
+ * pass the app's arguments through (the kernel fails invalid ones).  Returns false
+ * to emulate the signalfd.
  */
-kernel_sigset_t *
-signal_signalfd_kernel_set(dcontext_t *dcontext, kernel_sigset_t *mask, size_t sizemask)
+bool
+signal_signalfd_in_kernel(dcontext_t *dcontext, int fd, kernel_sigset_t *mask,
+                          size_t sizemask, kernel_sigset_t **kset)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    *kset = NULL;
+#ifdef LINUX
+    if (fd != -1 && signal_is_emulated_signalfd(fd))
+        return false;
+#endif
     if (sizemask != sizeof(kernel_sigset_t) || mask == NULL ||
         !d_r_safe_read(mask, sizeof(kernel_sigset_t), &info->syscall_kernel_sigmask))
-        return NULL;
+        return true;
+    bool kernel_holds_all = true;
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (!sig_kernel_blockable(sig))
-            kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
+        if (sig_kernel_blockable(sig) ||
+            !kernel_sigismember(&info->syscall_kernel_sigmask, sig))
+            continue;
+        kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
+        /* The kernel ignores these in a signalfd mask. */
+        if (sig != SIGKILL && sig != SIGSTOP)
+            kernel_holds_all = false;
     }
-    return &info->syscall_kernel_sigmask;
+    if (!kernel_holds_all && fd == -1)
+        return false;
+    /* XXX: a real signalfd cannot become a pipe, so one changed to a mask with
+     * signals we hold does not see those.
+     */
+    *kset = &info->syscall_kernel_sigmask;
+    return true;
 }
 
 /* After a sigsuspend syscall returns: if no signal ended it through

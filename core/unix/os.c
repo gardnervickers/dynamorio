@@ -8517,18 +8517,23 @@ pre_system_call(dcontext_t *dcontext)
             dcontext->sys_param3 = sys_param(dcontext, 3);
         if (DYNAMO_OPTION(intercept_all_signals)) {
             /* The kernel keeps the signals the app blocks pending (see
-             * signal_sync_kernel_mask()), so a real signalfd sees them.
+             * signal_sync_kernel_mask()), so a real signalfd sees them, unless it
+             * is for signals we hold ourselves.
              */
-            kernel_sigset_t *kset = signal_signalfd_kernel_set(
-                dcontext, (kernel_sigset_t *)dcontext->sys_param1,
-                (size_t)dcontext->sys_param2);
-            if (kset != NULL)
-                set_syscall_param(dcontext, 1, (reg_t)kset);
-            break;
+            kernel_sigset_t *kset;
+            if (signal_signalfd_in_kernel(dcontext, (int)dcontext->sys_param0,
+                                          (kernel_sigset_t *)dcontext->sys_param1,
+                                          (size_t)dcontext->sys_param2, &kset)) {
+                if (kset != NULL)
+                    set_syscall_param(dcontext, 1, (reg_t)kset);
+                break;
+            }
         }
         new_result = handle_pre_signalfd(
             dcontext, (int)dcontext->sys_param0, (kernel_sigset_t *)dcontext->sys_param1,
             (size_t)dcontext->sys_param2, (int)dcontext->sys_param3);
+        /* Let the signals of an emulated signalfd reach us (sig_kernel_holds()). */
+        signal_sync_kernel_mask(dcontext);
         execute_syscall = false;
         /* since non-Mac, we can use this even if the call failed */
         set_success_return_val(dcontext, new_result);

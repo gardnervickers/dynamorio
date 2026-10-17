@@ -127,6 +127,72 @@ test_signalfd(int sig)
     intercept_signal(sig, (handler_3_t)NULL, false);
 }
 
+/* A mask mixing a signal the kernel can hold for the app with one DR holds itself
+ * (SIGSEGV, which DR cannot block in the kernel), with the first already pending
+ * when the signalfd is created.
+ */
+static void
+test_mixed_mask(void)
+{
+    int ret, sigfd, i, got = 0;
+    sigset_t mask, orig_mask;
+    struct signalfd_siginfo siginfo;
+
+    intercept_signal(SIGUSR2, (handler_3_t)signal_handler, false);
+    intercept_signal(SIGSEGV, (handler_3_t)signal_handler, false);
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR2);
+    sigaddset(&mask, SIGSEGV);
+    sigprocmask(SIG_BLOCK, &mask, &orig_mask);
+
+    print("about to send signal %d before creating the fd\n", SIGUSR2);
+    if (kill(getpid(), SIGUSR2) < 0) {
+        print("kill failed: %m");
+        exit(1);
+    }
+    sigfd = signalfd(-1, &mask, 0);
+    if (sigfd < 0) {
+        print("signalfd failed: %m");
+        exit(1);
+    }
+    print("about to send signal %d\n", SIGSEGV);
+    if (kill(getpid(), SIGSEGV) < 0) {
+        print("kill failed: %m");
+        exit(1);
+    }
+    /* The kernel and DR may return these in either order. */
+    for (i = 0; i < 2; i++) {
+        ret = read(sigfd, &siginfo, sizeof(siginfo));
+        if (ret != sizeof(siginfo))
+            print("ret: %d\n", ret);
+        else if (siginfo.ssi_signo == SIGUSR2 || siginfo.ssi_signo == SIGSEGV)
+            got |= 1 << siginfo.ssi_signo;
+        else
+            print("unexpected signal %d\n", siginfo.ssi_signo);
+    }
+    print("read signals %d: %s, %d: %s\n", SIGUSR2,
+          (got & (1 << SIGUSR2)) != 0 ? "yes" : "no", SIGSEGV,
+          (got & (1 << SIGSEGV)) != 0 ? "yes" : "no");
+    close(sigfd);
+
+    /* With the fd closed, a blocked signal stays pending again. */
+    if (kill(getpid(), SIGUSR2) < 0) {
+        print("kill failed: %m");
+        exit(1);
+    }
+    sigset_t pending;
+    sigpending(&pending);
+    print("after close: signal %d pending: %s\n", SIGUSR2,
+          sigismember(&pending, SIGUSR2) ? "yes" : "no");
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR2);
+    if (sigtimedwait(&mask, NULL, NULL) != SIGUSR2)
+        print("sigtimedwait failed: %m");
+    sigprocmask(SIG_SETMASK, &orig_mask, NULL);
+    intercept_signal(SIGUSR2, (handler_3_t)NULL, false);
+    intercept_signal(SIGSEGV, (handler_3_t)NULL, false);
+}
+
 int
 main(void)
 {
@@ -134,5 +200,6 @@ main(void)
     test_signalfd(SIGUSR1);
     test_signalfd(SIGSEGV);
     test_signalfd(44);
+    test_mixed_mask();
     return 0;
 }

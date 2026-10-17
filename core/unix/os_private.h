@@ -457,8 +457,9 @@ handle_pre_sigtimedwait(dcontext_t *dcontext, kernel_sigset_t *set,
 void
 handle_post_sigpending(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize);
 
-kernel_sigset_t *
-signal_signalfd_kernel_set(dcontext_t *dcontext, kernel_sigset_t *mask, size_t sizemask);
+bool
+signal_signalfd_in_kernel(dcontext_t *dcontext, int fd, kernel_sigset_t *mask,
+                          size_t sizemask, kernel_sigset_t **kset);
 
 kernel_sigset_t *
 signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
@@ -474,6 +475,9 @@ signal_handle_dup(dcontext_t *dcontext, file_t src, file_t dst);
 
 void
 signal_handle_close(dcontext_t *dcontext, file_t fd);
+
+bool
+signal_is_emulated_signalfd(file_t fd);
 void
 signal_handle_close_range(dcontext_t *dcontext, uint first, uint last);
 #endif

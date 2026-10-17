@@ -556,6 +556,7 @@ signal_handle_close_range(dcontext_t *dcontext, uint first, uint last)
     TABLE_RWLOCK(sigfd_table, write, lock);
     generic_hash_range_remove(GLOBAL_DCONTEXT, sigfd_table, first, (ptr_uint_t)last + 1);
     TABLE_RWLOCK(sigfd_table, write, unlock);
+    signal_sync_kernel_mask(dcontext); /* See signal_handle_close(). */
 }
 
 void
@@ -574,4 +575,18 @@ signal_handle_close(dcontext_t *dcontext, file_t fd)
         generic_hash_remove(GLOBAL_DCONTEXT, sigfd_table, fd);
     }
     TABLE_RWLOCK(sigfd_table, write, unlock);
+    /* The kernel holds the signals of a freed pipe for us again (sig_kernel_holds()).
+     * XXX: another thread whose pipe this was syncs at its next mask change.
+     */
+    signal_sync_kernel_mask(dcontext);
+}
+
+/* Returns whether fd is a signalfd we emulate with a pipe. */
+bool
+signal_is_emulated_signalfd(file_t fd)
+{
+    TABLE_RWLOCK(sigfd_table, read, lock);
+    bool found = generic_hash_lookup(GLOBAL_DCONTEXT, sigfd_table, fd) != NULL;
+    TABLE_RWLOCK(sigfd_table, read, unlock);
+    return found;
 }
