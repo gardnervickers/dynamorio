@@ -1303,11 +1303,17 @@ drreg_restore_app_value(void *drcontext, instrlist_t *ilist, instr_t *where,
             /* The register stays reserved and the tool may overwrite it: for
              * state restoration this is not the end of its spill.  If the tool
              * unreserves it without writing it first, drreg_unreserve_register()
-             * removes the mark.  A stateless restore (before a multi-path clean
-             * call) is left unmarked: the register holds the app value from it
-             * on the path that executes it.
+             * removes the mark.
              */
             instr_set_note(instr_get_prev(where), GET_APP_VALUE_INPLACE_NOTE);
+        } else if (!stateful && where != NULL && instr_get_prev(where) != NULL) {
+            /* A stateless restore (before a multi-path clean call) is on a path
+             * that the code after it need not have taken: on the other one the
+             * register still holds the tool value.  The slot keeps the app value
+             * either way, as our state does not change, so for state restoration
+             * this is not the end of the spill either.
+             */
+            instr_set_note(instr_get_prev(where), GET_APP_VALUE_NOTE);
         }
     }
     instrlist_set_auto_predicate(ilist, pred);
