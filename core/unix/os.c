@@ -1303,6 +1303,14 @@ get_timer_frequency_cpuinfo(void)
 timestamp_t
 get_timer_frequency()
 {
+#ifdef AARCH64
+    /* proc_get_timestamp() counts at the generic timer's frequency rather than
+     * the CPU's, and /proc/cpuinfo has no "cpu MHz" line here.
+     */
+    uint64 hz = proc_get_timestamp_frequency();
+    if (hz >= 1000)
+        return hz / 1000;
+#endif
 #ifdef VMX86_SERVER
     if (os_in_vmkernel_userworld()) {
         return vmk_get_timer_frequency();

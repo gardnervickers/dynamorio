@@ -2973,10 +2973,12 @@ client_process_bb(dcontext_t *dcontext, build_bb_t *bb)
 #endif
 
     /* Call the bb creation callback(s) */
+    KSTART(bb_client);
     if (!instrument_basic_block(dcontext, tag, bb->ilist, bb->for_trace, !bb->app_interp,
                                 &emitflags)) {
         /* although no callback was called we must process syscalls/ints (PR 307284) */
     }
+    KSTOP(bb_client);
     if (bb->for_cache && TEST(DR_EMIT_GO_NATIVE, emitflags)) {
         LOG(THREAD, LOG_INTERP, 2, "client requested that we go native\n");
         SYSLOG_INTERNAL_INFO("thread " TIDFMT " is going native at client request",

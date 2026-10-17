@@ -541,6 +541,16 @@ dr_insert_restore_fpstate(void *drcontext, instrlist_t *ilist, instr_t *where, o
 uint64
 proc_get_timestamp(void)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
-    return 0;
+    uint64 ticks;
+    RDTSC_LL(ticks);
+    return ticks;
+}
+
+uint64
+proc_get_timestamp_frequency(void)
+{
+    uint64 hz;
+    /* Linux gives EL0 access to the virtual counter, and so to CNTFRQ_EL0. */
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(hz));
+    return hz;
 }
