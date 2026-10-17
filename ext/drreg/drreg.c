@@ -83,16 +83,17 @@
 
 #define REG_DEAD ((void *)(ptr_uint_t)0)
 #define REG_LIVE ((void *)(ptr_uint_t)1)
-#define REG_UNKNOWN ((void *)(ptr_uint_t)2) /* only used outside drmgr insert phase */
+
+/* A set of GPRs: bit GPR_IDX(reg) is set for each reg in the set. */
+typedef ptr_uint_t gpr_set_t;
+#define GPR_BIT(reg) ((gpr_set_t)1 << GPR_IDX(reg))
+#define ALL_GPRS (~(gpr_set_t)0 >> (sizeof(gpr_set_t) * CHAR_BIT - DR_NUM_GPR_REGS))
 
 typedef struct _reg_info_t {
-    /* XXX: better to flip around and store bitvector of registers per instr
-     * in a single drvector_t?
-     */
-    /* The live vector holds one entry per app instr in the bb.
-     * For registers, each vector entry holds REG_{LIVE,DEAD}.
-     * For aflags, each vector entry holds a ptr_uint_t with the EFLAGS_READ_ARITH bits
-     * telling which arithmetic flags are live at that point.
+    /* Only used for aflags: the GPRs' liveness is in per_thread_t.gpr_live.
+     * The live vector holds one entry per app instr in the bb, a ptr_uint_t
+     * with the EFLAGS_READ_ARITH bits telling which arithmetic flags are live
+     * at that point.
      */
     drvector_t live;
     bool in_use;
@@ -121,6 +122,10 @@ typedef struct _reg_info_t {
 typedef struct _per_thread_t {
     instr_t *cur_instr;
     int live_idx;
+    /* One entry per app instr in the bb, indexed like reg_info_t.live: the
+     * gpr_set_t of the GPRs that are live at that point.
+     */
+    drvector_t gpr_live;
     reg_info_t reg[DR_NUM_GPR_REGS];
     reg_info_t aflags;
     reg_id_t slot_use[MAX_SPILLS]; /* holds the reg_id_t of which reg is inside */
@@ -356,6 +361,123 @@ drreg_max_slots_used(DR_PARAM_OUT uint *max)
  * ANALYSIS AND CROSS-APP-INSTR
  */
 
+#ifdef X64
+/* The 32-bit form of each GPR, by GPR_IDX(), from reg_64_to_32(). */
+static reg_id_t gpr_32bit_form[DR_NUM_GPR_REGS];
+#endif
+
+static void
+gpr_sets_init(void)
+{
+    ASSERT(DR_NUM_GPR_REGS <= sizeof(gpr_set_t) * CHAR_BIT, "gpr_set_t is too small");
+#ifdef X64
+    for (reg_id_t reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++)
+        gpr_32bit_form[GPR_IDX(reg)] = reg_64_to_32(reg);
+#endif
+}
+
+/* Returns the GPR that reg overlaps, as a set, which is what opnd_uses_reg()
+ * goes by: a GPR overlaps exactly the registers that reg_to_pointer_sized()
+ * maps to it.
+ */
+static inline gpr_set_t
+gprs_overlapping(reg_id_t reg)
+{
+    reg_id_t gpr = reg_to_pointer_sized(reg);
+    if (gpr >= DR_REG_START_GPR && gpr <= DR_REG_STOP_GPR)
+        return GPR_BIT(gpr);
+    return 0;
+}
+
+/* Returns the GPRs for which opnd_uses_reg() is true. */
+static gpr_set_t
+opnd_gprs_used(opnd_t opnd)
+{
+    if (opnd_is_reg(opnd))
+        return gprs_overlapping(opnd_get_reg(opnd));
+    if (opnd_is_base_disp(opnd)) {
+        return gprs_overlapping(opnd_get_base(opnd)) |
+            gprs_overlapping(opnd_get_index(opnd)) |
+            gprs_overlapping(opnd_get_segment(opnd));
+    }
+    if (opnd_is_immed(opnd) || opnd_is_pc(opnd) || opnd_is_instr(opnd))
+        return 0;
+    /* Rarer kinds, such as absolute or pc-relative addresses with a segment. */
+    gpr_set_t gprs = 0;
+    for (reg_id_t reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
+        if (opnd_uses_reg(opnd, reg))
+            gprs |= GPR_BIT(reg);
+    }
+    return gprs;
+}
+
+/* Sets *reads to the GPRs for which instr_reads_from_reg() is true, and *writes to
+ * those for which instr_writes_to_exact_reg() is true for the GPR or (on 64-bit,
+ * where such a write zeroes the top bits) for its 32-bit form, all with
+ * DR_QUERY_INCLUDE_COND_SRCS.  That is what the liveness analyses go by, and asking
+ * those queries for every GPR in turn walked the operands once per GPR and query.
+ */
+static void
+instr_gpr_uses(instr_t *inst, DR_PARAM_OUT gpr_set_t *reads,
+               DR_PARAM_OUT gpr_set_t *writes)
+{
+    gpr_set_t r = 0, w = 0;
+    int i;
+    /* DR_QUERY_INCLUDE_COND_SRCS without _DSTS: a predicated instr still reads, but
+     * writes nothing.
+     */
+    bool predicated = instr_is_predicated(inst);
+#ifdef X86
+    /* instr_reg_in_src()'s special case. */
+    if (instr_get_opcode(inst) != OP_nop_modrm)
+#endif
+    {
+        for (i = 0; i < instr_num_srcs(inst); i++)
+            r |= opnd_gprs_used(instr_get_src(inst, i));
+    }
+    for (i = 0; i < instr_num_dsts(inst); i++) {
+        opnd_t dst = instr_get_dst(inst, i);
+        if (!opnd_is_reg(dst)) {
+            /* DRi#1849: COND_SRCS includes addressing regs in dsts. */
+            r |= opnd_gprs_used(dst);
+        } else if (!predicated) {
+            /* An exact write: the whole register, at its own size (not, say, ARM's
+             * OP_movt, which names the whole register but writes half of it).
+             */
+            reg_id_t reg = opnd_get_reg(dst);
+            reg_id_t gpr = reg_to_pointer_sized(reg);
+            if (gpr >= DR_REG_START_GPR && gpr <= DR_REG_STOP_GPR &&
+                (reg == gpr IF_X64(|| reg == gpr_32bit_form[GPR_IDX(gpr)])) &&
+                opnd_get_size(dst) == reg_get_size(reg))
+                w |= GPR_BIT(gpr);
+        }
+    }
+#ifdef DEBUG
+    /* Check against the queries this replaces. */
+    for (reg_id_t reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
+        ASSERT(!TESTANY(GPR_BIT(reg), r) ==
+                   !instr_reads_from_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS),
+               "GPR read set differs from instr_reads_from_reg()");
+        ASSERT(!TESTANY(GPR_BIT(reg), w) ==
+                   !(instr_writes_to_exact_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS)
+                         IF_X64(||
+                                instr_writes_to_exact_reg(inst, reg_64_to_32(reg),
+                                                          DR_QUERY_INCLUDE_COND_SRCS))),
+               "GPR write set differs from instr_writes_to_exact_reg()");
+    }
+#endif
+    *reads = r;
+    *writes = w;
+}
+
+/* Returns REG_LIVE or REG_DEAD: whether reg is live at index of the live vectors. */
+static inline void *
+gpr_liveness(per_thread_t *pt, reg_id_t reg, uint index)
+{
+    gpr_set_t live = (gpr_set_t)(ptr_uint_t)drvector_get_entry(&pt->gpr_live, index);
+    return TESTANY(GPR_BIT(reg), live) ? REG_LIVE : REG_DEAD;
+}
+
 static void
 count_app_uses(per_thread_t *pt, opnd_t opnd)
 {
@@ -388,6 +510,7 @@ drreg_event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
     per_thread_t *pt = get_tls_data(drcontext);
     instr_t *inst;
     ptr_uint_t aflags_new, aflags_cur = 0;
+    gpr_set_t gprs_read, gprs_written, gprs_live;
     uint index = 0;
     reg_id_t reg;
 
@@ -415,31 +538,21 @@ drreg_event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
                 __FUNCTION__, index, get_where_app_pc(inst));
         }
 
-        /* GPR liveness */
-        LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ":", __FUNCTION__, index,
-            get_where_app_pc(inst));
-        for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
-            void *value = REG_LIVE;
-            /* DRi#1849: COND_SRCS here includes addressing regs in dsts */
-            if (instr_reads_from_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS))
-                value = REG_LIVE;
-            /* make sure we don't consider writes to sub-regs */
-            else if (instr_writes_to_exact_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS)
-                     /* A write to a 32-bit reg zeroes the top 32 bits for x86_64 and
-                      * aarch64.
-                      */
-                     IF_X64(||
-                            instr_writes_to_exact_reg(inst, reg_64_to_32(reg),
-                                                      DR_QUERY_INCLUDE_COND_SRCS)))
-                value = REG_DEAD;
-            else if (xfer)
-                value = REG_LIVE;
-            else if (index > 0)
-                value = drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, index - 1);
-            LOG(drcontext, DR_LOG_ALL, 3, " %s=%d", get_register_name(reg),
-                (int)(ptr_uint_t)value);
-            drvector_set_entry(&pt->reg[GPR_IDX(reg)].live, index, value);
+        /* GPR liveness: a read makes a GPR live, else an exact write (not to a
+         * sub-reg) makes it dead, else it is as after inst.  We assume GPRs are live
+         * after a transfer of control and at the end of the block.
+         */
+        instr_gpr_uses(inst, &gprs_read, &gprs_written);
+        if (xfer || index == 0)
+            gprs_live = ALL_GPRS;
+        else {
+            gprs_live =
+                (gpr_set_t)(ptr_uint_t)drvector_get_entry(&pt->gpr_live, index - 1);
         }
+        gprs_live = gprs_read | (gprs_live & ~gprs_written);
+        LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ": live gprs=" PIFX, __FUNCTION__,
+            index, get_where_app_pc(inst), gprs_live);
+        drvector_set_entry(&pt->gpr_live, index, (void *)(ptr_uint_t)gprs_live);
 
         /* aflags liveness */
         aflags_new = instr_get_arith_flags(inst, DR_QUERY_INCLUDE_COND_SRCS);
@@ -772,8 +885,7 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
              * the tool's value must survive the write either way.
              */
             bool app_live = ops.conservative || pt->live_idx == 0 ||
-                drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx - 1) ==
-                    REG_LIVE ||
+                gpr_liveness(pt, reg, pt->live_idx - 1) == REG_LIVE ||
                 pt->aflags.xchg == reg;
             if (force_respill || instr_writes_to_reg(inst, reg, DR_QUERY_INCLUDE_ALL)) {
                 uint tmp_slot = MAX_SPILLS;
@@ -1013,39 +1125,26 @@ drreg_forward_analysis(void *drcontext, instr_t *start)
     per_thread_t *pt = get_tls_data(drcontext);
     instr_t *inst;
     ptr_uint_t aflags_new, aflags_cur = 0;
+    /* The GPRs whose liveness is known, and those of them that are live. */
+    gpr_set_t gprs_known = 0, gprs_live = 0;
     reg_id_t reg;
 
     /* We just use index 0 of the live vectors */
-    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
+    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++)
         pt->reg[GPR_IDX(reg)].app_uses = 0;
-        drvector_set_entry(&pt->reg[GPR_IDX(reg)].live, 0, REG_UNKNOWN);
-    }
 
     /* We have to consider meta instrs as well */
     for (inst = start; inst != NULL; inst = instr_get_next(inst)) {
         if (instr_is_cti(inst) || instr_is_interrupt(inst) || instr_is_syscall(inst))
             break;
 
-        /* GPR liveness */
-        for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
-            void *value = REG_UNKNOWN;
-            if (drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, 0) != REG_UNKNOWN)
-                continue;
-            /* DRi#1849: COND_SRCS here includes addressing regs in dsts */
-            if (instr_reads_from_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS))
-                value = REG_LIVE;
-            /* make sure we don't consider writes to sub-regs */
-            else if (instr_writes_to_exact_reg(inst, reg, DR_QUERY_INCLUDE_COND_SRCS)
-                     /* A write to a 32-bit reg zeroes the top 32 bits for x86_64 and
-                      * aarch64.
-                      */
-                     IF_X64(||
-                            instr_writes_to_exact_reg(inst, reg_64_to_32(reg),
-                                                      DR_QUERY_INCLUDE_COND_SRCS)))
-                value = REG_DEAD;
-            if (value != REG_UNKNOWN)
-                drvector_set_entry(&pt->reg[GPR_IDX(reg)].live, 0, value);
-        }
+        /* GPR liveness: the first access decides.  A read makes a GPR live, else an
+         * exact write (not to a sub-reg) makes it dead.
+         */
+        gpr_set_t gprs_read, gprs_written;
+        instr_gpr_uses(inst, &gprs_read, &gprs_written);
+        gprs_live |= gprs_read & ~gprs_known;
+        gprs_known |= gprs_read | gprs_written;
 
         /* aflags liveness */
         aflags_new = instr_get_arith_flags(inst, DR_QUERY_INCLUDE_COND_SRCS);
@@ -1068,10 +1167,9 @@ drreg_forward_analysis(void *drcontext, instr_t *start)
 
     pt->live_idx = 0;
 
-    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
-        if (drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, 0) == REG_UNKNOWN)
-            drvector_set_entry(&pt->reg[GPR_IDX(reg)].live, 0, REG_LIVE);
-    }
+    /* GPRs not accessed are assumed live. */
+    gprs_live |= ALL_GPRS & ~gprs_known;
+    drvector_set_entry(&pt->gpr_live, 0, (void *)(ptr_uint_t)gprs_live);
     drvector_set_entry(&pt->aflags.live, 0,
                        (void *)(ptr_uint_t)
                        /* set read bit if not written */
@@ -1137,7 +1235,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
             if (!pt->reg[idx].native && !pt->reg[idx].in_use &&
                 (reg_allowed == NULL || drvector_get_entry(reg_allowed, idx) != NULL) &&
                 (!only_if_no_spill || pt->reg[idx].ever_spilled ||
-                 drvector_get_entry(&pt->reg[idx].live, pt->live_idx) == REG_DEAD)) {
+                 gpr_liveness(pt, reg, pt->live_idx) == REG_DEAD)) {
                 slot = pt->reg[idx].slot;
                 pt->pending_unreserved--;
                 already_spilled = pt->reg[idx].ever_spilled;
@@ -1168,7 +1266,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
             /* If we had a hint as to local vs whole-bb we could downgrade being
              * dead right now as a priority
              */
-            if (drvector_get_entry(&pt->reg[idx].live, pt->live_idx) == REG_DEAD)
+            if (gpr_liveness(pt, reg, pt->live_idx) == REG_DEAD)
                 break;
             if (only_if_no_spill)
                 continue;
@@ -1210,8 +1308,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
     pt->reg[GPR_IDX(reg)].in_use = true;
     if (!already_spilled) {
         /* Even if dead now, we need to own a slot in case reserved past dead point */
-        if (ops.conservative ||
-            drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx) == REG_LIVE) {
+        if (ops.conservative || gpr_liveness(pt, reg, pt->live_idx) == REG_LIVE) {
             LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ": spilling %s to slot %d\n",
                 __FUNCTION__, pt->live_idx, get_where_app_pc(where),
                 get_register_name(reg), slot);
@@ -1703,7 +1800,7 @@ drreg_is_register_dead(void *drcontext, reg_id_t reg, instr_t *inst, bool *dead)
             return res;
         ASSERT(pt->live_idx == 0, "non-drmgr-insert always uses 0 index");
     }
-    *dead = drvector_get_entry(&pt->reg[GPR_IDX(reg)].live, pt->live_idx) == REG_DEAD;
+    *dead = gpr_liveness(pt, reg, pt->live_idx) == REG_DEAD;
     return DRREG_SUCCESS;
 }
 
@@ -1758,9 +1855,7 @@ drreg_move_aflags_from_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
         "%s @%d." PFX ": restoring xax spilled for aflags in slot %d\n", __FUNCTION__,
         pt->live_idx, get_where_app_pc(where),
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].slot);
-    if (ops.conservative ||
-        drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live, pt->live_idx) ==
-            REG_LIVE) {
+    if (ops.conservative || gpr_liveness(pt, DR_REG_XAX, pt->live_idx) == REG_LIVE) {
         restore_reg(drcontext, pt, DR_REG_XAX,
                     pt->reg[DR_REG_XAX - DR_REG_START_GPR].slot, ilist, where, stateful);
     } else if (stateful)
@@ -1811,9 +1906,7 @@ drreg_spill_aflags(void *drcontext, instrlist_t *ilist, instr_t *where, per_thre
         uint xax_slot = find_free_slot(drcontext, pt, ilist, where);
         if (xax_slot == MAX_SPILLS)
             return DRREG_ERROR_OUT_OF_SLOTS;
-        if (ops.conservative ||
-            drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live,
-                               pt->live_idx) == REG_LIVE) {
+        if (ops.conservative || gpr_liveness(pt, DR_REG_XAX, pt->live_idx) == REG_LIVE) {
             spill_reg(drcontext, pt, DR_REG_XAX, xax_slot, ilist, where);
             pt->reg[DR_REG_XAX - DR_REG_START_GPR].ever_spilled = true;
             pt->reg[DR_REG_XAX - DR_REG_START_GPR].app_value_stale = false;
@@ -1910,8 +2003,7 @@ drreg_restore_aflags(void *drcontext, instrlist_t *ilist, instr_t *where,
                 INSTR_CREATE_xchg(drcontext, opnd_create_reg(DR_REG_XAX),
                                   opnd_create_reg(xax_swap)));
         } else if (ops.conservative ||
-                   drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live,
-                                      pt->live_idx) == REG_LIVE)
+                   gpr_liveness(pt, DR_REG_XAX, pt->live_idx) == REG_LIVE)
             spill_reg(drcontext, pt, DR_REG_XAX, temp_slot, ilist, where);
         ASSERT(pt->aflags.slot != MAX_SPILLS, "Aflags slot not reserved");
         restore_reg(drcontext, pt, DR_REG_XAX, pt->aflags.slot, ilist, where, release);
@@ -1939,9 +2031,7 @@ drreg_restore_aflags(void *drcontext, instrlist_t *ilist, instr_t *where,
             pt->reg[DR_REG_XAX - DR_REG_START_GPR].in_use = false;
         }
     } else {
-        if (ops.conservative ||
-            drvector_get_entry(&pt->reg[DR_REG_XAX - DR_REG_START_GPR].live,
-                               pt->live_idx) == REG_LIVE)
+        if (ops.conservative || gpr_liveness(pt, DR_REG_XAX, pt->live_idx) == REG_LIVE)
             restore_reg(drcontext, pt, DR_REG_XAX, temp_slot, ilist, where, true);
     }
 #elif defined(AARCHXX)
@@ -2833,10 +2923,9 @@ tls_data_init(per_thread_t *pt)
 {
     reg_id_t reg;
     memset(pt, 0, sizeof(*pt));
-    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
-        drvector_init(&pt->reg[GPR_IDX(reg)].live, 20, false /*!synch*/, NULL);
+    drvector_init(&pt->gpr_live, 20, false /*!synch*/, NULL);
+    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++)
         pt->reg[GPR_IDX(reg)].native = true;
-    }
     pt->aflags.native = true;
     pt->aflags.slot = MAX_SPILLS;
     drvector_init(&pt->aflags.live, 20, false /*!synch*/, NULL);
@@ -2845,10 +2934,7 @@ tls_data_init(per_thread_t *pt)
 static void
 tls_data_free(per_thread_t *pt)
 {
-    reg_id_t reg;
-    for (reg = DR_REG_START_GPR; reg <= DR_REG_STOP_GPR; reg++) {
-        drvector_delete(&pt->reg[GPR_IDX(reg)].live);
-    }
+    drvector_delete(&pt->gpr_live);
     drvector_delete(&pt->aflags.live);
 }
 
@@ -2910,6 +2996,7 @@ drreg_init(drreg_options_t *ops_in)
          */
         ops.num_spill_slots = 1;
 #endif
+        gpr_sets_init();
         /* Support use during init when there is no TLS (i#2910). */
         tls_data_init(&init_pt);
     }
