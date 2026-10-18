@@ -50,6 +50,8 @@ kstat_thread_init(dcontext_t *dcontext);
 void
 kstat_thread_exit(dcontext_t *dcontext);
 void
+kstat_thread_stop(dcontext_t *dcontext);
+void
 dump_thread_kstats(dcontext_t *dcontext);
 
 /* for debugging only */
