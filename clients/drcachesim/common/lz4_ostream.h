@@ -79,10 +79,8 @@ public:
 
     ~lz4_ostreambuf_t()
     {
-        if (!failed_) {
-            sync();
+        if (!failed_ && sync() == 0)
             write_footer();
-        }
         if (file_ != nullptr) {
             delete file_;
             file_ = nullptr;
