@@ -480,7 +480,10 @@ signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
                       kernel_sigset_t **kmask, int *error);
 
 bool
-signal_take_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo);
+signal_peek_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo);
+
+void
+signal_drop_held_signal(dcontext_t *dcontext, int sig);
 
 kernel_sigset_t *
 signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,

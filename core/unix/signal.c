@@ -3323,9 +3323,10 @@ signal_syscall_kernel_sigmask(dcontext_t *dcontext)
  *   with us as for no signalfd (sigpending(), sigtimedwait() and unblocking see
  *   them).  A pipe for the whole mask would have to take the kernel-held signals
  *   from the kernel as they arrive, losing the kernel's semantics for them.
- * Changing the mask of an existing fd to one of another kind fails with EINVAL
- * (*error), as neither kind can become the other.  XXX i#1189: natively such a
- * change succeeds.
+ * A real signalfd stays one when its mask changes, to any mask but one of only
+ * signals we hold, and a pipe stays a pipe: changing between those kinds fails
+ * with EINVAL (*error), as neither can become the other.  XXX i#1189: natively
+ * such a change succeeds.
  *
  * Without -intercept_all_signals every new signalfd is a pipe, as before.
  *
@@ -3371,7 +3372,7 @@ signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
     }
     if (fd == -1 && held && !kernel_held)
         return SIGNALFD_ROUTE_EMULATE;
-    if (fd != -1 && held) {
+    if (fd != -1 && held && !kernel_held) {
         /* As the kernel, fail a closed fd with EBADF. */
         *error = dynamorio_syscall(SYS_fcntl, 2, fd, F_GETFD) < 0 ? EBADF : EINVAL;
         return SIGNALFD_ROUTE_FAIL;
@@ -3381,12 +3382,14 @@ signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
 }
 #endif
 
-/* Removes the first instance of sig that we hold for this thread while the app
- * blocks it, returning its siginfo, as handle_pre_sigtimedwait() does: for an
- * emulated signalfd created after the signal arrived.
+/* Returns in *siginfo the first instance of sig that we hold for this thread while
+ * the app blocks it, if any: for an emulated signalfd created after the signal
+ * arrived.  signal_drop_held_signal() then removes it, as
+ * handle_pre_sigtimedwait() does.  Our handler only appends to the queue, so the
+ * first instance stays first.
  */
 bool
-signal_take_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo)
+signal_peek_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     sigpending_t *p = info->sigpending[sig];
@@ -3394,6 +3397,15 @@ signal_take_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo
         !kernel_sigismember(&info->app_sigblocked, sig))
         return false;
     *siginfo = p->rt_frame.info;
+    return true;
+}
+
+void
+signal_drop_held_signal(dcontext_t *dcontext, int sig)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    sigpending_t *p = info->sigpending[sig];
+    ASSERT(p != NULL);
     block_in_kernel_ahead(dcontext, NULL);
     info->accessing_sigpending = true;
     __asm__ __volatile__("" : : : "memory");
@@ -3403,7 +3415,6 @@ signal_take_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo
     __asm__ __volatile__("" : : : "memory");
     info->accessing_sigpending = false;
     signal_sync_kernel_mask(dcontext);
-    return true;
 }
 
 /* After a sigsuspend syscall returns: if no signal ended it through

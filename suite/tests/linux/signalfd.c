@@ -49,6 +49,9 @@
 #include <sys/syscall.h>
 #include <time.h>
 
+/* The kernel's sigset_t, which signalfd4's size argument must match. */
+#define SIGSET_SIZE (_NSIG / 8)
+
 static void
 signal_handler(int sig)
 {
@@ -267,45 +270,109 @@ test_pending_before(int sig)
     restore_signal(sig, &orig_mask);
 }
 
-/* Many signals unread: none blocks the sender. */
+/* Queues sig to this thread with value. */
+static void
+queue_signal(int sig, int value)
+{
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    si.si_signo = sig;
+    si.si_code = SI_QUEUE;
+    si.si_pid = getpid();
+    si.si_uid = getuid();
+    si.si_value.sival_int = value;
+    if (syscall(SYS_rt_tgsigqueueinfo, getpid(), syscall(SYS_gettid), sig, &si) != 0) {
+        print("rt_tgsigqueueinfo failed: %m");
+        exit(1);
+    }
+}
+
+/* Many signals unread: none blocks the sender, and what reaches the fd comes in
+ * order from the first one sent, with any still pending after it.  (Natively the
+ * standard signal is pending once, holding the first value; under DR the fd can
+ * hold more records.)
+ */
 static void
 test_saturation(int sig)
 {
-    sigset_t orig_mask;
-    int i;
+    sigset_t orig_mask, mask;
+    struct signalfd_siginfo rec;
+    siginfo_t si;
+    struct timespec zero = { 0, 0 };
+    int i, first = -1, last = -1, in_order = 1;
     block_signal(sig, &orig_mask);
     int fd = new_signalfd(sig, 0);
     for (i = 0; i < 1000; i++)
-        send_signal(sig);
-    print("signal %d: read after 1000 sends: %d\n", sig, read_signal(fd));
-    /* Natively the standard signal was pending once. */
-    while (is_readable(fd, 0))
-        read_signal(fd);
+        queue_signal(sig, i);
+    while (is_readable(fd, 0) && read(fd, &rec, sizeof(rec)) == sizeof(rec)) {
+        if ((int)rec.ssi_signo != sig || rec.ssi_int <= last)
+            in_order = 0;
+        if (first < 0)
+            first = rec.ssi_int;
+        last = rec.ssi_int;
+    }
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    while (sigtimedwait(&mask, &si, &zero) == sig) {
+        if (si.si_value.sival_int <= last)
+            in_order = 0;
+        last = si.si_value.sival_int;
+    }
+    print("signal %d: 1000 queued: first read %d, all in order: %s\n", sig, first,
+          in_order ? "yes" : "no");
     close(fd);
-    drain_pending(sig);
     restore_signal(sig, &orig_mask);
 }
+
+static volatile pid_t main_tid;
+static volatile int race_go;
 
 static void *
 close_thread(void *arg)
 {
+    while (!race_go)
+        ;
     close(*(int *)arg);
     return NULL;
 }
 
-/* A signalfd closed by another thread. */
+static void *
+send_thread(void *arg)
+{
+    int sig = *(int *)arg;
+    while (!race_go)
+        ;
+    for (int i = 0; i < 20; i++)
+        syscall(SYS_tgkill, getpid(), main_tid, sig);
+    return NULL;
+}
+
+/* A signalfd closed by one thread while another sends this thread its signal: the
+ * signal ends up pending here every time.
+ */
 static void
 test_cross_thread_close(int sig)
 {
     sigset_t orig_mask;
-    pthread_t thread;
+    pthread_t closer, sender;
+    int i, every_time = 1;
+    main_tid = syscall(SYS_gettid);
     block_signal(sig, &orig_mask);
-    int fd = new_signalfd(sig, 0);
-    pthread_create(&thread, NULL, close_thread, &fd);
-    pthread_join(thread, NULL);
-    send_signal(sig);
-    print("signal %d: pending after another thread closed the fd: %s\n", sig,
-          take_pending(sig) ? "yes" : "no");
+    for (i = 0; i < 50; i++) {
+        int fd = new_signalfd(sig, 0);
+        int s = sig;
+        race_go = 0;
+        pthread_create(&closer, NULL, close_thread, &fd);
+        pthread_create(&sender, NULL, send_thread, &s);
+        race_go = 1;
+        pthread_join(sender, NULL);
+        pthread_join(closer, NULL);
+        if (!take_pending(sig))
+            every_time = 0;
+        drain_pending(sig);
+    }
+    print("signal %d: pending after a close racing sends, every time: %s\n", sig,
+          every_time ? "yes" : "no");
     restore_signal(sig, &orig_mask);
 }
 
@@ -359,12 +426,12 @@ test_update(int sig, int sig2)
           is_readable(fd, 100) ? "yes" : "no");
     print("signal %d: still pending: %s\n", sig, take_pending(sig) ? "yes" : "no");
     print_result("update with a NULL mask",
-                 syscall(SYS_signalfd4, fd, NULL, sizeof(long), 0));
+                 syscall(SYS_signalfd4, fd, NULL, SIGSET_SIZE, 0));
     print_result("update with a bad size", syscall(SYS_signalfd4, fd, &mask, 4, 0));
     print_result("update with bad flags",
-                 syscall(SYS_signalfd4, fd, &mask, sizeof(long), 0x1000));
+                 syscall(SYS_signalfd4, fd, &mask, SIGSET_SIZE, 0x1000));
     print_result("create with bad flags",
-                 syscall(SYS_signalfd4, -1, &mask, sizeof(long), 0x1000));
+                 syscall(SYS_signalfd4, -1, &mask, SIGSET_SIZE, 0x1000));
     close(fd);
     sigprocmask(SIG_SETMASK, &orig_mask, NULL);
     intercept_signal(sig, (handler_3_t)NULL, false);
@@ -399,35 +466,50 @@ test_mixed_mask(void)
     intercept_signal(SIGSEGV, (handler_3_t)NULL, false);
 }
 
-/* Changing a signalfd's mask from signals DR holds itself to ones the kernel holds,
- * or the reverse.  Natively it works; DR refuses it with EINVAL.  Either way the
- * result must not be an fd that misses its signals.
+/* Changing a signalfd's mask from old_sig to {new_sig, also_old ? old_sig}, where
+ * one of the two is a signal DR holds itself.  Natively it works.  DR refuses with
+ * EINVAL a change between a pipe and a real signalfd, and the fd must then still
+ * work for old_sig.  Either way the result must not be an fd that misses the
+ * signals it reports success for.
  */
 static void
-test_update_kind(int sig, int sig2)
+test_update_kind(int old_sig, int new_sig, int also_old)
 {
     sigset_t orig_mask, mask;
     int ok;
-    block_signal(sig, &orig_mask);
-    intercept_signal(sig2, (handler_3_t)signal_handler, false);
+    block_signal(old_sig, &orig_mask);
+    intercept_signal(new_sig, (handler_3_t)signal_handler, false);
     sigemptyset(&mask);
-    sigaddset(&mask, sig2);
+    sigaddset(&mask, new_sig);
     sigprocmask(SIG_BLOCK, &mask, NULL);
-    sigaddset(&mask, sig);
-    int fd = new_signalfd(sig, SFD_NONBLOCK);
+    if (also_old)
+        sigaddset(&mask, old_sig);
+    int fd = new_signalfd(old_sig, SFD_NONBLOCK);
     int res = signalfd(fd, &mask, 0);
     if (res == fd) {
-        send_signal(sig2);
-        ok = read_signal(fd) == sig2;
-    } else
+        /* A signal DR holds itself may wait pending instead of reaching a real fd
+         * that also has signals the kernel holds.
+         */
+        send_signal(new_sig);
+        ok = is_readable(fd, 100) ? read_signal(fd) == new_sig : take_pending(new_sig);
+        if (also_old) {
+            send_signal(old_sig);
+            ok = ok && (is_readable(fd, 100) ? read_signal(fd) == old_sig
+                                             : take_pending(old_sig));
+        }
+    } else {
         ok = res == -1 && errno == EINVAL;
-    print("update of a signal %d fd to add signal %d: %s\n", sig, sig2,
-          ok ? "works or fails with EINVAL" : "broken");
+        send_signal(old_sig);
+        ok = ok && read_signal(fd) == old_sig;
+    }
+    print("update of a signal %d fd to signal %d%s: %s\n", old_sig, new_sig,
+          also_old ? " too" : " instead", ok ? "ok" : "broken");
     close(fd);
-    drain_pending(sig2);
+    drain_pending(old_sig);
+    drain_pending(new_sig);
     sigprocmask(SIG_SETMASK, &orig_mask, NULL);
-    intercept_signal(sig, (handler_3_t)NULL, false);
-    intercept_signal(sig2, (handler_3_t)NULL, false);
+    intercept_signal(old_sig, (handler_3_t)NULL, false);
+    intercept_signal(new_sig, (handler_3_t)NULL, false);
 }
 
 int
@@ -452,7 +534,10 @@ main(void)
     test_update(SIGSEGV, SIGBUS);
     test_update(SIGUSR1, SIGUSR2);
     test_mixed_mask();
-    test_update_kind(SIGSEGV, SIGUSR1);
-    test_update_kind(SIGUSR1, SIGSEGV);
+    test_update_kind(SIGSEGV, SIGUSR1, 1); /* pipe to mixed */
+    test_update_kind(SIGSEGV, SIGUSR1, 0); /* pipe to kernel-held */
+    test_update_kind(SIGUSR1, SIGSEGV, 1); /* real to mixed: stays real */
+    test_update_kind(SIGUSR1, SIGSEGV, 0); /* real to held by DR */
+    test_update_kind(SIGSEGV, SIGBUS, 0);  /* pipe to pipe */
     return 0;
 }

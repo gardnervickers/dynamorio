@@ -34,8 +34,8 @@ signal 11: pending after closing its fd unread: yes
 signal 10: pending after closing its fd unread: yes
 signal 11: read of one pending before the fd: 11
 signal 10: read of one pending before the fd: 10
-signal 11: read after 1000 sends: 11
-signal 11: pending after another thread closed the fd: yes
+signal 11: 1000 queued: first read 0, all in order: yes
+signal 11: pending after a close racing sends, every time: yes
 ignored signal 12: read: 12
 signal 11: update to signal 7 returns the fd: yes
 signal 7: read after the update: 7
@@ -55,5 +55,8 @@ update with bad flags: EINVAL
 create with bad flags: EINVAL
 mixed mask: read of signal 12: 12
 mixed mask: signal 11 read or still pending: yes
-update of a signal 11 fd to add signal 10: works or fails with EINVAL
-update of a signal 10 fd to add signal 11: works or fails with EINVAL
+update of a signal 11 fd to signal 10 too: ok
+update of a signal 11 fd to signal 10 instead: ok
+update of a signal 10 fd to signal 11 too: ok
+update of a signal 10 fd to signal 11 instead: ok
+update of a signal 11 fd to signal 7 instead: ok

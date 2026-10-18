@@ -276,16 +276,27 @@ sysnum_is_not_restartable(int sysnum)
  * + on SYS_close, we decrement refcount
  * + on SYS_dup*, we add a new hashtable entry
  *
- * Our signal handler writes to a pipe without taking a lock: a pipe is never
- * freed while the process runs (a thread may still hold a pointer to it), and
- * once it is closed (sigfd_pipe_t.closed) the last close waits for the handlers
- * using its write fd (sigfd_pipe_t.users) before closing that.  Records still in
- * the pipe at the last close are sent back to the closing thread, as the kernel
- * keeps signals pending that no signalfd read.  The write fd does not block: a
- * signal that does not fit in the pipe stays pending with us.
+ * Our signal handler writes to a pipe without taking a lock.  A pipe is never
+ * freed while the process runs (a thread may still hold a pointer to it).  Its
+ * state word (sigfd_pipe_t.state) holds a closed bit and the number of handlers
+ * writing to it, changed only by compare-and-swap: a handler writes only after
+ * counting itself in while the bit is clear (sigfd_pipe_enter()).  The last close
+ * sets the bit under the table lock and queues the pipe (retiring_pipes); after
+ * dropping the lock, signalfd_finish_closes() waits for the count to drop to zero,
+ * then reads the records left in the pipe through our own nonblocking open of it
+ * and sends them back to the closing thread (as the kernel keeps signals pending
+ * that no signalfd read), and only then closes our ends.  So a write never lands on
+ * a closed or reused fd or on a pipe without a reader, and nothing blocks.  The
+ * write end does not block either: a signal that does not fit in the pipe stays
+ * pending with us.
  *
- * XXX i#1189: this pipe implementation has holes (all but the last shared with
- * upstream DynamoRIO, which uses it for every signalfd):
+ * XXX i#1189: an app thread blocked in read() of the pipe when its last fd is
+ * closed gets end-of-file once we close our write end, where natively it keeps
+ * waiting.  A record that thread or another reads while we drain is not sent
+ * back, as the app read it.
+ *
+ * XXX i#1189: this pipe implementation has holes, shared with upstream DynamoRIO
+ * (which uses it for every signalfd) except where noted:
  * + Two signalfds with different but overlapping signal masks share one pipe
  *   (see handle_pre_signalfd()), and a signal goes only to the fd most recently
  *   given it.
@@ -294,8 +305,12 @@ sysnum_is_not_restartable(int sysnum)
  *   it may get another's.  A forked child shares the pipe's contents.
  * + A signal is taken from the pending sets when it arrives, not when the app
  *   reads it: further instances of a standard signal are not coalesced, and the
- *   records the last close sends back lose their thread or process target.  (As
- *   upstream, a fd closed while another still shares its pipe keeps them.)
+ *   records the last close sends back all go to the thread that last gave the
+ *   pipe its signals, as thread-directed ones.  (As upstream, a fd closed while
+ *   another still shares its pipe keeps them.)
+ * + We track the app's dups by fd number after the kernel's dup (see
+ *   signal_handle_dup()), so a racing close or reuse of the number can lose
+ *   track of a copy.
  * + The app reads the pipe directly: a read shorter than a record splits one.
  * + Our state does not survive execve, so a pipe inherited across one never
  *   becomes readable.
@@ -303,32 +318,61 @@ sysnum_is_not_restartable(int sysnum)
  *   without CLONE_FILES, close_range(CLOSE_RANGE_UNSHARE)) confuse it.
  * + A signal that does not fit in the pipe waits with us, readable from no fd
  *   until something else delivers it (the app unblocking it, sigtimedwait()).
- *   Upstream's write blocked in our signal handler instead.
+ *   (Upstream's write blocked in our signal handler instead.)
  * + Whether a signal is one we hold (sig_kernel_blockable()) is fixed when the fd
  *   is created: an alarm signal becomes one when a client starts an itimer, and
- *   an existing signalfd for it is not converted.
+ *   an existing signalfd for it is not converted.  (Upstream has no real
+ *   signalfds.)
  */
 static generic_table_t *sigfd_table;
 
 struct _sigfd_pipe_t {
     file_t write_fd;
+    /* Our own open of the pipe for reading, with O_NONBLOCK. */
     file_t read_fd;
+    /* App fds for the pipe (table entries). */
     uint refcount;
-    /* Set by the last close; signal handlers using write_fd count themselves in
-     * users.
-     */
-    volatile int closed;
-    volatile int users;
-    struct _sigfd_pipe_t *next_closed;
+    /* SIGFD_PIPE_CLOSED and the number of signal handlers writing to write_fd. */
+    volatile int state;
+    /* The thread that last gave the pipe signals, which its records came from. */
+    thread_id_t owner;
+    struct _sigfd_pipe_t *next;
 };
 
-/* Closed pipes, freed at exit (see the strategy above). */
+#define SIGFD_PIPE_CLOSED 0x40000000
+
+/* Pipes whose last app fd has gone, for signalfd_finish_closes(), and closed
+ * ones, freed at exit (see the strategy above).  Both are guarded by the table's
+ * lock.
+ */
+static sigfd_pipe_t *retiring_pipes;
 static sigfd_pipe_t *closed_pipes;
 static bool signalfd_exiting;
 
-#ifndef FIONREAD
-#    define FIONREAD 0x541B
-#endif
+/* Counts a signal handler in as a writer to pipe, unless it is closed. */
+static bool
+sigfd_pipe_enter(sigfd_pipe_t *pipe)
+{
+    while (true) {
+        int state = atomic_aligned_read_int(&pipe->state);
+        if (TESTANY(SIGFD_PIPE_CLOSED, state))
+            return false;
+        if (atomic_compare_exchange_int(&pipe->state, state, state + 1))
+            return true;
+    }
+}
+
+static void
+sigfd_pipe_exit(sigfd_pipe_t *pipe)
+{
+    ATOMIC_DEC(int, pipe->state);
+}
+
+static bool
+sigfd_pipe_is_closed(sigfd_pipe_t *pipe)
+{
+    return TESTANY(SIGFD_PIPE_CLOSED, atomic_aligned_read_int(&pipe->state));
+}
 
 static void
 signalfd_record_to_siginfo(const struct signalfd_siginfo *rec, kernel_siginfo_t *si)
@@ -351,34 +395,75 @@ signalfd_record_to_siginfo(const struct signalfd_siginfo *rec, kernel_siginfo_t 
     si->si_ptr = (void *)(ptr_uint_t)rec->ssi_ptr;
 }
 
-/* Called with the table's write lock held when the last fd for the pipe goes. */
+/* Sends the signal of si to thread tid of this process.  The kernel takes another
+ * thread's siginfo only for a negative si_code other than SI_TKILL; otherwise we
+ * send it with tgkill, which leaves it SI_TKILL from us.
+ */
+static bool
+signalfd_requeue(thread_id_t tid, kernel_siginfo_t *si)
+{
+    if (si->si_code < 0 && si->si_code != SI_TKILL) {
+        return dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(), tid,
+                                 si->si_signo, si) == 0;
+    }
+    return dynamorio_syscall(SYS_tgkill, 3, get_process_id(), tid, si->si_signo) == 0;
+}
+
+/* Called with the table's write lock held when the last app fd for the pipe goes:
+ * closes it to writers, for signalfd_finish_closes() to finish after the lock is
+ * dropped.
+ */
 static void
-sigfd_pipe_close(sigfd_pipe_t *pipe)
+sigfd_pipe_retire(sigfd_pipe_t *pipe)
+{
+    int state;
+    do {
+        state = atomic_aligned_read_int(&pipe->state);
+    } while (!atomic_compare_exchange_int(&pipe->state, state,
+                                          state | SIGFD_PIPE_CLOSED));
+    pipe->next = retiring_pipes;
+    retiring_pipes = pipe;
+}
+
+/* Finishes closing the pipes retired so far.  Called without the table's lock. */
+static void
+signalfd_finish_closes(void)
 {
     struct signalfd_siginfo rec;
     kernel_siginfo_t si;
-    int avail;
-    ATOMIC_4BYTE_ALIGNED_WRITE(&pipe->closed, 1, false);
-    while (atomic_aligned_read_int(&pipe->users) > 0)
-        os_thread_yield();
-    /* No app fd is left to read the pipe, so these reads do not block.  Each
-     * record goes back to this thread: one we hold still reaches our handler, which
-     * now queues it.
-     */
-    while (!signalfd_exiting &&
-           dynamorio_syscall(SYS_ioctl, 3, pipe->read_fd, FIONREAD, &avail) == 0 &&
-           avail >= (int)sizeof(rec) &&
-           dynamorio_syscall(SYS_read, 3, pipe->read_fd, &rec, sizeof(rec)) ==
-               sizeof(rec)) {
-        signalfd_record_to_siginfo(&rec, &si);
-        if (dynamorio_syscall(SYS_rt_tgsigqueueinfo, 4, get_process_id(),
-                              get_sys_thread_id(), si.si_signo, &si) != 0)
-            LOG(GLOBAL, LOG_ASYNCH, 1, "signalfd close: lost signal %d\n", si.si_signo);
+    if (retiring_pipes == NULL) /* Racy, but our own retirements are visible. */
+        return;
+    TABLE_RWLOCK(sigfd_table, write, lock);
+    sigfd_pipe_t *list = retiring_pipes;
+    retiring_pipes = NULL;
+    TABLE_RWLOCK(sigfd_table, write, unlock);
+    while (list != NULL) {
+        sigfd_pipe_t *pipe = list;
+        list = pipe->next;
+        /* Handlers already writing are brief. */
+        while ((atomic_aligned_read_int(&pipe->state) & ~SIGFD_PIPE_CLOSED) != 0)
+            os_thread_yield();
+        /* Each record goes back to the thread that gave the pipe its signals (or
+         * this one, if that has exited): one we hold reaches our handler, which now
+         * queues it.
+         */
+        while (!signalfd_exiting &&
+               dynamorio_syscall(SYS_read, 3, pipe->read_fd, &rec, sizeof(rec)) ==
+                   sizeof(rec)) {
+            signalfd_record_to_siginfo(&rec, &si);
+            if (!signalfd_requeue(pipe->owner, &si) &&
+                !signalfd_requeue(get_sys_thread_id(), &si)) {
+                LOG(GLOBAL, LOG_ASYNCH, 1, "signalfd close: lost signal %d\n",
+                    si.si_signo);
+            }
+        }
+        os_close_protected(pipe->write_fd);
+        os_close_protected(pipe->read_fd);
+        TABLE_RWLOCK(sigfd_table, write, lock);
+        pipe->next = closed_pipes;
+        closed_pipes = pipe;
+        TABLE_RWLOCK(sigfd_table, write, unlock);
     }
-    os_close_protected(pipe->write_fd);
-    os_close_protected(pipe->read_fd);
-    pipe->next_closed = closed_pipes;
-    closed_pipes = pipe;
 }
 
 static void
@@ -388,7 +473,7 @@ sigfd_pipe_free(dcontext_t *dcontext, void *ptr)
     ASSERT(pipe->refcount > 0);
     pipe->refcount--;
     if (pipe->refcount == 0)
-        sigfd_pipe_close(pipe);
+        sigfd_pipe_retire(pipe);
 }
 
 void
@@ -413,10 +498,19 @@ void
 signalfd_exit(void)
 {
     signalfd_exiting = true;
+    /* Retires every pipe still open (sigfd_pipe_free()). */
     generic_hash_destroy(GLOBAL_DCONTEXT, sigfd_table);
+    sigfd_table = NULL;
+    while (retiring_pipes != NULL) {
+        sigfd_pipe_t *pipe = retiring_pipes;
+        retiring_pipes = pipe->next;
+        os_close_protected(pipe->write_fd);
+        os_close_protected(pipe->read_fd);
+        HEAP_TYPE_FREE(GLOBAL_DCONTEXT, pipe, sigfd_pipe_t, ACCT_OTHER, PROTECTED);
+    }
     while (closed_pipes != NULL) {
         sigfd_pipe_t *pipe = closed_pipes;
-        closed_pipes = pipe->next_closed;
+        closed_pipes = pipe->next;
         HEAP_TYPE_FREE(GLOBAL_DCONTEXT, pipe, sigfd_pipe_t, ACCT_OTHER, PROTECTED);
     }
 }
@@ -484,7 +578,7 @@ static sigfd_pipe_t *
 thread_signalfd_pipe(thread_sig_info_t *info, int sig)
 {
     sigfd_pipe_t *pipe = info->signalfd[sig];
-    if (pipe != NULL && atomic_aligned_read_int(&pipe->closed) != 0) {
+    if (pipe != NULL && sigfd_pipe_is_closed(pipe)) {
         info->signalfd[sig] = NULL;
         pipe = NULL;
     }
@@ -525,63 +619,98 @@ signalfd_pipe_write(sigfd_pipe_t *pipe, int sig, const kernel_siginfo_t *si)
     struct signalfd_siginfo rec;
     bool written = false;
     siginfo_to_signalfd_record(sig, si, &rec);
-    ATOMIC_INC(int, pipe->users);
-    if (atomic_aligned_read_int(&pipe->closed) == 0) {
+    if (sigfd_pipe_enter(pipe)) {
         /* The pipe buffer holds 512 records; a write fails rather than split one. */
         written = write_syscall(pipe->write_fd, &rec, sizeof(rec)) == sizeof(rec);
+        sigfd_pipe_exit(pipe);
     }
-    ATOMIC_DEC(int, pipe->users);
     return written;
 }
 
+/* Opens fd's pipe for reading again, with its own status flags.  Returns the new
+ * fd or a negative errno.
+ */
+static int
+signalfd_reopen(file_t fd, int flags)
+{
+    char path[64];
+    snprintf(path, BUFFER_SIZE_ELEMENTS(path), "/proc/self/fd/%d", fd);
+    NULL_TERMINATE_BUFFER(path);
+    return (int)dynamorio_syscall(SYS_openat, 4, AT_FDCWD, path, O_RDONLY | flags, 0);
+}
+
 /* Gives the app another fd for pipe with its own flags: a new open of the pipe,
- * so that SFD_NONBLOCK is its own, as for a separate signalfd.  Returns the fd or
- * a negative errno.
+ * so that SFD_NONBLOCK (and later F_SETFL) are its own, as for a separate
+ * signalfd.  Returns the fd or a negative errno.  Without /proc we fail rather
+ * than share one fd's status flags with another.
  */
 static int
 signalfd_alias(sigfd_pipe_t *pipe, int flags)
 {
-    char path[64];
-    snprintf(path, BUFFER_SIZE_ELEMENTS(path), "/proc/self/fd/%d", pipe->read_fd);
-    NULL_TERMINATE_BUFFER(path);
-    int fd = (int)dynamorio_syscall(SYS_openat, 4, AT_FDCWD, path, O_RDONLY | flags, 0);
-    if (fd >= 0)
-        return fd;
-    /* No /proc: share the open file and its O_NONBLOCK. */
-    fd = dup_syscall(pipe->read_fd);
-    if (fd >= 0 && TESTANY(SFD_CLOEXEC, flags))
-        dynamorio_syscall(SYS_fcntl, 3, fd, F_SETFD, FD_CLOEXEC);
-    return fd;
+    return signalfd_reopen(pipe->read_fd, flags);
 }
 
-/* Creates a pipe, returning the app's fd for it or a negative errno. */
+/* Moves fd to our private fd space, closing it there, and marks the copy
+ * close-on-exec: our state does not survive execve.  Returns the copy or -1.
+ */
+static file_t
+signalfd_privatize(file_t fd)
+{
+    file_t priv = fd_priv_dup(fd);
+    if (priv < 0 && DYNAMO_OPTION(steal_fds) == 0)
+        priv = dup_syscall(fd);
+    os_close(fd);
+    if (priv < 0)
+        return -1;
+    if (!fd_mark_close_on_exec(priv)) {
+        os_close(priv);
+        return -1;
+    }
+    fd_table_add(priv, 0 /*keep across fork*/);
+    return priv;
+}
+
+/* Creates a pipe, returning the app's fd for it or a negative errno.  Only a
+ * complete pipe is returned: any failure undoes the rest.
+ */
 static int
 signalfd_pipe_create(int flags, sigfd_pipe_t **pipe_out)
 {
     int fds[2];
+    file_t write_fd, read_fd;
     /* SYS_signalfd is even newer than SYS_pipe2, so pipe2 must be avail.
      * The flags are the same (SFD_NONBLOCK == O_NONBLOCK, SFD_CLOEXEC == O_CLOEXEC).
      */
     ptr_int_t res = dynamorio_syscall(SYS_pipe2, 2, fds, flags);
     if (res < 0)
         return (int)res;
-    /* Our signal handler must never block on a full pipe. */
-    dynamorio_syscall(SYS_fcntl, 3, fds[1], F_SETFL, O_NONBLOCK);
+    /* Our signal handler must never block on a full pipe, and our reads at the
+     * last close must never block on an empty one.
+     */
+    res = dynamorio_syscall(SYS_fcntl, 3, fds[1], F_SETFL, O_NONBLOCK);
+    if (res < 0) {
+        os_close(fds[0]);
+        os_close(fds[1]);
+        return (int)res;
+    }
+    write_fd = signalfd_privatize(fds[1]);
+    if (write_fd < 0) {
+        os_close(fds[0]);
+        return -EMFILE;
+    }
+    res = signalfd_reopen(fds[0], O_NONBLOCK);
+    read_fd = res < 0 ? -1 : signalfd_privatize((file_t)res);
+    if (read_fd < 0) {
+        os_close_protected(write_fd);
+        os_close(fds[0]);
+        return res < 0 ? (int)res : -EMFILE;
+    }
     sigfd_pipe_t *pipe =
         HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, sigfd_pipe_t, ACCT_OTHER, PROTECTED);
     memset(pipe, 0, sizeof(*pipe));
     pipe->refcount = 1;
-    /* Keep our write fd in the private fd space.  Our fds are of no use to a new
-     * image, so they never survive execve.
-     */
-    pipe->write_fd = fd_priv_dup(fds[1]);
-    os_close(fds[1]);
-    fd_mark_close_on_exec(pipe->write_fd);
-    fd_table_add(pipe->write_fd, 0 /*keep across fork*/);
-    /* We need an un-closable copy of the read fd, to alias and drain the pipe. */
-    pipe->read_fd = fd_priv_dup(fds[0]);
-    fd_mark_close_on_exec(pipe->read_fd);
-    fd_table_add(pipe->read_fd, 0 /*keep across fork*/);
+    pipe->write_fd = write_fd;
+    pipe->read_fd = read_fd;
     *pipe_out = pipe;
     return fds[0];
 }
@@ -591,6 +720,7 @@ static void
 signalfd_pipe_set_mask(dcontext_t *dcontext, thread_sig_info_t *info, sigfd_pipe_t *pipe,
                        const kernel_sigset_t *mask)
 {
+    pipe->owner = get_sys_thread_id();
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
         if (sig == SIGKILL || sig == SIGSTOP)
             continue;
@@ -599,15 +729,14 @@ signalfd_pipe_set_mask(dcontext_t *dcontext, thread_sig_info_t *info, sigfd_pipe
             info->signalfd[sig] = pipe;
             LOG(THREAD, LOG_ASYNCH, 2, "adding signalfd pipe %d for signal %d\n",
                 pipe->write_fd, sig);
-            /* One that arrived before the fd existed is pending for it too. */
+            /* One that arrived before the fd existed is pending for it too.  It
+             * leaves our queue only once it is in the pipe, in order; one that does
+             * not fit stays queued.
+             */
             kernel_siginfo_t si;
-            while (signal_take_held_signal(dcontext, sig, &si)) {
-                if (!signalfd_pipe_write(pipe, sig, &si)) {
-                    LOG(THREAD, LOG_ASYNCH, 1, "signalfd pipe full: lost signal %d\n",
-                        sig);
-                    break;
-                }
-            }
+            while (signal_peek_held_signal(dcontext, sig, &si) &&
+                   signalfd_pipe_write(pipe, sig, &si))
+                signal_drop_held_signal(dcontext, sig);
         } else if (info->signalfd[sig] == pipe) {
             info->signalfd[sig] = NULL;
             LOG(THREAD, LOG_ASYNCH, 2, "removing signalfd pipe=%d for signal %d\n",
@@ -664,6 +793,7 @@ handle_pre_signalfd(dcontext_t *dcontext, int fd, const kernel_sigset_t *mask, i
     if (retval >= 0)
         signalfd_pipe_set_mask(dcontext, info, pipe, mask);
     TABLE_RWLOCK(sigfd_table, write, unlock);
+    signalfd_finish_closes(); /* For a stale table entry replaced. */
     return retval;
 }
 
@@ -683,11 +813,26 @@ notify_signalfd(dcontext_t *dcontext, thread_sig_info_t *info, int sig,
     return written;
 }
 
-/* The app's dst is now a copy of src (dup, dup2, dup3, fcntl F_DUPFD*). */
+/* Returns whether no fd is an emulated signalfd: the usual case. */
+static bool
+signalfd_none(void)
+{
+    TABLE_RWLOCK(sigfd_table, read, lock);
+    bool none = sigfd_table->entries == 0;
+    TABLE_RWLOCK(sigfd_table, read, unlock);
+    return none;
+}
+
+/* The app's dst is now a copy of src (dup, dup2, dup3, fcntl F_DUPFD*).
+ * XXX i#1189: we update the table after the kernel's dup, by fd number, so a
+ * close of src or dst by another thread in between, or the reuse of that number,
+ * can leave the copy untracked or an entry stale.
+ */
 void
 signal_handle_dup(dcontext_t *dcontext, file_t src, file_t dst)
 {
-    if (src == dst || (!signal_is_emulated_signalfd(src) && !signal_is_emulated_signalfd(dst)))
+    if (src == dst || signalfd_none() ||
+        (!signal_is_emulated_signalfd(src) && !signal_is_emulated_signalfd(dst)))
         return;
     TABLE_RWLOCK(sigfd_table, write, lock);
     sigfd_pipe_t *pipe =
@@ -701,21 +846,19 @@ signal_handle_dup(dcontext_t *dcontext, file_t src, file_t dst)
         generic_hash_remove(GLOBAL_DCONTEXT, sigfd_table, dst); /* sigfd_pipe_free() */
     }
     TABLE_RWLOCK(sigfd_table, write, unlock);
+    signalfd_finish_closes();
 }
 
 /* The app closes every fd in [first, last]. */
 void
 signal_handle_close_range(dcontext_t *dcontext, uint first, uint last)
 {
-    /* Usually there is no emulated signalfd at all. */
-    TABLE_RWLOCK(sigfd_table, read, lock);
-    bool any = sigfd_table->entries > 0;
-    TABLE_RWLOCK(sigfd_table, read, unlock);
-    if (!any)
+    if (signalfd_none())
         return;
     TABLE_RWLOCK(sigfd_table, write, lock);
     generic_hash_range_remove(GLOBAL_DCONTEXT, sigfd_table, first, (ptr_uint_t)last + 1);
     TABLE_RWLOCK(sigfd_table, write, unlock);
+    signalfd_finish_closes();
 }
 
 void
@@ -734,6 +877,7 @@ signal_handle_close(dcontext_t *dcontext, file_t fd)
         generic_hash_remove(GLOBAL_DCONTEXT, sigfd_table, fd);
     }
     TABLE_RWLOCK(sigfd_table, write, unlock);
+    signalfd_finish_closes();
 }
 
 /* Returns whether fd is a signalfd we emulate with a pipe. */
