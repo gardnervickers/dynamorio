@@ -82,9 +82,12 @@ validated pidfd, never numeric PID/group IDs: recycling before acquisition is
 rejected by membership, recycling during validation by the exit notification,
 and recycling after validation cannot redirect the signal. A pidfd alone does
 not reserve a numeric ID. The leader is reaped after cleanup, including error
-paths (with a bounded wait if cleanup failed). Zombies cannot run or fork and
-need no signal. This requires Linux pidfds and normal child-wait semantics;
-no concurrent reaper or ignored SIGCHLD is supported.
+paths (with a bounded wait if cleanup failed). A zombie thread-group leader
+can still have running worker threads. Discovery and validation use pidfd exit
+readiness for the entire thread group, retaining those workers for cleanup while
+excluding fully exited zombies (including the unreaped anchor). This requires
+Linux pidfds and normal child-wait semantics; no concurrent reaper or ignored
+SIGCHLD is supported.
 
 This boundary covers descendants that remain in the private session. Deliberate
 `setsid()` escape is outside scope; a task validated before it changes session
@@ -102,6 +105,9 @@ complete build trees and binaries are excluded. Logs are useful on failure
 but cannot substitute for an executed native job.
 
 ## Focused checks
+
+The helper tests compile a small pthread fixture with `$CC` (default `cc`);
+run them in the development shell with its C compiler.
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s suite/ci -p 'test_*.py' -v

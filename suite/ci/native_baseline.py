@@ -78,8 +78,13 @@ def session_members(session):
         if not entry.name.isdecimal():
             continue
         fields = process_fields(entry)
-        if fields and int(fields[3]) == session and fields[0] not in (b"Z", b"X"):
-            members[int(entry.name)] = int(fields[2])
+        if fields and int(fields[3]) == session:
+            # A Z thread-group leader can still have running worker threads.
+            # Exclude only whole-process exits, including our unreaped anchor.
+            fd = owned_pidfd(int(entry.name), session)
+            if fd is not None:
+                os.close(fd)
+                members[int(entry.name)] = int(fields[2])
     return members
 
 
@@ -106,7 +111,7 @@ def owned_pidfd(pid, session):
         return None
     try:
         fields = process_fields(Path("/proc") / str(pid))
-        if (fields and int(fields[3]) == session and fields[0] not in (b"Z", b"X")
+        if (fields and int(fields[3]) == session
                 and not select.select([fd], [], [], 0)[0]):
             return fd
     except BaseException:
