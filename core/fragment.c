@@ -6087,9 +6087,18 @@ flush_fragments_synchall_start(dcontext_t *ignored, app_pc base, size_t size,
              * would be a clearer win if we could do the fine fragments this way
              * also, but fine fragments are not constrained and could be missed using
              * only a tag-based range remove.
+             * The fine fragments are removed from the ibl tables one by one as they
+             * are deleted below, so without coarse units there is nothing to walk
+             * the tables for: the walk visits every entry of each table (all the
+             * indirect-branch targets, such as every return point of a JIT's code)
+             * for each flush of a line, and it removed the entries of every
+             * fragment of the whole executable area.
              */
-            DEBUG_DECLARE(removed =)
-            fragment_remove_all_ibl_in_region(dcontext, exec_start, exec_end);
+            DEBUG_DECLARE(removed = 0;)
+            if (DYNAMO_OPTION(coarse_units)) {
+                DEBUG_DECLARE(removed =)
+                fragment_remove_all_ibl_in_region(dcontext, exec_start, exec_end);
+            }
             LOG(THREAD, LOG_FRAGMENT, 2, "\tremoved %d ibl entries in " PFX "-" PFX "\n",
                 removed, exec_start, exec_end);
             /* Free any fine private fragments in the region */
@@ -6104,7 +6113,8 @@ flush_fragments_synchall_start(dcontext_t *ignored, app_pc base, size_t size,
         }
     }
     /* Removed shared coarse fragments from ibl tables, before freeing any */
-    if (SHARED_IBT_TABLES_ENABLED() && SHARED_FRAGMENTS_ENABLED())
+    if (SHARED_IBT_TABLES_ENABLED() && SHARED_FRAGMENTS_ENABLED() &&
+        DYNAMO_OPTION(coarse_units))
         fragment_remove_all_ibl_in_region(GLOBAL_DCONTEXT, exec_start, exec_end);
     /* Free coarse units and shared fine fragments, as well as removing shared fine
      * entries in any shared ibl tables
