@@ -5955,6 +5955,22 @@ flush_fragments_free_futures(app_pc base, size_t size)
     } /* else we leak them */
 }
 
+/* Returns whether a synch-all flush must walk the ibl tables for the tags in the
+ * flushed executable area rather than rely on removing each fragment from them as
+ * it is deleted.  The walk is needed for coarse-grain fragments, which are not on
+ * the fragment lists.  With traces, a trace can also be in the bb ibl tables
+ * (-bb_ibt_table_includes_traces), which fragment_remove_from_ibt_tables() does
+ * not visit, and with mixed sharing of the bb and trace tables the per-thread
+ * passes below do not visit every table: those keep the walk.  Without traces only
+ * the bb tables hold targets, and the passes below remove each fragment from
+ * every one that can hold it.
+ */
+static bool
+flush_ibl_walk_needed(void)
+{
+    return DYNAMO_OPTION(coarse_units) || !DYNAMO_OPTION(disable_traces);
+}
+
 /* This routine begins a flush that requires full thread synch: currently,
  * it is used for flushing coarse-grain units and for dr_flush_region()
  */
@@ -6087,15 +6103,14 @@ flush_fragments_synchall_start(dcontext_t *ignored, app_pc base, size_t size,
              * would be a clearer win if we could do the fine fragments this way
              * also, but fine fragments are not constrained and could be missed using
              * only a tag-based range remove.
-             * The fine fragments are removed from the ibl tables one by one as they
-             * are deleted below, so without coarse units there is nothing to walk
-             * the tables for: the walk visits every entry of each table (all the
-             * indirect-branch targets, such as every return point of a JIT's code)
-             * for each flush of a line, and it removed the entries of every
-             * fragment of the whole executable area.
+             * The walk visits every entry of each table (all the indirect-branch
+             * targets, such as every return point of a JIT's code) for each flush of
+             * a line, so we skip it where removing the fine fragments one by one as
+             * they are deleted below is known to be complete
+             * (flush_ibl_walk_needed()).
              */
             DEBUG_DECLARE(removed = 0;)
-            if (DYNAMO_OPTION(coarse_units)) {
+            if (flush_ibl_walk_needed()) {
                 DEBUG_DECLARE(removed =)
                 fragment_remove_all_ibl_in_region(dcontext, exec_start, exec_end);
             }
@@ -6114,7 +6129,7 @@ flush_fragments_synchall_start(dcontext_t *ignored, app_pc base, size_t size,
     }
     /* Removed shared coarse fragments from ibl tables, before freeing any */
     if (SHARED_IBT_TABLES_ENABLED() && SHARED_FRAGMENTS_ENABLED() &&
-        DYNAMO_OPTION(coarse_units))
+        flush_ibl_walk_needed())
         fragment_remove_all_ibl_in_region(GLOBAL_DCONTEXT, exec_start, exec_end);
     /* Free coarse units and shared fine fragments, as well as removing shared fine
      * entries in any shared ibl tables
