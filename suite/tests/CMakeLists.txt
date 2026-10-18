@@ -5524,6 +5524,12 @@ if (UNIX)
 
     tobuild(linux.signal_pre_syscall linux/signal_pre_syscall.c)
     target_link_libraries(linux.signal_pre_syscall rt)
+    if (AARCH64)
+      # PSTATE.DIT in the frames of asynchronous signals that arrive while a
+      # thread is on its way from d_r_dispatch into a syscall.
+      tobuild(linux.a64_dit_signal linux/a64_dit_signal.c)
+      target_link_libraries(linux.a64_dit_signal rt)
+    endif ()
   endif ()
 
   tobuild(linux.bad-signal-stack linux/bad-signal-stack.c)

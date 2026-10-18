@@ -713,6 +713,12 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame);
 void
 sigcontext_set_app_pstate(sigcontext_t *sc);
 
+/* Sets the same PSTATE fields of sc to their values in pstate, which must be a
+ * PSTATE the app's code or ours ran with (such as an interrupted context's).
+ */
+void
+sigcontext_copy_app_pstate(sigcontext_t *sc, reg_t pstate);
+
 /* Returns how many bytes beyond sizeof(sigframe_rt_t) frame needs on a stack:
  * an EXTRA record's data goes right after the terminator that follows it and
  * can run past the frame.  A queued frame (pending) keeps the data in a
