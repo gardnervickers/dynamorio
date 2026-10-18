@@ -146,7 +146,8 @@ static ELF_AUXV_TYPE privload_auxv[PRIVLOAD_AUXV_MAX];
 static uint privload_auxv_num;
 static bool privload_auxv_complete;
 /* Early injection's vector on the initial stack, which privload_setup_auxv() made
- * describe the app.  NULL in every other mode.
+ * describe the app, until we have copied it: NULL afterward and in every other
+ * mode.
  */
 static ELF_AUXV_TYPE *privload_initial_auxv;
 /* The private libc's __errno_location(), for redirect_getauxval(). */
@@ -1634,14 +1635,26 @@ privload_read_proc_auxv(void)
  * dr_app_setup(), static DR) we cannot tell whether our environment is still the
  * initial stack's with the vector after it (attach uses a two-entry fake one), so
  * we use /proc/self/auxv.
+ * The vector does not change for the life of the process, so we keep a complete
+ * copy across a detach and a later re-attach, by which time the app may have
+ * reused its initial stack: we read that stack only once.
  */
 static void
 privload_snapshot_auxv(void)
 {
+    if (privload_auxv_complete) {
+        LOG(GLOBAL, LOG_LOADER, 2, "%s: keeping %u auxv entries\n", __FUNCTION__,
+            privload_auxv_num);
+        return;
+    }
+    const char *source = "procfs";
     privload_auxv_num = 0;
-    privload_auxv_complete = false;
-    if (privload_initial_auxv != NULL)
+    if (privload_initial_auxv != NULL) {
         privload_auxv_complete = privload_copy_auxv(privload_initial_auxv);
+        privload_initial_auxv = NULL;
+        if (privload_auxv_complete)
+            source = "the stack";
+    }
     if (!privload_auxv_complete)
         privload_auxv_complete = privload_read_proc_auxv();
     if (!privload_auxv_complete) {
@@ -1650,8 +1663,7 @@ privload_snapshot_auxv(void)
                                 "libraries' getauxval() will find no entries");
     }
     LOG(GLOBAL, LOG_LOADER, 2, "%s: %u auxv entries from %s%s\n", __FUNCTION__,
-        privload_auxv_num, privload_initial_auxv != NULL ? "the stack" : "procfs",
-        privload_auxv_complete ? "" : " (failed)");
+        privload_auxv_num, source, privload_auxv_complete ? "" : " (failed)");
 }
 
 /* Sets the private libc's errno, as our redirected libc routines must.  The
@@ -1677,7 +1689,9 @@ privload_set_libc_errno(int val)
  * left zero.  libgcc_s from gcc 16 calls getauxval(AT_HWCAP3) from its AArch64
  * cpu-feature constructor, which then crashed.  We answer from a copy of the real
  * vector instead, with glibc's contract: a missing type returns 0 and sets errno
- * to ENOENT, and a found one leaves errno alone.
+ * to ENOENT, and a found one leaves errno alone.  AT_HWCAP and AT_HWCAP2 are
+ * always found, as glibc reads them from loader fields: 0 if the kernel did not
+ * supply them.
  * We only do this on AArch64, where glibc's AT_HWCAP and AT_HWCAP2 are the
  * kernel's values.  On x86, for one, glibc reports its own bits for AT_HWCAP.
  * XXX: This is not a general initialization of the private ld.so and libc from
@@ -1695,7 +1709,8 @@ redirect_getauxval(unsigned long type)
         if (privload_auxv[i].a_type == type)
             return (unsigned long)privload_auxv[i].a_un.a_val;
     }
-    privload_set_libc_errno(ENOENT);
+    if (type != AT_HWCAP && type != AT_HWCAP2)
+        privload_set_libc_errno(ENOENT);
     return 0;
 }
 
