@@ -1300,12 +1300,37 @@ get_timer_frequency_cpuinfo(void)
     return cpu_mhz * 1000 + cpu_khz;
 }
 
+bool
+os_timer_counter_readable(void)
+{
+#if defined(AARCH64) && defined(LINUX)
+#    ifndef PR_GET_TSC
+#        define PR_GET_TSC 25
+#    endif
+#    ifndef PR_TSC_SIGSEGV
+#        define PR_TSC_SIGSEGV 2
+#    endif
+    /* Linux lets EL0 read CNTVCT_EL0 and CNTFRQ_EL0, directly or (for timer
+     * errata) by trapping and emulating the reads, unless the thread has asked
+     * with prctl(PR_SET_TSC, PR_TSC_SIGSEGV) for the reads to raise SIGSEGV, as
+     * record-and-replay tools do.  Kernels before 6.12 have no such prctl on
+     * AArch64 (PR_GET_TSC fails) and always allow the reads.
+     */
+    int mode = 0;
+    if (dynamorio_syscall(SYS_prctl, 2, (ptr_uint_t)PR_GET_TSC, (ptr_uint_t)&mode) == 0 &&
+        mode == PR_TSC_SIGSEGV)
+        return false;
+#endif
+    return true;
+}
+
 timestamp_t
 get_timer_frequency()
 {
 #ifdef AARCH64
     /* proc_get_timestamp() counts at the generic timer's frequency rather than
-     * the CPU's, and /proc/cpuinfo has no "cpu MHz" line here.
+     * the CPU's, and /proc/cpuinfo has no "cpu MHz" line here.  The caller checks
+     * that the thread can read the counter (os_timer_counter_readable()).
      */
     uint64 hz = proc_get_timestamp_frequency();
     if (hz >= 1000)

@@ -393,11 +393,15 @@ get_stack_ptr(void);
 #    elif defined(DR_HOST_AARCH64)
 /* The generic timer's virtual count, which is the same on every core.  It can be
  * read speculatively and out of order with other instructions: the ISB keeps the
- * read after the code it times.
+ * read after the code it times, and the "memory" clobber keeps the compiler from
+ * moving memory accesses across it.
  */
-#        define RDTSC_LL(llval)                                                  \
-            do {                                                                 \
-                __asm__ __volatile__("isb\n\tmrs %0, cntvct_el0" : "=r"(llval)); \
+#        define RDTSC_LL(llval)                                  \
+            do {                                                 \
+                __asm__ __volatile__("isb\n\tmrs %0, cntvct_el0" \
+                                     : "=r"(llval)               \
+                                     :                           \
+                                     : "memory");                \
             } while (0)
 
 #        define GET_FRAME_PTR(var) __asm__ __volatile__("mov %0, x29" : "=r"(var))

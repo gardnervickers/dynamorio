@@ -550,7 +550,11 @@ uint64
 proc_get_timestamp_frequency(void)
 {
     uint64 hz;
-    /* Linux gives EL0 access to the virtual counter, and so to CNTFRQ_EL0. */
+    /* EL0 can read CNTFRQ_EL0 when it can read the virtual counter, which Linux
+     * normally allows (directly, or by trapping and emulating the read) but a
+     * thread can deny itself: see os_timer_counter_readable(), which callers check
+     * first.
+     */
     __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(hz));
     return hz;
 }

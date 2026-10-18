@@ -181,18 +181,28 @@ kstats_thread_logfile_name(void)
 void
 kstat_init()
 {
+    /* Without -kstats nothing reads the counter, and we must not either: the app
+     * may have made reading it fault (os_timer_counter_readable()).
+     */
+    if (!DYNAMO_OPTION(kstats))
+        return;
+    /* XXX: There is no check for TSC feature and whether CR4.TSD is set
+     * so we can read it at CPL 3
+     */
+    if (!os_timer_counter_readable()) {
+        SYSLOG_INTERNAL_WARNING("-kstats disabled: this thread cannot read the "
+                                "timestamp counter");
+        options_make_writable();
+        dynamo_options.kstats = false;
+        options_restore_readonly();
+        return;
+    }
+
     kstat_frequency_per_msec = get_timer_frequency();
     kstat_ignore_context_switch = KSTAT_OUTLIER_THRESHOLD_MS * kstat_frequency_per_msec;
 
     LOG(GLOBAL, LOG_STATS, 1, "Processor speed: " UINT64_FORMAT_STRING "MHz\n",
         kstat_frequency_per_msec / 1000);
-
-    /* FIXME: There is no check for TSC feature and whether CR4.TSD is set
-     * so we can read it at CPL 3
-     */
-
-    if (!DYNAMO_OPTION(kstats))
-        return;
 
     kstat_init_variables(&process_kstats);
 #    ifdef DEBUG
@@ -253,6 +263,11 @@ kstat_thread_init(dcontext_t *dcontext)
     thread_kstats_t *new_thread_kstats;
     if (!DYNAMO_OPTION(kstats))
         return; /* dcontext->thread_kstats stays NULL */
+    /* A thread that cannot read the counter is not timed. */
+    if (!os_timer_counter_readable()) {
+        LOG(THREAD, LOG_STATS, 1, "kstats off: thread cannot read the counter\n");
+        return;
+    }
 
     /* allocated on thread heap - use global if timing initialization matters */
     new_thread_kstats =

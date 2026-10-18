@@ -995,6 +995,12 @@ wait_for_event(event_t e, int timeout_ms);
 timestamp_t
 get_timer_frequency(void);
 
+/* Returns whether the calling thread can read the counter that RDTSC_LL and
+ * get_timer_frequency() read, which an app can deny it (and then a read faults).
+ */
+bool
+os_timer_counter_readable(void);
+
 /* Returns the number of seconds since Jan 1, 1601 (this is
  * the current UTC time).
  */
