@@ -175,6 +175,13 @@ static int get_app_value_note_tag[2];
 #define IS_GET_APP_VALUE_NOTE(inst)                \
     (instr_get_note(inst) == GET_APP_VALUE_NOTE || \
      instr_get_note(inst) == GET_APP_VALUE_INPLACE_NOTE)
+/* Marks the spill of a reserved register's tool value to a temporary slot
+ * around an app instr that reads or writes the register, and its restore after
+ * that instr.  State restoration's reverse walk ignores them: they are not part
+ * of the app value's spill.
+ */
+static int tool_value_note_tag;
+#define TOOL_VALUE_NOTE ((void *)&tool_value_note_tag)
 
 static bool
 is_our_spill_or_restore(void *drcontext, instr_t *instr, bool *spill,
@@ -625,10 +632,14 @@ drreg_insert_restore_all(void *drcontext, instrlist_t *bb, instr_t *inst,
                         "%s @%d." PFX ": restoring %s for app read\n", __FUNCTION__,
                         pt->live_idx, get_where_app_pc(inst), get_register_name(reg));
                     spill_reg(drcontext, pt, reg, tmp_slot, bb, inst);
+                    instr_set_note(instr_get_prev(inst), TOOL_VALUE_NOTE);
                     restore_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, bb, inst,
                                 false /*keep slot*/);
                     restore_reg(drcontext, pt, reg, tmp_slot, bb, next,
                                 false /*see release_tmp_slots()*/);
+                    instr_set_note(next == NULL ? instrlist_last(bb)
+                                                : instr_get_prev(next),
+                                   TOOL_VALUE_NOTE);
                     hold_tmp_slot(pt, tmp_slot);
                     /* Share the tool val spill if this inst writes too */
                     if (regs_restored != NULL)
@@ -756,6 +767,7 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                                            "failed to preserve tool val wrt app write");
                     }
                     spill_reg(drcontext, pt, reg, tmp_slot, bb, inst);
+                    instr_set_note(instr_get_prev(inst), TOOL_VALUE_NOTE);
                 }
                 /* If the instr reads and writes both, make sure that the app-spill
                  * instr is added **before** the tool-restore instrs added by
@@ -782,6 +794,9 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                 if (!restored_for_read[GPR_IDX(reg)]) {
                     restore_reg(drcontext, pt, reg, tmp_slot, bb, next /*after*/,
                                 false /*see release_tmp_slots()*/);
+                    instr_set_note(next == NULL ? instrlist_last(bb)
+                                                : instr_get_prev(next),
+                                   TOOL_VALUE_NOTE);
                     hold_tmp_slot(pt, tmp_slot);
                 }
             }
@@ -2441,9 +2456,13 @@ drreg_event_restore_state_with_ilist(void *drcontext, bool restore_memory,
          */
         /* DR's own mangling (which has a translation) can use the DR slots that
          * we also use once we run out of ours: only consider tool instrs.
+         * The spill and restore of a tool value around an app instr do not pair
+         * with the app value's: if no restore of the app value follows (the app
+         * overwrites the register after its unreservation), we would take the
+         * tool value's restore for the end of the spill at a fault on that instr.
          */
         if (!instr_is_app(inst) && instr_get_app_pc(inst) == NULL &&
-            !IS_GET_APP_VALUE_NOTE(inst)) {
+            !IS_GET_APP_VALUE_NOTE(inst) && instr_get_note(inst) != TOOL_VALUE_NOTE) {
             if (is_our_spill_or_restore(drcontext, inst, &spill, &reg, &slot, NULL)) {
                 if (!spill) {
                     /* If we find a restore for app aflags/gpr, we'll record it now. While

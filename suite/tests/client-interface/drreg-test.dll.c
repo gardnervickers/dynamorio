@@ -1076,6 +1076,25 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
                       DRREG_SUCCESS,
                   "cannot unreserve register");
         }
+    } else if (subtest == DRREG_TEST_39_C) {
+        /* The faulting app instr reads the reserved reg, so drreg moves the tool
+         * value aside around it.  The app overwrites the reg after we unreserve it,
+         * so drreg never restores it.
+         */
+        dr_log(drcontext, DR_LOG_ALL, 1, "drreg test #39\n");
+        if (instr_is_nop(inst)) {
+            CHECK(drreg_reserve_register(drcontext, bb, inst, &allowed_test_reg_1,
+                                         &reg) == DRREG_SUCCESS,
+                  "cannot reserve register");
+            instrlist_meta_preinsert(bb, inst,
+                                     XINST_CREATE_load_int(drcontext,
+                                                           opnd_create_reg(TEST_REG),
+                                                           OPND_CREATE_INT32(MAGIC_VAL)));
+        } else if (instr_is_mov_constant(inst, &val) &&
+                   val == TEST_INSTRUMENTATION_MARKER_1) {
+            res = drreg_unreserve_register(drcontext, bb, inst, TEST_REG);
+            CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
+        }
     }
 #ifdef X86
     drvector_delete(&allowed_test_reg_xax);
@@ -1115,7 +1134,7 @@ event_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
         subtest == DRREG_TEST_31_C || subtest == DRREG_TEST_32_C ||
         subtest == DRREG_TEST_33_C || subtest == DRREG_TEST_34_C ||
         subtest == DRREG_TEST_35_C || subtest == DRREG_TEST_36_C ||
-        subtest == DRREG_TEST_37_C) {
+        subtest == DRREG_TEST_37_C || subtest == DRREG_TEST_39_C) {
         return DR_EMIT_DEFAULT;
     }
 

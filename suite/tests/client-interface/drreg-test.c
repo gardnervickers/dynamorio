@@ -97,6 +97,8 @@ void
 test_asm_fault_restore_multi_phase_gpr_nested_spill_regions_insertion_outer();
 void
 test_asm_fault_restore_multi_phase_aflags_nested_spill_regions_insertion_outer();
+void
+test_asm_fault_restore_gpr_tool_value_moved_for_read();
 
 static SIGJMP_BUF mark;
 
@@ -344,6 +346,17 @@ handle_signal_nested_gpr_aflags_spill_insertion_outer(int signal, siginfo_t *sig
     SIGLONGJMP(mark, 1);
 }
 
+static void
+handle_signal_gpr_tool_value_moved(int signal, siginfo_t *siginfo, ucontext_t *ucxt)
+{
+    if (signal == SIGSEGV) {
+        sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+        if (sc->TEST_REG_SIG != DRREG_TEST_39_C)
+            print("ERROR: spilled register value was not preserved in test #39!\n");
+    }
+    SIGLONGJMP(mark, 1);
+}
+
 #    elif defined(WINDOWS)
 #        include <windows.h>
 static LONG WINAPI
@@ -551,6 +564,16 @@ handle_exception_nested_gpr_aflags_spill_insertion_outer(struct _EXCEPTION_POINT
     } else if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         if (!TESTALL(DRREG_TEST_AFLAGS_C, ep->ContextRecord->CXT_XFLAGS))
             print("ERROR: spilled flags value was not preserved in test #37!\n");
+    }
+    SIGLONGJMP(mark, 1);
+}
+
+static LONG WINAPI
+handle_exception_gpr_tool_value_moved(struct _EXCEPTION_POINTERS *ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        if (ep->ContextRecord->TEST_REG_CXT != DRREG_TEST_39_C)
+            print("ERROR: spilled register value was not preserved in test #39!\n");
     }
     SIGLONGJMP(mark, 1);
 }
@@ -854,6 +877,19 @@ main(int argc, const char *argv[])
      */
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_multi_phase_aflags_nested_spill_regions_insertion_outer();
+    }
+
+#    if defined(UNIX)
+    intercept_signal(SIGSEGV, (handler_3_t)&handle_signal_gpr_tool_value_moved, false);
+#    elif defined(WINDOWS)
+    SetUnhandledExceptionFilter(&handle_exception_gpr_tool_value_moved);
+#    endif
+
+    /* Test fault reg restore at an app read of a reserved reg, which drreg never
+     * restores afterward because the app overwrites it after its unreservation.
+     */
+    if (SIGSETJMP(mark) == 0) {
+        test_asm_fault_restore_gpr_tool_value_moved_for_read();
     }
 
     /* XXX i#511: add more fault tests and other tricky corner cases */
@@ -2883,6 +2919,66 @@ GLOBAL_LABEL(FUNCNAME:)
 
         b        epilog37
     epilog37:
+        ret
+#endif
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+
+#define FUNCNAME test_asm_fault_restore_gpr_tool_value_moved_for_read
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+#ifdef X86
+        PUSH_CALLEE_SAVED_REGS()
+        sub      REG_XSP, FRAME_PADDING /* align */
+        END_PROLOG
+
+        jmp      test39
+     test39:
+        mov      TEST_REG_ASM, DRREG_TEST_39_ASM
+        mov      TEST_REG_ASM, DRREG_TEST_39_ASM
+        nop
+
+        mov      REG_XCX, 0
+        mov      REG_XCX, PTRSZ [REG_XCX + TEST_REG_ASM] /* crash */
+
+        /* Overwrite reg so that it is not restored. */
+        mov      TEST_REG_ASM, TEST_INSTRUMENTATION_MARKER_1
+        jmp      epilog39
+     epilog39:
+        add      REG_XSP, FRAME_PADDING /* make a legal SEH64 epilog */
+        POP_CALLEE_SAVED_REGS()
+        ret
+#elif defined(ARM)
+        /* XXX i#3289: prologue missing */
+        b        test39
+     test39:
+        movw     TEST_REG_ASM, DRREG_TEST_39_ASM
+        movw     TEST_REG_ASM, DRREG_TEST_39_ASM
+        nop
+
+        mov      r0, HEX(0)
+        ldr      r0, PTRSZ [r0, TEST_REG_ASM] /* crash */
+
+        /* Overwrite reg so that it is not restored. */
+        movw     TEST_REG_ASM, TEST_INSTRUMENTATION_MARKER_1
+        b        epilog39
+    epilog39:
+        bx       lr
+#elif defined(AARCH64)
+        /* XXX i#3289: prologue missing */
+        b        test39
+     test39:
+        movz     TEST_REG_ASM, DRREG_TEST_39_ASM
+        movz     TEST_REG_ASM, DRREG_TEST_39_ASM
+        nop
+
+        mov      x0, HEX(0)
+        ldr      x0, PTRSZ [x0, TEST_REG_ASM] /* crash */
+
+        /* Overwrite reg so that it is not restored. */
+        movz     TEST_REG_ASM, TEST_INSTRUMENTATION_MARKER_1
+        b        epilog39
+    epilog39:
         ret
 #endif
         END_FUNC(FUNCNAME)
