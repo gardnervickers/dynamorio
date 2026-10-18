@@ -1,5 +1,12 @@
+failure cases ok
 ITIMER_REAL: signal count ok
 ITIMER_VIRTUAL: signals delivered
 ITIMER_PROF: signals delivered
 values ok
-client timers fired
+faulting buffer ok
+ITIMER_REAL: setters ok
+ITIMER_VIRTUAL: setters ok
+ITIMER_PROF: setters ok
+disarmed timers quiet
+client timers kept firing
+client suspended threads

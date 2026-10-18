@@ -9826,6 +9826,10 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
     if (invoke_cb) {
         /* Keep the original interrupted context and signal-handler invocation,
          * but no timer lock or transaction mask across arbitrary client code.
+         * This means the callback can run after another thread disabled or
+         * replaced this timer (as documented for dr_set_itimer()), and cb and
+         * cb_api are the ones we read under the lock, not necessarily the current
+         * ones.
          */
         dr_mcontext_t dmc;
         dr_mcontext_init(&dmc);
