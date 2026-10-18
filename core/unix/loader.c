@@ -2211,7 +2211,32 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
      */
     set_app_args((int *)argc, argv);
 
-    success = elf_loader_read_headers(&exe_ld, exe_path);
+    /* Only Seedbox's initial launch supplies this private read descriptor.
+     * Keep its original across a DR address-conflict reload, while each loader
+     * instance owns a duplicate. Close both before client or application entry. */
+    const char *handoff = getenv("SEEDBOX_DR_EXECUTABLE_FD");
+    file_t executable_fd = INVALID_FILE;
+    if (handoff != NULL) {
+        const char *digit = handoff;
+        uint number = 0;
+        bool valid = *digit != '\0';
+        for (; *digit != '\0'; ++digit) {
+            if (*digit < '0' || *digit > '9' || number > (INT_MAX - 9) / 10) {
+                valid = false;
+                break;
+            }
+            number = number * 10 + (*digit - '0');
+        }
+        apicheck(valid && number > 2, "Invalid Seedbox executable descriptor");
+        executable_fd = (file_t)number;
+        memset(&exe_ld, 0, sizeof(exe_ld));
+        exe_ld.filename = exe_path;
+        exe_ld.fd = (file_t)dynamorio_syscall(SYS_dup, 1, executable_fd);
+        success = exe_ld.fd != INVALID_FILE && os_seek(exe_ld.fd, 0, SEEK_SET) &&
+            elf_loader_read_ehdr(&exe_ld) != NULL &&
+            elf_loader_read_phdrs(&exe_ld) != NULL;
+    } else
+        success = elf_loader_read_headers(&exe_ld, exe_path);
     apicheck(success,
              "Failed to read app ELF headers.  Check path and "
              "architecture.");
@@ -2331,6 +2356,28 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
     privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, exe_path);
 
     elf_loader_destroy(&exe_ld);
+    if (executable_fd != INVALID_FILE) {
+        os_close(executable_fd);
+        /* The application receives this original kernel stack, not a libc
+         * environment copy. Removing an entry must move the trailing auxv too,
+         * or its startup code would read the old terminating NULL as AT_NULL. */
+        char **slot = envp;
+        while (*slot != NULL) {
+            if (strncmp(*slot, "SEEDBOX_DR_EXECUTABLE_FD=", 25) == 0) {
+                char **end = slot;
+                while (*end != NULL)
+                    ++end;
+                ELF_AUXV_TYPE *auxv = (ELF_AUXV_TYPE *)(end + 1);
+                ELF_AUXV_TYPE *auxv_end = auxv;
+                while (auxv_end->a_type != AT_NULL)
+                    ++auxv_end;
+                ++auxv_end;
+                memset(*slot, 0, strlen(*slot));
+                memmove(slot, slot + 1, (byte *)auxv_end - (byte *)(slot + 1));
+            } else
+                ++slot;
+        }
+    }
 
     /* Initialize the rest of DR *after* we map the app and interp images.  This is
      * consistent with our old behavior, and allows the client to do things like call

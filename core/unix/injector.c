@@ -70,6 +70,8 @@
 #include <stdio.h>
 #include <string.h> /* for strerror */
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <limits.h>
 #include <sys/ptrace.h>
 #if defined(LINUX) && defined(AARCH64)
 #    include <linux/ptrace.h> /* for struct user_pt_regs */
@@ -455,7 +457,30 @@ static platform_status_t
 module_get_platform_path(const char *exe_path, dr_platform_t *platform,
                          dr_platform_t *alt_platform)
 {
-    file_t fd = os_open(exe_path, OS_OPEN_READ);
+    file_t fd;
+    const char *handoff = getenv("SEEDBOX_DR_EXECUTABLE_FD");
+    if (handoff != NULL) {
+        /* Seedbox PID1 authorized the target under its final credentials and
+         * opened this same inode while privileged. Never substitute another
+         * path or retain the readable descriptor in application code. */
+        char *end;
+        long inherited = strtol(handoff, &end, 10);
+        struct stat opened, selected;
+        if (*handoff == '\0' || *end != '\0' || inherited <= 2 ||
+            inherited > INT_MAX || fstat((int)inherited, &opened) != 0 ||
+            stat(exe_path, &selected) != 0 || !S_ISREG(opened.st_mode) ||
+            opened.st_dev != selected.st_dev || opened.st_ino != selected.st_ino ||
+            access(exe_path, X_OK) != 0) {
+            errno = EACCES;
+            return PLATFORM_ERROR_CANNOT_OPEN;
+        }
+        fd = dup((int)inherited);
+        if (fd != INVALID_FILE && lseek(fd, 0, SEEK_SET) < 0) {
+            close(fd);
+            fd = INVALID_FILE;
+        }
+    } else
+        fd = os_open(exe_path, OS_OPEN_READ);
     platform_status_t res = PLATFORM_SUCCESS;
     if (fd == INVALID_FILE)
         res = PLATFORM_ERROR_CANNOT_OPEN;
