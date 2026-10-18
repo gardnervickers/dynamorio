@@ -104,7 +104,7 @@ set(main_run_list
   "SHORT::-code_api"
   # no_intercept_all_signals tests.
   # TODO i#5261: Remove this suite when -intercept_all_signals is deprecated.
-  "SHORT::LIN::ONLY::sigaction$::-no_code_api -no_intercept_all_signals"
+  "SHORT::LIN::ONLY::sigaction$|signal_waits_single$|signal_racesys$::-no_code_api -no_intercept_all_signals"
   # sanity check: run single app to make sure these options aren't totally broken
   # i#1575: ARM doesn't yet support -coarse_units
   "SHORT::X86::ONLY::client.events$::-code_api -opt_memory"
@@ -5521,6 +5521,16 @@ if (UNIX)
     endif ()
     tobuild(linux.signal_racesys linux/signal_racesys.c)
     target_link_libraries(linux.signal_racesys rt)
+    tobuild(linux.signal_waits linux/signal_waits.c)
+    target_link_libraries(linux.signal_waits rt)
+    link_with_pthread(linux.signal_waits)
+    # Without its other thread, for -no_intercept_all_signals (see main_run_list).
+    torunonly(linux.signal_waits_single linux.signal_waits linux/signal_waits.c ""
+      "noflush")
+    # Each unmap of code its other thread ran resets DR's caches, suspending this
+    # thread in its waits, which DR then issues again.
+    torunonly(linux.signal_waits_reset linux.signal_waits linux/signal_waits.c
+      "-enable_reset -reset_every_nth_pending 1" "")
 
     tobuild(linux.signal_pre_syscall linux/signal_pre_syscall.c)
     target_link_libraries(linux.signal_pre_syscall rt)

@@ -6156,6 +6156,21 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                     orig_retval_reg = sc->SC_RETURN_REG;
                     syscall_not_issued = true;
                 }
+            } else if (is_after_syscall_address(dcontext, pc + syslen) &&
+                       os_syscall_unissued_at_syscall_instr(
+                           dcontext, sc->SC_SYSNUM_REG,
+                           IF_AARCH64_ELSE(sc->regs[1], sc->SC_XSI),
+                           IF_AARCH64_ELSE(sc->regs[3], sc->SC_R10))) {
+                /* At the syscall instruction of a sleep on its first attempt: the
+                 * kernel never puts one back there, so it was not issued yet.
+                 * Restart it after the handler, as natively it runs after a signal
+                 * that arrives before it, rather than failing it with EINTR without
+                 * its remaining time.
+                 */
+                LOG(THREAD, LOG_ASYNCH, 2,
+                    "signal %d at the syscall instruction of unissued syscall %d\n", sig,
+                    dcontext->sys_num);
+                syscall_not_issued = true;
             }
 #endif
             if (is_after_syscall_address(dcontext, pc + syslen) &&
@@ -10190,6 +10205,7 @@ restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
         return;
     LOG(THREAD, LOG_ASYNCH, 2, "restarting syscall %d interrupted by our signal\n",
         dcontext->sys_num);
+    os_syscall_note_reissue(dcontext);
 #        ifdef AARCH64
     sc->SC_RETURN_REG = x0;
     if (param > 0)

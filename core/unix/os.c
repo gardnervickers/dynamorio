@@ -5690,16 +5690,22 @@ os_syscall_restart_pre(dcontext_t *dcontext)
     int ts_param = -1; /* The parameter holding a relative timespec timeout. */
     ostd->syscall_restart_param = -1;
     ostd->syscall_timeout_valid = false;
+    ostd->syscall_reissued_by_us = false;
+    ostd->syscall_rem = NULL;
     switch (dcontext->sys_num) {
 #    ifdef SYS_nanosleep
     case SYS_nanosleep:
         relative = true;
         ts_param = 0;
+        ostd->syscall_rem = (struct timespec *)sys_param(dcontext, 1);
         break;
 #    endif
     case SYS_clock_nanosleep:
         relative = !TESTANY(RESTART_TIMER_ABSTIME, (int)sys_param(dcontext, 1));
         ts_param = 2;
+        /* An absolute sleep does not fill in its remaining time. */
+        if (relative)
+            ostd->syscall_rem = (struct timespec *)sys_param(dcontext, 3);
         break;
     case SYS_futex:
         relative = ((int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK) ==
@@ -5723,6 +5729,10 @@ os_syscall_restart_pre(dcontext_t *dcontext)
         break;
     default: break;
     }
+    if (ostd->syscall_rem != NULL &&
+        !d_r_safe_read(ostd->syscall_rem, sizeof(ostd->syscall_rem_value),
+                       &ostd->syscall_rem_value))
+        ostd->syscall_rem = NULL;
     if (relative) {
         ostd->syscall_start_ns = restart_clock_ns();
         struct timespec ts;
@@ -5864,6 +5874,47 @@ os_syscall_fail_eintr(dcontext_t *dcontext)
     DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
 }
 
+/* Returns whether a signal that finds the syscall about to run at its syscall
+ * instruction, with the live syscall number and arguments sysnum, arg1 and arg3,
+ * must have arrived before the kernel entered it.  The kernel puts a thread back at
+ * the instruction to restart an interrupted syscall only for the -ERESTARTSYS,
+ * -ERESTARTNOINTR and (without a handler) -ERESTARTNOHAND results.  These sleeps
+ * give none of them: an interrupted one fails with EINTR with a handler, or
+ * becomes restart_syscall after a stop (-ERESTART_RESTARTBLOCK).  We put the
+ * thread back there ourselves to issue a syscall again after our own signal
+ * (restart_syscall_interrupted_by_us()), with its timeout already advanced.
+ */
+bool
+os_syscall_unissued_at_syscall_instr(dcontext_t *dcontext, reg_t sysnum, reg_t arg1,
+                                     reg_t arg3)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (sysnum != (reg_t)dcontext->sys_num || ostd->syscall_reissued_by_us)
+        return false;
+    switch (dcontext->sys_num) {
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep: return true;
+#    endif
+    /* An absolute sleep gives -ERESTARTNOHAND. */
+    case SYS_clock_nanosleep: return !TESTANY(RESTART_TIMER_ABSTIME, (int)arg1);
+    case SYS_futex: {
+        int cmd = (int)arg1 & RESTART_FUTEX_CMD_MASK;
+        /* Without a timeout an interrupted wait gives -ERESTARTSYS. */
+        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
+            arg3 != 0;
+    }
+    default: return false;
+    }
+}
+
+/* restart_syscall_interrupted_by_us() is issuing the current syscall again. */
+void
+os_syscall_note_reissue(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    ostd->syscall_reissued_by_us = true;
+}
+
 /* For a syscall at our do_syscall gencode that returned -EINTR because our suspend
  * signal interrupted it, returns whether to issue it again, with *x0 the first
  * argument and, if *param > 0, argument *param replaced by *value.  The caller
@@ -5979,6 +6030,15 @@ os_syscall_restart_post(dcontext_t *dcontext)
                           ostd->syscall_restart_app_value);
         ostd->syscall_restart_param = -1;
     }
+    if (ostd->syscall_reissued_by_us && ostd->syscall_rem != NULL &&
+        MCXT_SYSCALL_RES(get_mcontext(dcontext)) == 0) {
+        /* The sleep completed after we issued it again: undo the kernel's update
+         * of its remaining time when our signal interrupted it.
+         */
+        safe_write_ex(ostd->syscall_rem, sizeof(ostd->syscall_rem_value),
+                      &ostd->syscall_rem_value, NULL);
+    }
+    ostd->syscall_rem = NULL;
 }
 #endif /* LINUX */
 

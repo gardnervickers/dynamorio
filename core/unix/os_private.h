@@ -247,6 +247,16 @@ typedef struct _os_thread_data_t {
     bool syscall_timeout_valid;
     struct timespec syscall_restart_timeout;
     int syscall_restart_param;
+    /* Whether we issued the current syscall again after our own signal interrupted
+     * it (restart_syscall_interrupted_by_us()): cleared by os_syscall_restart_pre().
+     */
+    bool syscall_reissued_by_us;
+    /* A sleep's remaining-time buffer and what it held before the sleep: the
+     * kernel fills it in when our signal interrupts the sleep, but a sleep we
+     * issue again and that completes must leave it as natively.
+     */
+    struct timespec *syscall_rem;
+    struct timespec syscall_rem_value;
     reg_t syscall_restart_app_value;
 #endif
 #ifdef X86
