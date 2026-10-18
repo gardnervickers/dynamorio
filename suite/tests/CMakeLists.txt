@@ -3455,6 +3455,12 @@ if (NOT ANDROID AND NOT APPLE AND NOT RISCV64)
     tobuild_api(api.static_signal api/static_signal.c "" "" OFF ON OFF)
     target_link_libraries(api.static_signal ${libmath})
     link_with_pthread(api.static_signal)
+    if (AARCH64 AND LINUX)
+      # PSTATE.DIT of a thread that another thread's detach translates while it
+      # waits at a safe spot in d_r_dispatch.
+      tobuild_api(api.a64_detach_dit api/a64_detach_dit.c "" "" OFF ON OFF)
+      link_with_pthread(api.a64_detach_dit)
+    endif ()
     # i#2119: test invoking the app's handler on a DR fault.
     tobuild_api(api.static_crash api/static_crash.c "-unsafe_crash_process" "" OFF ON OFF)
     target_link_libraries(api.static_crash ${libmath})
