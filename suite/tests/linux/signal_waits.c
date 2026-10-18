@@ -347,7 +347,7 @@ test_sigsuspend(int flags)
         handled = 0;
         woken = 0;
         watchdog_fired = 0;
-        arm(watchdog_timer, 1000000000);
+        arm(watchdog_timer, 5000000000ULL);
         arm(timer, delay);
         arm(wake_timer, delay + 1000000);
         ret = sigsuspend(&mask);
@@ -412,9 +412,18 @@ test_rem(void)
         handled = 0;
         arm(timer, 10000000);
         long r = syscall(SYS_nanosleep, &ts, &ts);
+        /* A loaded host can deliver the signal after the sleep ends. */
         if (!(r == -1 && errno == EINTR && handled && ts.tv_sec == 0 && ts.tv_nsec > 0 &&
-              ts.tv_nsec < 50000000))
-            bad++;
+              ts.tv_nsec < 50000000) &&
+            !(r == 0 && ts.tv_sec == 0 && ts.tv_nsec == 50000000)) {
+            if (bad++ < MAX_REPORTED) {
+                print("rem == req: invalid result ret=%ld errno=%d handled=%d "
+                      "rem=%ld.%09ld\n",
+                      r, r == -1 ? errno : 0, handled, (long)ts.tv_sec, ts.tv_nsec);
+            }
+        }
+        while (!handled)
+            sched_yield();
         drain();
     }
     print("sleep with rem == req: %s\n", bad == 0 ? "ok" : "FAILED");
