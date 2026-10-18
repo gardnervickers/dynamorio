@@ -7684,15 +7684,22 @@ os_switch_seg_to_context(dcontext_t *dcontext, reg_id_t seg, bool to_app)
              */
             app_mem_valid = false;
         } else {
-            uint prot;
-            bool rc = get_memory_info(os_tls->app_lib_tls_base, NULL, NULL, &prot);
             /* Rule out a garbage value, which happens in our own test
              * common.allasm_aarch_isa.
              * Also rule out an unwritable region, which seems to happen on arm
              * where at process init the thread reg points at rodata in libc
              * until properly set to a writable mmap later.
+             * We ask /proc/self/maps alone and do not read the memory:
+             * get_memory_info() can also read the start of the mapping looking for
+             * an ELF header, which faults with SIGBUS beyond the end of a mapped
+             * file (and is done even on a cache hit at -checklevel 2), and
+             * sig_detach() calls us with SIGBUS blocked.  This takes
+             * memory_info_buf_lock, as get_memory_info() could.
              */
-            if (!rc || !TESTALL(MEMPROT_READ | MEMPROT_WRITE, prot))
+            dr_mem_info_t info;
+            bool have_type;
+            if (!memquery_from_os(os_tls->app_lib_tls_base, &info, &have_type) ||
+                !TESTALL(MEMPROT_READ | MEMPROT_WRITE, info.prot))
                 app_mem_valid = false;
         }
         if (!app_mem_valid) {
