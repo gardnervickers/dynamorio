@@ -342,7 +342,9 @@ memquery_library_bounds(const char *name, app_pc *start /*IN/OUT*/, app_pc *end 
  * QUERY
  */
 
-/* Adds what the maps file's prot for the region [start, end) named name leaves out. */
+/* Returns prot, the maps file's protection of the region named name that contains pc,
+ * plus what the file leaves out for the vdso and vvar pages.
+ */
 static uint
 memquery_adjust_prot(const byte *pc, uint prot, const char *name)
 {
