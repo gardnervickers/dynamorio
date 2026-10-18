@@ -67,6 +67,13 @@ Driver/guest qualification.
 Empty/missing/disabled required tests fail selection. The exact inventory and
 selection are retained. CTest has a 900-second default per-test timeout and a
 90-minute aggregate bound; explicit upstream timeouts can take precedence.
+Inventory discovery has a separate 60-second bound. Each command runs in a
+private Linux session. On completion or failure, cleanup sends TERM to that
+session's groups, waits up to five seconds for the leader, then sends KILL to
+remaining groups with a five-second cleanup bound. It tracks session membership
+through `/proc`, including groups created by `drrun -killpg` and descendants
+whose leader already exited. Exit notifications bound waiting; a deadline is
+reported as an error. This does not signal processes outside the owned session.
 No retries, failure allowlists or `continue-on-error` are used. JUnit must
 contain every selected test exactly once, with passing status and no skip,
 failure or error. `api.detach_signal` stays required even if it fails.
