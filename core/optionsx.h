@@ -1849,6 +1849,13 @@ OPTION_DEFAULT(bool, disable_rseq, false,
                "cause the restartable sequence SYS_rseq "
                "system call to return -ENOSYS as a workaround for rseq features not "
                "supportable by DR")
+/* Ask the kernel about the region containing an address with the PROCMAP_QUERY
+ * ioctl (Linux 6.11+) rather than by reading /proc/self/maps.  DR falls back to
+ * reading the file if the kernel rejects the ioctl, but a seccomp filter that
+ * kills or traps unknown ioctls would not let it: turn this off there.
+ */
+OPTION_DEFAULT(bool, procmap_query, true,
+               "query memory regions with the PROCMAP_QUERY ioctl when available")
 #endif
 #ifdef UNIX
 OPTION_DEFAULT(bool, restart_syscalls, true,

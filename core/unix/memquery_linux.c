@@ -464,7 +464,7 @@ memquery_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info,
     app_pc next_start = (app_pc)POINTER_MAX;
     bool found = false;
     ASSERT(info != NULL);
-    if (!procmap_query_unsupported) {
+    if (!procmap_query_unsupported && DYNAMO_OPTION(procmap_query)) {
         bool ok;
         d_r_mutex_lock(&memory_info_buf_lock);
         ok = memquery_from_os_procmap_query(pc, info);
