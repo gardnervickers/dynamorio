@@ -46,6 +46,8 @@ on:
 
 jobs:
   aarch64-precommit:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     strategy:
       fail-fast: false
       matrix:

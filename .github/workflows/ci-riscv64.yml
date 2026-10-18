@@ -53,6 +53,8 @@ jobs:
   # We use ubuntu 24.04 because the compilition here need libunwind-riscv64 and
   # it's a stable source.
   riscv64-cross-compile:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: ubuntu-24.04
 
     steps:

@@ -1,0 +1,112 @@
+# Native user-mode DR validation; independent of Seedbox guest qualification.
+name: native DR baseline
+on:
+  # The explicit topic ref bootstraps CI without changing the default branch.
+  push:
+    branches:
+      - seedbox/ci-native-baseline
+      - seedbox/release_11.3.0-1-backports
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-dr-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native:
+    if: >-
+      github.repository == 'gardnervickers/dynamorio' &&
+      (github.ref == 'refs/heads/seedbox/ci-native-baseline' ||
+       github.ref == 'refs/heads/seedbox/release_11.3.0-1-backports')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Initialize exact public dependencies
+        run: |
+          set -euo pipefail
+          # Use DynamoRIO's GitHub elfutils mirror instead of sourceware transport.
+          git config submodule.third_party/elfutils.url https://github.com/DynamoRIO/elfutils.git
+          git submodule update --init --recursive --jobs 3
+      - name: Record and verify native inputs
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-evidence
+          {
+            uname -a
+            test "$(uname -m)" = "$EXPECTED_ARCH"
+            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+            git rev-parse HEAD
+            git submodule status --recursive | tee native-evidence/submodules.txt
+            if grep -E '^[+U-]' native-evidence/submodules.txt; then
+              echo 'Uninitialized, conflicted, or non-pinned submodule' >&2
+              exit 1
+            fi
+            lscpu
+            df -h .
+            free -h
+          } 2>&1 | tee native-evidence/inputs.log
+      - name: Install native build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-13 g++-13 cmake ninja-build \
+            perl python3 pkg-config zlib1g-dev libunwind-dev libsnappy-dev liblz4-dev libxxhash-dev
+      - name: Check CI helpers
+        run: python3 -m unittest discover -s suite/ci -p 'test_*.py' -v
+      - name: Configure extensions and tests
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: |
+          set -euo pipefail
+          cmake --version | tee native-evidence/toolchain.log
+          gcc-13 --version | tee -a native-evidence/toolchain.log
+          cmake -S . -B build-native -G Ninja -DDEBUG=OFF -DBUILD_TESTS=ON \
+            -DBUILD_EXT=ON -DBUILD_CLIENTS=ON -DBUILD_SAMPLES=OFF -DBUILD_DOCS=OFF \
+            2>&1 | tee native-evidence/configure.log
+      - name: Build all configured targets
+        run: |
+          set -euo pipefail
+          cmake --build build-native --parallel 4 2>&1 | tee native-evidence/build.log
+      - name: Smoke drrun
+        run: |
+          set -euo pipefail
+          timeout 120 build-native/bin64/drrun -- /usr/bin/echo native-dr-smoke \
+            2>&1 | tee native-evidence/smoke.log
+          grep -Fx 'native-dr-smoke' native-evidence/smoke.log
+      - name: Required native regression tests
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          python3 suite/ci/native_baseline.py build-native native-evidence "$EXPECTED_ARCH" \
+            2>&1 | tee native-evidence/tests.log
+      - name: Bound diagnostic artifacts
+        if: ${{ always() }}
+        run: python3 suite/ci/collect_native_evidence.py . native-artifact
+      - name: Preserve diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-dr-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: native-artifact/

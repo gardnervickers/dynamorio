@@ -55,6 +55,8 @@ jobs:
   ###########################################################################
   # Linux x86 tarball with 64-bit and 32-bit builds:
   linux-x86:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: ubuntu-20.04
 
     steps:
@@ -160,6 +162,8 @@ jobs:
   ###########################################################################
   # Linux AArch64 tarball:
   linux-aarch64:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: ubuntu-20.04
 
     steps:
@@ -249,6 +253,8 @@ jobs:
   ###########################################################################
   # Linux ARM tarball (package.cmake does not support same job as AArch64):
   linux-arm:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: ubuntu-20.04
 
     steps:
@@ -338,6 +344,8 @@ jobs:
   ###########################################################################
   # Android ARM tarball:
   android-arm:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: ubuntu-20.04
 
     steps:
@@ -429,6 +437,8 @@ jobs:
   ###########################################################################
   # Windows .zip with 32-bit and 64-bit x86 builds:
   windows:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: windows-2019
 
     steps:
@@ -527,6 +537,8 @@ jobs:
   # single release job via artifacts.
 
   create_release:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     needs: [linux-x86, linux-aarch64, linux-arm, android-arm, windows]
     runs-on: ubuntu-20.04
 

@@ -51,6 +51,8 @@ defaults:
 jobs:
   # 64-bit OSX build with clang and run tests:
   osx-x86-64:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: macos-13
 
     steps:

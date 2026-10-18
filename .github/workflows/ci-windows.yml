@@ -54,6 +54,8 @@ jobs:
   ###########################################################################
   # 32-bit VS2019 and tests:
   vs2019-32:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: windows-2019
 
     steps:
@@ -121,6 +123,8 @@ jobs:
   ###########################################################################
   # 64-bit VS2019 and tests:
   vs2019-64:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: windows-2019
 
     steps:
@@ -188,6 +192,8 @@ jobs:
   ###########################################################################
   # 32-bit and 64-bit VS2019 release builds:
   vs2019-builds:
+    # Upstream infrastructure and deployment are not used by this fork.
+    if: github.repository == 'DynamoRIO/dynamorio'
     runs-on: windows-2019
 
     steps:
