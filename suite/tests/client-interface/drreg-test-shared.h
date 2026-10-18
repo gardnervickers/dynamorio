@@ -71,7 +71,11 @@
 #    define TEST_REG_STOLEN_ASM x28
 #    define TEST_REG_SIG regs[4]
 #    define TEST_REG_CLEAN_CALL_MCONTEXT_SIG regs[0]
-#    define TEST_FAUX_SPILL_TLS_OFFS 0x150
+/* SPILL_SLOT_1 is the public r3 TLS slot on AArch64. Unlike a raw client
+ * TLS offset, it does not move when private state is appended to spill_state_t.
+ * The client checks this against dr_reg_spill_slot_opnd and the real spill.
+ */
+#    define TEST_FAUX_SPILL_TLS_OFFS (3 * 8)
 #endif
 
 #define TEST_FLAGS_SIG SC_XFLAGS

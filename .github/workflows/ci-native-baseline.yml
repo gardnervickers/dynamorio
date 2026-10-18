@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - seedbox/ci-native-baseline
+      - seedbox/drreg-faux-tls
       - seedbox/release_11.3.0-1-backports
   workflow_dispatch:
 permissions:
@@ -17,6 +18,7 @@ jobs:
     if: >-
       github.repository == 'gardnervickers/dynamorio' &&
       (github.ref == 'refs/heads/seedbox/ci-native-baseline' ||
+       github.ref == 'refs/heads/seedbox/drreg-faux-tls' ||
        github.ref == 'refs/heads/seedbox/release_11.3.0-1-backports')
     strategy:
       fail-fast: false

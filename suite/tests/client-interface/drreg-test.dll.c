@@ -735,6 +735,14 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         if (instr_is_mov_constant(inst, &val) && val == TEST_INSTRUMENTATION_MARKER_1) {
             tls_offs_test_reg_1 = spill_test_reg_to_slot(drcontext, bb, inst, TEST_REG,
                                                          &allowed_test_reg_1, true);
+            /* The faux app load must look like a restore from a public drreg
+             * fallback slot, but not the slot holding TEST_REG's real app value.
+             * A raw client TLS offset is layout-dependent and can alias that slot.
+             */
+            opnd_t faux_slot = dr_reg_spill_slot_opnd(drcontext, SPILL_SLOT_1);
+            CHECK(opnd_get_base(faux_slot) == TEST_REG_STOLEN &&
+                      opnd_get_disp(faux_slot) == TEST_FAUX_SPILL_TLS_OFFS,
+                  "faux restore must address the public r3 TLS slot");
             CHECK(tls_offs_test_reg_1 != TEST_FAUX_SPILL_TLS_OFFS, "unexpected tls offs");
         } else if (instr_is_mov_constant(inst, &val) &&
                    val == TEST_INSTRUMENTATION_MARKER_2) {

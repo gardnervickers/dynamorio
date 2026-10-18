@@ -2889,11 +2889,10 @@ GLOBAL_LABEL(FUNCNAME:)
 #undef FUNCNAME
 
 START_DATA
-    /* Should be atleast (TEST_FAUX_SPILL_TLS_OFFS+1)*8 bytes.
-     * Cannot use the macro as the expression needs to be
-     * absolute.
-     */
-    BYTES_ARR(some_data, (1000+1)*8)
+#ifdef AARCH64
+    /* The displacement is in bytes; include the complete pointer-sized load. */
+    BYTES_ARR(some_data, TEST_FAUX_SPILL_TLS_OFFS + 8)
+#endif
 END_FILE
 #endif
 /* clang-format on */
