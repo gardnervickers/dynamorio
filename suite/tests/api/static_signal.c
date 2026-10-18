@@ -46,10 +46,14 @@
 #include <sys/time.h> /* itimer */
 
 #define ALT_STACK_SIZE (SIGSTKSZ * 2)
+/* Each round of do_some_work() is at least about 1ms of CPU time. */
+#define MAX_WORK_ROUNDS 5000
 
 static int num_bbs;
 static int num_signals;
 static int num_alarm_signals;
+/* Written by the client's itimer callback, read by the app. */
+static volatile int num_samples;
 
 static void *thread_ready;
 static void *thread_exit;
@@ -114,6 +118,7 @@ event_sample(void *drcontext, dr_mcontext_t *mcontext)
     void *tag;
     dr_where_am_i_t whereami = dr_where_am_i(drcontext, mcontext->pc, &tag);
     buckets[whereami]++;
+    num_samples++;
     DR_ASSERT(mcontext->pc != NULL &&
               /* Ensure DR wrote the value and it's not the uninit 0xab pattern. */
               mcontext->pc != (app_pc)IF_X64_ELSE(0xabababababababab, 0xabababab));
@@ -230,8 +235,15 @@ main(int argc, const char *argv[])
     wait_cond_var(got_alarm_signal);
     reset_cond_var(got_alarm_signal);
 
-    if (do_some_work() < 0)
-        print("error in computation\n");
+    /* The client's ITIMER_VIRTUAL expires after 10ms of the process's user CPU
+     * time, more than one round of work takes on a fast machine (2-4ms on
+     * AArch64): keep working until a sample arrives.  The bound keeps a missing
+     * sample a failure (in event_exit()) rather than a hang.
+     */
+    for (int r = 0; r < MAX_WORK_ROUNDS && (r == 0 || num_samples == 0); ++r) {
+        if (do_some_work() < 0)
+            print("error in computation\n");
+    }
 
     print("Sending SIGUSR1 under DR\n");
     pthread_kill(thread, SIGUSR1);
