@@ -484,6 +484,10 @@ receive_pending_signal(dcontext_t *dcontext);
 bool
 os_syscall_is_wait_to_deliver_before(dcontext_t *dcontext);
 bool
+os_syscall_is_masked_wait(dcontext_t *dcontext);
+void
+os_syscall_fail_eintr(dcontext_t *dcontext);
+bool
 os_syscall_may_wait_restartably(int sysnum, reg_t arg0);
 bool
 is_signal_restorer_code(byte *pc, size_t *len);

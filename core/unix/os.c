@@ -5821,15 +5821,47 @@ os_syscall_is_wait_to_deliver_before(dcontext_t *dcontext)
 #    ifdef SYS_epoll_wait
     case SYS_epoll_wait: return true;
 #    endif
+    /* The app's mask argument, saved by the pre-syscall handler: the register may
+     * hold the mask we pass the kernel instead, or NULL.
+     */
     case SYS_epoll_pwait:
 #    ifdef SYS_epoll_pwait2
     case SYS_epoll_pwait2:
 #    endif
-        return sys_param(dcontext, 4) == 0;
-    case SYS_ppoll: return sys_param(dcontext, 3) == 0;
     case SYS_pselect6: return dcontext->sys_param4 == 0;
+    case SYS_ppoll: return dcontext->sys_param3 == 0;
     default: return false;
     }
+}
+
+/* Returns whether the syscall about to run is a wait with a temporary signal mask
+ * that its pre-syscall handler installed (ppoll, pselect6, epoll_pwait{,2}).  A
+ * signal pending as we issue one fails it with EINTR, as natively for a signal
+ * pending at its entry: handle_system_call() and is_before_do_syscall().
+ */
+bool
+os_syscall_is_masked_wait(dcontext_t *dcontext)
+{
+    switch (dcontext->sys_num) {
+    case SYS_epoll_pwait:
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
+    case SYS_pselect6: return dcontext->sys_param4 != 0;
+    case SYS_ppoll: return dcontext->sys_param3 != 0;
+    default: return false;
+    }
+}
+
+static inline void
+set_failure_return_val(dcontext_t *dcontext, uint errno_val);
+
+/* Makes the syscall about to run return EINTR without running. */
+void
+os_syscall_fail_eintr(dcontext_t *dcontext)
+{
+    set_failure_return_val(dcontext, EINTR);
+    DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
 }
 
 /* For a syscall at our do_syscall gencode that returned -EINTR because our suspend

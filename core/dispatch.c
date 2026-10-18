@@ -2138,6 +2138,7 @@ handle_system_call(dcontext_t *dcontext)
         set_at_syscall(dcontext, true);
         KSTART_DC(dcontext, syscall_fcache); /* stopped in dispatch_exit_fcache_stats */
         bool is_ignorable = ignorable_system_call(sysnum, NULL, dcontext);
+        IF_LINUX(bool fail_masked_wait = false;)
         do {
 #ifdef UNIX
             /* It is difficult to undo some pre-syscall handling, especially for
@@ -2162,6 +2163,16 @@ handle_system_call(dcontext_t *dcontext)
                  */
                 if (IF_LINUX_ELSE(os_syscall_is_wait_to_deliver_before(dcontext), false))
                     break;
+#    ifdef LINUX
+                /* A wait with a temporary mask fails with EINTR when a signal is
+                 * pending at its entry, as its pre-syscall handler does for one
+                 * pending when it installs the mask.
+                 */
+                if (os_syscall_is_masked_wait(dcontext)) {
+                    fail_masked_wait = true;
+                    break;
+                }
+#    endif
                 dcontext->signals_pending = -1;
             }
 #    endif
@@ -2178,8 +2189,21 @@ handle_system_call(dcontext_t *dcontext)
                 break;
 #endif
         } while (repeat);
+#ifdef LINUX
+        if (fail_masked_wait) {
+            LOG(THREAD, LOG_DISPATCH, 2,
+                "Signal pending at a wait with a temporary mask: failing it\n");
+            KSTOP(syscall_fcache);
+            dcontext->whereami = DR_WHERE_DISPATCH;
+            os_syscall_fail_eintr(dcontext);
+            /* Restores the app's mask and arguments; the signal is then delivered
+             * after the syscall, with the app's mask for its frame.
+             */
+            handle_post_system_call(dcontext);
+        } else
+#endif
 #ifdef UNIX
-        if (dcontext->signals_pending != 0) {
+            if (dcontext->signals_pending != 0) {
             /* i#2019: see comments in dispatch_enter_fcache() */
             KSTOP(syscall_fcache);
             dcontext->whereami = DR_WHERE_DISPATCH;

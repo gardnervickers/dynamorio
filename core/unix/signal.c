@@ -1425,6 +1425,16 @@ signal_thread_inherit(dcontext_t *dcontext, void *clone_record)
 #endif
             /* i#61/PR 211530: the signal we use for nudges */
             info->sighand->we_intercept[NUDGESIG_SIGNUM] = true;
+            /* signal_info_init_sigaction() counted this thread as unmasking only
+             * the signals emulated before these were chosen, and its exit uncounts
+             * every emulated one.
+             */
+            for (i = 1; i <= MAX_SIGNUM; i++) {
+                if (EMULATE_SIGMASK(info, i)) {
+                    info->sighand->threads_unmasked[i] =
+                        kernel_sigismember(&info->app_sigblocked, i) ? 0 : 1;
+                }
+            }
         }
 
         /* should be 1st thread */
@@ -5570,6 +5580,14 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
         !TESTANY(SA_RESTART, info->sighand->action[sig]->flags)) {
         return false;
     }
+#ifdef LINUX
+    /* A signal with a handler ends these waits with EINTR whatever its SA_RESTART
+     * (-ERESTARTNOHAND), and restarting from sc would issue the mask argument we
+     * passed the kernel as the app's.
+     */
+    if (!not_issued && os_syscall_is_masked_wait(dcontext))
+        return false;
+#endif
     /* XXX i#1145: some syscalls are never restarted when interrupted by a signal.
      * We check those that are simple to distinguish below, but not all are.  We have
      * this under an option so it can be disabled if necessary.
@@ -5786,13 +5804,15 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
 #if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
 /* Returns whether pc is on our way from d_r_dispatch into do_syscall for a syscall
  * that we deliver pending signals before (one that is ignorable or a wait of
- * os_syscall_is_wait_to_deliver_before(): see handle_system_call()), but before
- * its syscall instruction: in fcache_enter, after its check for pending signals,
- * or in do_syscall ahead of the syscall instruction.  If so, returns that
+ * os_syscall_is_wait_to_deliver_before(): see handle_system_call()) or that a
+ * pending signal fails (*fail_eintr: a wait of os_syscall_is_masked_wait()), but
+ * before its syscall instruction: in fcache_enter, after its check for pending
+ * signals, or in do_syscall ahead of the syscall instruction.  If so, returns that
  * instruction's address in *syscall_pc.
  */
 static bool
-is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *syscall_pc)
+is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *syscall_pc,
+                     bool *fail_eintr)
 {
     generated_code_t *code = THREAD_GENCODE(dcontext);
     if (code == NULL || dcontext->next_tag != code->do_syscall)
@@ -5801,10 +5821,15 @@ is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *sysca
     if (!((pc >= code->fcache_enter && pc < code->fcache_return) ||
           (pc >= code->do_syscall && pc < svc)))
         return false;
-    if (is_sigreturn_syscall_number(dcontext->sys_num) ||
-        (!ignorable_system_call(dcontext->sys_num, NULL, dcontext) &&
-         !os_syscall_is_wait_to_deliver_before(dcontext)))
+    if (is_sigreturn_syscall_number(dcontext->sys_num))
         return false;
+    *fail_eintr = false;
+    if (!ignorable_system_call(dcontext->sys_num, NULL, dcontext) &&
+        !os_syscall_is_wait_to_deliver_before(dcontext)) {
+        if (!os_syscall_is_masked_wait(dcontext))
+            return false;
+        *fail_eintr = true;
+    }
     *syscall_pc = svc;
     return true;
 }
@@ -6091,7 +6116,8 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
              */
 #if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
             cache_pc syscall_pc;
-            if (is_before_do_syscall(dcontext, pc, syslen, &syscall_pc)) {
+            bool fail_eintr;
+            if (is_before_do_syscall(dcontext, pc, syslen, &syscall_pc, &fail_eintr)) {
                 /* The signal arrived after fcache_enter checked for pending signals,
                  * on the way to the syscall instruction.  Left queued, it would be
                  * blocked in the kernel while the syscall, e.g. a read of an empty
@@ -6120,10 +6146,16 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 dcontext->local_state->spill_space.reg_stolen = app_stolen;
                 set_sigcxt_stolen_reg(sc, tls_base);
 #    endif
-                sc->SC_XIP = (reg_t)syscall_pc;
-                pc = syscall_pc;
-                orig_retval_reg = sc->SC_RETURN_REG;
-                syscall_not_issued = true;
+                if (fail_eintr) {
+                    sc->SC_XIP = (reg_t)(syscall_pc + syslen);
+                    sc->SC_RETURN_REG = -EINTR;
+                    pc = syscall_pc + syslen;
+                } else {
+                    sc->SC_XIP = (reg_t)syscall_pc;
+                    pc = syscall_pc;
+                    orig_retval_reg = sc->SC_RETURN_REG;
+                    syscall_not_issued = true;
+                }
             }
 #endif
             if (is_after_syscall_address(dcontext, pc + syslen) &&
