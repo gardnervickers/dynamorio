@@ -2925,20 +2925,6 @@ sig_kernel_blockable(int sig)
 #endif
 }
 
-/* Whether the kernel holds sig pending for this thread while the app blocks it.
- * Not a signal of a signalfd we emulate (see signal_signalfd_in_kernel()): we
- * write that to its pipe as it arrives.
- */
-static bool
-sig_kernel_holds(thread_sig_info_t *info, int sig)
-{
-#ifdef LINUX
-    if (info->signalfd[sig] != NULL)
-        return false;
-#endif
-    return sig_kernel_blockable(sig);
-}
-
 /* Computes the kernel mask for a thread whose app mask is app_mask. */
 static void
 compute_kernel_sigmask(thread_sig_info_t *info, const kernel_sigset_t *app_mask,
@@ -2946,7 +2932,7 @@ compute_kernel_sigmask(thread_sig_info_t *info, const kernel_sigset_t *app_mask,
 {
     kernel_sigemptyset(kmask);
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (sig_kernel_holds(info, sig) &&
+        if (sig_kernel_blockable(sig) &&
             (kernel_sigismember((kernel_sigset_t *)app_mask, sig) ||
              info->sigpending[sig] != NULL))
             kernel_sigaddset(kmask, sig);
@@ -2995,13 +2981,12 @@ requeue_signal_to_process(int sig, kernel_siginfo_t *siginfo)
 static void
 block_in_kernel_ahead(dcontext_t *dcontext, const kernel_sigset_t *set)
 {
-    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     if (!DYNAMO_OPTION(intercept_all_signals) || IS_CLIENT_THREAD(dcontext))
         return;
     kernel_sigset_t kset;
     kernel_sigemptyset(&kset);
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (sig_kernel_holds(info, sig) &&
+        if (sig_kernel_blockable(sig) &&
             (set == NULL || kernel_sigismember((kernel_sigset_t *)set, sig)))
             kernel_sigaddset(&kset, sig);
     }
@@ -3321,45 +3306,103 @@ signal_syscall_kernel_sigmask(dcontext_t *dcontext)
 #endif
 }
 
-/* signalfd with -intercept_all_signals: the kernel keeps the signals the app
- * blocks pending (see signal_sync_kernel_mask()), so a real signalfd sees them,
- * except for those of !sig_kernel_blockable(), which we receive and hold
- * ourselves.  A new signalfd for any of those is instead a pipe that we write
- * them to as they arrive (handle_pre_signalfd(), notify_signalfd()), and while a
- * thread has one, the other signals of its mask reach us too (sig_kernel_holds()).
- * Returns whether to issue the syscall, with *kset the mask to pass it, or NULL to
- * pass the app's arguments through (the kernel fails invalid ones).  Returns false
- * to emulate the signalfd.
+/* Decides how the app's signalfd/signalfd4 syscall is handled, returning a
+ * SIGNALFD_ROUTE_* value.
+ *
+ * With -intercept_all_signals the kernel keeps the signals the app blocks pending
+ * (see signal_sync_kernel_mask()), so a real signalfd sees them, except those
+ * of !sig_kernel_blockable(), which we receive and hold ourselves.  By the mask,
+ * without SIGKILL and SIGSTOP (which the kernel ignores there):
+ * + only kernel-held signals, or none: a real signalfd;
+ * + only signals we hold: a pipe we write them to as they arrive
+ *   (handle_pre_signalfd(), notify_signalfd());
+ * + both: a real signalfd for the kernel-held ones (*kmask,
+ *   SIGNALFD_ROUTE_KERNEL_MASK), so it does not take our own signals from the
+ *   kernel's pending sets.
+ *   XXX i#1189: the signals we hold of such a mask never reach the fd; they wait
+ *   with us as for no signalfd (sigpending(), sigtimedwait() and unblocking see
+ *   them).  A pipe for the whole mask would have to take the kernel-held signals
+ *   from the kernel as they arrive, losing the kernel's semantics for them.
+ * Changing the mask of an existing fd to one of another kind fails with EINVAL
+ * (*error), as neither kind can become the other.  XXX i#1189: natively such a
+ * change succeeds.
+ *
+ * Without -intercept_all_signals every new signalfd is a pipe, as before.
+ *
+ * The kernel checks the flags, size and mask before the fd, so for invalid ones
+ * we pass the app's arguments through and it fails them for our pipes too.  For
+ * SIGNALFD_ROUTE_EMULATE, *mask holds a copy of the app's mask.
  */
-bool
-signal_signalfd_in_kernel(dcontext_t *dcontext, int fd, kernel_sigset_t *mask,
-                          size_t sizemask, kernel_sigset_t **kset)
+#ifdef LINUX
+int
+signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
+                      size_t sizemask, int flags, kernel_sigset_t *mask,
+                      kernel_sigset_t **kmask, int *error)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    *kset = NULL;
-#ifdef LINUX
-    if (fd != -1 && signal_is_emulated_signalfd(fd))
-        return false;
-#endif
-    if (sizemask != sizeof(kernel_sigset_t) || mask == NULL ||
-        !d_r_safe_read(mask, sizeof(kernel_sigset_t), &info->syscall_kernel_sigmask))
-        return true;
-    bool kernel_holds_all = true;
-    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (sig_kernel_blockable(sig) ||
-            !kernel_sigismember(&info->syscall_kernel_sigmask, sig))
-            continue;
-        kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
-        /* The kernel ignores these in a signalfd mask. */
-        if (sig != SIGKILL && sig != SIGSTOP)
-            kernel_holds_all = false;
+    bool held = false, kernel_held = false;
+    *kmask = NULL;
+    if (TESTANY(~(SFD_CLOEXEC | SFD_NONBLOCK), flags) ||
+        sizemask != sizeof(kernel_sigset_t) || app_mask == NULL ||
+        !d_r_safe_read(app_mask, sizeof(*mask), mask))
+        return SIGNALFD_ROUTE_KERNEL;
+    bool emulated = fd != -1 && signal_is_emulated_signalfd(fd);
+    if (!DYNAMO_OPTION(intercept_all_signals)) {
+        return (fd == -1 || emulated) ? SIGNALFD_ROUTE_EMULATE
+                                      : SIGNALFD_ROUTE_KERNEL;
     }
-    if (!kernel_holds_all && fd == -1)
+    info->syscall_kernel_sigmask = *mask;
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (!kernel_sigismember(mask, sig) || sig == SIGKILL || sig == SIGSTOP)
+            continue;
+        if (sig_kernel_blockable(sig))
+            kernel_held = true;
+        else {
+            held = true;
+            kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
+        }
+    }
+    if (emulated) {
+        if (kernel_held) {
+            *error = EINVAL;
+            return SIGNALFD_ROUTE_FAIL;
+        }
+        return SIGNALFD_ROUTE_EMULATE;
+    }
+    if (fd == -1 && held && !kernel_held)
+        return SIGNALFD_ROUTE_EMULATE;
+    if (fd != -1 && held) {
+        /* As the kernel, fail a closed fd with EBADF. */
+        *error = dynamorio_syscall(SYS_fcntl, 2, fd, F_GETFD) < 0 ? EBADF : EINVAL;
+        return SIGNALFD_ROUTE_FAIL;
+    }
+    *kmask = &info->syscall_kernel_sigmask;
+    return SIGNALFD_ROUTE_KERNEL_MASK;
+}
+#endif
+
+/* Removes the first instance of sig that we hold for this thread while the app
+ * blocks it, returning its siginfo, as handle_pre_sigtimedwait() does: for an
+ * emulated signalfd created after the signal arrived.
+ */
+bool
+signal_take_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    sigpending_t *p = info->sigpending[sig];
+    if (p == NULL || p->unblocked_at_receipt ||
+        !kernel_sigismember(&info->app_sigblocked, sig))
         return false;
-    /* XXX: a real signalfd cannot become a pipe, so one changed to a mask with
-     * signals we hold does not see those.
-     */
-    *kset = &info->syscall_kernel_sigmask;
+    *siginfo = p->rt_frame.info;
+    block_in_kernel_ahead(dcontext, NULL);
+    info->accessing_sigpending = true;
+    __asm__ __volatile__("" : : : "memory");
+    info->sigpending[sig] = p->next;
+    special_heap_free(info->sigheap, p);
+    info->num_pending--;
+    __asm__ __volatile__("" : : : "memory");
+    info->accessing_sigpending = false;
+    signal_sync_kernel_mask(dcontext);
     return true;
 }
 
@@ -5968,7 +6011,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             "blocked signal: process-wide=%d (code=%d), #-unmasked=%d\n",
             signal_is_process_wide(dcontext, &frame->info, pc, xsp), frame->info.si_code,
             atomic_aligned_read_int(&info->sighand->threads_unmasked[sig]));
-        if (signal_is_process_wide(dcontext, &frame->info, pc, xsp) &&
+        if (!handled && signal_is_process_wide(dcontext, &frame->info, pc, xsp) &&
             !signal_is_fault(dcontext, sig, pc, (byte *)sc->SC_XSP, &frame->info) &&
             atomic_aligned_read_int(&info->sighand->threads_unmasked[sig]) > 0 &&
             (!sig_is_alarm_signal(sig) ||
@@ -5988,6 +6031,12 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
     /* The value of blocked may have changed, so we re-start the if-else chain. */
     if (blocked) {
         /* No reroute needed so no action needed. */
+#ifdef LINUX
+        /* A blocked signal does not interrupt a wait natively, whether it goes to
+         * a signalfd or waits with us.
+         */
+        restart_syscall_interrupted_by_us(dcontext, ucxt);
+#endif
     } else if (dcontext->currently_stopped) {
         /* We have no way to delay for a currently-native thread. */
         if (reroute) {

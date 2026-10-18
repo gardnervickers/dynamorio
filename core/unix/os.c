@@ -5471,6 +5471,8 @@ ignorable_system_call_normalized(int num)
 #endif
 #ifdef LINUX
     case SYS_dup3:
+    /* For signalfd bookkeeping (signal_handle_dup()). */
+    case SYS_dup:
 #endif
 #ifdef MACOS
     case SYS_fcntl_nocancel:
@@ -8607,25 +8609,25 @@ pre_system_call(dcontext_t *dcontext)
         else
 #    endif
             dcontext->sys_param3 = sys_param(dcontext, 3);
-        if (DYNAMO_OPTION(intercept_all_signals)) {
-            /* The kernel keeps the signals the app blocks pending (see
-             * signal_sync_kernel_mask()), so a real signalfd sees them, unless it
-             * is for signals we hold ourselves.
-             */
-            kernel_sigset_t *kset;
-            if (signal_signalfd_in_kernel(dcontext, (int)dcontext->sys_param0,
-                                          (kernel_sigset_t *)dcontext->sys_param1,
-                                          (size_t)dcontext->sys_param2, &kset)) {
-                if (kset != NULL)
-                    set_syscall_param(dcontext, 1, (reg_t)kset);
-                break;
-            }
-        }
-        new_result = handle_pre_signalfd(
+        kernel_sigset_t mask, *kmask;
+        int error = 0;
+        int route = signal_signalfd_route(
             dcontext, (int)dcontext->sys_param0, (kernel_sigset_t *)dcontext->sys_param1,
-            (size_t)dcontext->sys_param2, (int)dcontext->sys_param3);
-        /* Let the signals of an emulated signalfd reach us (sig_kernel_holds()). */
-        signal_sync_kernel_mask(dcontext);
+            (size_t)dcontext->sys_param2, (int)dcontext->sys_param3, &mask, &kmask,
+            &error);
+        if (route == SIGNALFD_ROUTE_KERNEL_MASK) {
+            set_syscall_param(dcontext, 1, (reg_t)kmask);
+            break;
+        } else if (route == SIGNALFD_ROUTE_KERNEL)
+            break;
+        else if (route == SIGNALFD_ROUTE_FAIL) {
+            set_failure_return_val(dcontext, error);
+            DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+            execute_syscall = false;
+            break;
+        }
+        new_result = handle_pre_signalfd(dcontext, (int)dcontext->sys_param0, &mask,
+                                         (int)dcontext->sys_param3);
         execute_syscall = false;
         /* since non-Mac, we can use this even if the call failed */
         set_success_return_val(dcontext, new_result);
@@ -8982,6 +8984,12 @@ pre_system_call(dcontext_t *dcontext)
 #endif
         break;
     }
+#ifdef LINUX
+    case SYS_dup:
+        /* For signal_handle_dup(). */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        break;
+#endif
 #if defined(SYS_dup2) || defined(SYS_dup3)
 #    ifdef SYS_dup3
     case SYS_dup3:
@@ -8991,6 +8999,9 @@ pre_system_call(dcontext_t *dcontext)
 #    endif
     {
         file_t newfd = (file_t)sys_param(dcontext, 1);
+        /* For signal_handle_dup(). */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = newfd;
         if (fd_is_dr_owned(newfd)) {
             SYSLOG_INTERNAL_WARNING_ONCE("app trying to dup-close DR file(s)");
             LOG(THREAD, LOG_TOP | LOG_SYSCALLS, 1,
@@ -10179,9 +10190,8 @@ post_system_call(dcontext_t *dcontext)
     case SYS_signalfd:
 #    endif
     case SYS_signalfd4:
-        /* Restore the mask pointer we replaced for the kernel. */
-        if (DYNAMO_OPTION(intercept_all_signals))
-            set_syscall_param(dcontext, 1, dcontext->sys_param1);
+        /* Restore the mask pointer we may have replaced for the kernel. */
+        set_syscall_param(dcontext, 1, dcontext->sys_param1);
         break;
 #endif
 #if defined(LINUX) && !defined(X64)
@@ -10247,16 +10257,16 @@ post_system_call(dcontext_t *dcontext)
     /****************************************************************************/
     /* FILES */
 
-#ifdef SYS_dup2
-    case SYS_dup2: IF_LINUX(case SYS_dup3:) {
-#    ifdef LINUX
-            if (success) {
-                signal_handle_dup(dcontext, (file_t)sys_param(dcontext, 1),
-                                  (file_t)result);
-            }
+#ifdef LINUX
+#    ifdef SYS_dup2
+    case SYS_dup2:
 #    endif
-            break;
-        }
+    case SYS_dup3:
+    case SYS_dup:
+        /* The source, saved pre-syscall: the result has replaced the register. */
+        if (success)
+            signal_handle_dup(dcontext, (file_t)dcontext->sys_param0, (file_t)result);
+        break;
 #endif
 
 #ifdef MACOS

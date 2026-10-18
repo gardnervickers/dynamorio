@@ -43,6 +43,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <pthread.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <time.h>
 
 static void
 signal_handler(int sig)
@@ -121,76 +126,308 @@ test_signalfd(int sig)
     }
 
     /* Undo everything */
-    sigemptyset(&mask);
-    sigprocmask(SIG_BLOCK, &mask, NULL);
+    sigprocmask(SIG_UNBLOCK, &mask, NULL);
     close(sigfd);
+    close(sigfd2);
     intercept_signal(sig, (handler_3_t)NULL, false);
 }
 
-/* A mask mixing a signal the kernel can hold for the app with one DR holds itself
- * (SIGSEGV, which DR cannot block in the kernel), with the first already pending
- * when the signalfd is created.
+/* Blocks sig with a handler that reports the error of running, and returns the
+ * prior mask.
+ */
+static void
+block_signal(int sig, sigset_t *orig_mask)
+{
+    sigset_t mask;
+    intercept_signal(sig, (handler_3_t)signal_handler, false);
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    sigprocmask(SIG_BLOCK, &mask, orig_mask);
+}
+
+static void
+restore_signal(int sig, const sigset_t *orig_mask)
+{
+    sigprocmask(SIG_SETMASK, orig_mask, NULL);
+    intercept_signal(sig, (handler_3_t)NULL, false);
+}
+
+static int
+new_signalfd(int sig, int flags)
+{
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    int fd = signalfd(-1, &mask, flags);
+    if (fd < 0) {
+        print("signalfd failed: %m");
+        exit(1);
+    }
+    return fd;
+}
+
+static void
+send_signal(int sig)
+{
+    if (kill(getpid(), sig) < 0) {
+        print("kill failed: %m");
+        exit(1);
+    }
+}
+
+static int
+is_readable(int fd, int timeout_ms)
+{
+    struct pollfd pfd = { fd, POLLIN, 0 };
+    return poll(&pfd, 1, timeout_ms) == 1;
+}
+
+/* Reads one record from fd, returning its signal number or -1. */
+static int
+read_signal(int fd)
+{
+    struct signalfd_siginfo siginfo;
+    if (!is_readable(fd, 5000))
+        return -1;
+    if (read(fd, &siginfo, sizeof(siginfo)) != sizeof(siginfo))
+        return -1;
+    return siginfo.ssi_signo;
+}
+
+/* Returns whether sig is pending, taking it. */
+static int
+take_pending(int sig)
+{
+    sigset_t mask;
+    struct timespec zero = { 0, 0 };
+    sigemptyset(&mask);
+    sigaddset(&mask, sig);
+    return sigtimedwait(&mask, NULL, &zero) == sig;
+}
+
+/* Takes every pending instance of sig. */
+static void
+drain_pending(int sig)
+{
+    while (take_pending(sig))
+        ;
+}
+
+/* Every fd for a signalfd works until it is closed. */
+static void
+test_aliases(int sig)
+{
+    sigset_t orig_mask;
+    block_signal(sig, &orig_mask);
+    int fd1 = new_signalfd(sig, 0);
+    int fd2 = new_signalfd(sig, SFD_CLOEXEC);
+    int fd3 = dup(fd1);
+    int fd4 = fcntl(fd2, F_DUPFD_CLOEXEC, 0);
+    int fd5 = dup3(fd1, fd4 + 1, O_CLOEXEC);
+    close(fd1);
+    send_signal(sig);
+    print("signal %d: read from 2nd fd after closing 1st: %d\n", sig, read_signal(fd2));
+    close(fd2);
+    send_signal(sig);
+    print("signal %d: read from dup: %d\n", sig, read_signal(fd3));
+    close(fd3);
+    send_signal(sig);
+    print("signal %d: read from F_DUPFD_CLOEXEC dup: %d\n", sig, read_signal(fd4));
+    close(fd4);
+    send_signal(sig);
+    print("signal %d: read from dup3: %d\n", sig, read_signal(fd5));
+    close(fd5);
+    restore_signal(sig, &orig_mask);
+}
+
+/* Closing a signalfd leaves signals it did not read pending. */
+static void
+test_unread_close(int sig)
+{
+    sigset_t orig_mask;
+    block_signal(sig, &orig_mask);
+    int fd = new_signalfd(sig, 0);
+    send_signal(sig);
+    close(fd);
+    print("signal %d: pending after closing its fd unread: %s\n", sig,
+          take_pending(sig) ? "yes" : "no");
+    restore_signal(sig, &orig_mask);
+}
+
+/* A signalfd sees a signal that was pending before it was created. */
+static void
+test_pending_before(int sig)
+{
+    sigset_t orig_mask;
+    block_signal(sig, &orig_mask);
+    send_signal(sig);
+    int fd = new_signalfd(sig, 0);
+    print("signal %d: read of one pending before the fd: %d\n", sig, read_signal(fd));
+    close(fd);
+    restore_signal(sig, &orig_mask);
+}
+
+/* Many signals unread: none blocks the sender. */
+static void
+test_saturation(int sig)
+{
+    sigset_t orig_mask;
+    int i;
+    block_signal(sig, &orig_mask);
+    int fd = new_signalfd(sig, 0);
+    for (i = 0; i < 1000; i++)
+        send_signal(sig);
+    print("signal %d: read after 1000 sends: %d\n", sig, read_signal(fd));
+    /* Natively the standard signal was pending once. */
+    while (is_readable(fd, 0))
+        read_signal(fd);
+    close(fd);
+    drain_pending(sig);
+    restore_signal(sig, &orig_mask);
+}
+
+static void *
+close_thread(void *arg)
+{
+    close(*(int *)arg);
+    return NULL;
+}
+
+/* A signalfd closed by another thread. */
+static void
+test_cross_thread_close(int sig)
+{
+    sigset_t orig_mask;
+    pthread_t thread;
+    block_signal(sig, &orig_mask);
+    int fd = new_signalfd(sig, 0);
+    pthread_create(&thread, NULL, close_thread, &fd);
+    pthread_join(thread, NULL);
+    send_signal(sig);
+    print("signal %d: pending after another thread closed the fd: %s\n", sig,
+          take_pending(sig) ? "yes" : "no");
+    restore_signal(sig, &orig_mask);
+}
+
+/* A blocked signal the app ignores stays pending for a signalfd, in a mask that
+ * also has a signal DR holds itself.
+ */
+static void
+test_ignored_member(void)
+{
+    sigset_t mask, orig_mask;
+    signal(SIGUSR2, SIG_IGN);
+    intercept_signal(SIGSEGV, (handler_3_t)signal_handler, false);
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR2);
+    sigaddset(&mask, SIGSEGV);
+    sigprocmask(SIG_BLOCK, &mask, &orig_mask);
+    int fd = signalfd(-1, &mask, 0);
+    send_signal(SIGUSR2);
+    print("ignored signal %d: read: %d\n", SIGUSR2, read_signal(fd));
+    close(fd);
+    sigprocmask(SIG_SETMASK, &orig_mask, NULL);
+    signal(SIGUSR2, SIG_DFL);
+    intercept_signal(SIGSEGV, (handler_3_t)NULL, false);
+}
+
+static void
+print_result(const char *what, long res)
+{
+    print("%s: %s\n", what,
+          res >= 0 ? "ok"
+                   : (errno == EINVAL ? "EINVAL" : (errno == EFAULT ? "EFAULT" : "error")));
+}
+
+/* Changing the mask of an existing signalfd, and invalid arguments. */
+static void
+test_update(int sig, int sig2)
+{
+    sigset_t orig_mask, mask;
+    block_signal(sig, &orig_mask);
+    intercept_signal(sig2, (handler_3_t)signal_handler, false);
+    sigemptyset(&mask);
+    sigaddset(&mask, sig2);
+    sigprocmask(SIG_BLOCK, &mask, NULL);
+    int fd = new_signalfd(sig, SFD_NONBLOCK);
+    print("signal %d: update to signal %d returns the fd: %s\n", sig, sig2,
+          signalfd(fd, &mask, 0) == fd ? "yes" : "no");
+    send_signal(sig2);
+    print("signal %d: read after the update: %d\n", sig2, read_signal(fd));
+    send_signal(sig);
+    print("signal %d: readable after the update: %s\n", sig,
+          is_readable(fd, 100) ? "yes" : "no");
+    print("signal %d: still pending: %s\n", sig, take_pending(sig) ? "yes" : "no");
+    print_result("update with a NULL mask",
+                 syscall(SYS_signalfd4, fd, NULL, sizeof(long), 0));
+    print_result("update with a bad size", syscall(SYS_signalfd4, fd, &mask, 4, 0));
+    print_result("update with bad flags",
+                 syscall(SYS_signalfd4, fd, &mask, sizeof(long), 0x1000));
+    print_result("create with bad flags",
+                 syscall(SYS_signalfd4, -1, &mask, sizeof(long), 0x1000));
+    close(fd);
+    sigprocmask(SIG_SETMASK, &orig_mask, NULL);
+    intercept_signal(sig, (handler_3_t)NULL, false);
+    intercept_signal(sig2, (handler_3_t)NULL, false);
+}
+
+/* Under DR, a mask mixing signals DR holds itself (SIGSEGV) with ones the kernel
+ * holds (SIGUSR2) is a real signalfd for the latter only: the SIGSEGV waits
+ * pending instead of reaching the fd.  Either way it is not lost.
  */
 static void
 test_mixed_mask(void)
 {
-    int ret, sigfd, i, got = 0;
     sigset_t mask, orig_mask;
-    struct signalfd_siginfo siginfo;
-
     intercept_signal(SIGUSR2, (handler_3_t)signal_handler, false);
     intercept_signal(SIGSEGV, (handler_3_t)signal_handler, false);
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR2);
     sigaddset(&mask, SIGSEGV);
     sigprocmask(SIG_BLOCK, &mask, &orig_mask);
-
-    print("about to send signal %d before creating the fd\n", SIGUSR2);
-    if (kill(getpid(), SIGUSR2) < 0) {
-        print("kill failed: %m");
-        exit(1);
-    }
-    sigfd = signalfd(-1, &mask, 0);
-    if (sigfd < 0) {
-        print("signalfd failed: %m");
-        exit(1);
-    }
-    print("about to send signal %d\n", SIGSEGV);
-    if (kill(getpid(), SIGSEGV) < 0) {
-        print("kill failed: %m");
-        exit(1);
-    }
-    /* The kernel and DR may return these in either order. */
-    for (i = 0; i < 2; i++) {
-        ret = read(sigfd, &siginfo, sizeof(siginfo));
-        if (ret != sizeof(siginfo))
-            print("ret: %d\n", ret);
-        else if (siginfo.ssi_signo == SIGUSR2 || siginfo.ssi_signo == SIGSEGV)
-            got |= 1 << siginfo.ssi_signo;
-        else
-            print("unexpected signal %d\n", siginfo.ssi_signo);
-    }
-    print("read signals %d: %s, %d: %s\n", SIGUSR2,
-          (got & (1 << SIGUSR2)) != 0 ? "yes" : "no", SIGSEGV,
-          (got & (1 << SIGSEGV)) != 0 ? "yes" : "no");
-    close(sigfd);
-
-    /* With the fd closed, a blocked signal stays pending again. */
-    if (kill(getpid(), SIGUSR2) < 0) {
-        print("kill failed: %m");
-        exit(1);
-    }
-    sigset_t pending;
-    sigpending(&pending);
-    print("after close: signal %d pending: %s\n", SIGUSR2,
-          sigismember(&pending, SIGUSR2) ? "yes" : "no");
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGUSR2);
-    if (sigtimedwait(&mask, NULL, NULL) != SIGUSR2)
-        print("sigtimedwait failed: %m");
+    int fd = signalfd(-1, &mask, SFD_NONBLOCK);
+    send_signal(SIGUSR2);
+    print("mixed mask: read of signal %d: %d\n", SIGUSR2, read_signal(fd));
+    send_signal(SIGSEGV);
+    int got = is_readable(fd, 100) ? read_signal(fd) == SIGSEGV : take_pending(SIGSEGV);
+    print("mixed mask: signal %d read or still pending: %s\n", SIGSEGV,
+          got ? "yes" : "no");
+    close(fd);
+    drain_pending(SIGSEGV);
     sigprocmask(SIG_SETMASK, &orig_mask, NULL);
     intercept_signal(SIGUSR2, (handler_3_t)NULL, false);
     intercept_signal(SIGSEGV, (handler_3_t)NULL, false);
+}
+
+/* Changing a signalfd's mask from signals DR holds itself to ones the kernel holds,
+ * or the reverse.  Natively it works; DR refuses it with EINVAL.  Either way the
+ * result must not be an fd that misses its signals.
+ */
+static void
+test_update_kind(int sig, int sig2)
+{
+    sigset_t orig_mask, mask;
+    int ok;
+    block_signal(sig, &orig_mask);
+    intercept_signal(sig2, (handler_3_t)signal_handler, false);
+    sigemptyset(&mask);
+    sigaddset(&mask, sig2);
+    sigprocmask(SIG_BLOCK, &mask, NULL);
+    sigaddset(&mask, sig);
+    int fd = new_signalfd(sig, SFD_NONBLOCK);
+    int res = signalfd(fd, &mask, 0);
+    if (res == fd) {
+        send_signal(sig2);
+        ok = read_signal(fd) == sig2;
+    } else
+        ok = res == -1 && errno == EINVAL;
+    print("update of a signal %d fd to add signal %d: %s\n", sig, sig2,
+          ok ? "works or fails with EINVAL" : "broken");
+    close(fd);
+    drain_pending(sig2);
+    sigprocmask(SIG_SETMASK, &orig_mask, NULL);
+    intercept_signal(sig, (handler_3_t)NULL, false);
+    intercept_signal(sig2, (handler_3_t)NULL, false);
 }
 
 int
@@ -200,6 +437,22 @@ main(void)
     test_signalfd(SIGUSR1);
     test_signalfd(SIGSEGV);
     test_signalfd(44);
+    /* SIGSEGV and SIGBUS are signals DR holds itself; SIGUSR1 and SIGUSR2 are left
+     * pending in the kernel.
+     */
+    test_aliases(SIGSEGV);
+    test_aliases(SIGUSR1);
+    test_unread_close(SIGSEGV);
+    test_unread_close(SIGUSR1);
+    test_pending_before(SIGSEGV);
+    test_pending_before(SIGUSR1);
+    test_saturation(SIGSEGV);
+    test_cross_thread_close(SIGSEGV);
+    test_ignored_member();
+    test_update(SIGSEGV, SIGBUS);
+    test_update(SIGUSR1, SIGUSR2);
     test_mixed_mask();
+    test_update_kind(SIGSEGV, SIGUSR1);
+    test_update_kind(SIGUSR1, SIGSEGV);
     return 0;
 }

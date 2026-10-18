@@ -467,9 +467,20 @@ handle_pre_sigtimedwait(dcontext_t *dcontext, kernel_sigset_t *set,
 void
 handle_post_sigpending(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize);
 
+enum {
+    SIGNALFD_ROUTE_KERNEL,      /* Issue the syscall as the app made it. */
+    SIGNALFD_ROUTE_KERNEL_MASK, /* Issue it with the mask we return. */
+    SIGNALFD_ROUTE_EMULATE,     /* handle_pre_signalfd(). */
+    SIGNALFD_ROUTE_FAIL,        /* Fail it with the errno we return. */
+};
+
+int
+signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
+                      size_t sizemask, int flags, kernel_sigset_t *mask,
+                      kernel_sigset_t **kmask, int *error);
+
 bool
-signal_signalfd_in_kernel(dcontext_t *dcontext, int fd, kernel_sigset_t *mask,
-                          size_t sizemask, kernel_sigset_t **kset);
+signal_take_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo);
 
 kernel_sigset_t *
 signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
@@ -477,8 +488,7 @@ signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
 
 #ifdef LINUX
 ptr_int_t
-handle_pre_signalfd(dcontext_t *dcontext, int fd, kernel_sigset_t *mask, size_t sizemask,
-                    int flags);
+handle_pre_signalfd(dcontext_t *dcontext, int fd, const kernel_sigset_t *mask, int flags);
 
 void
 signal_handle_dup(dcontext_t *dcontext, file_t src, file_t dst);

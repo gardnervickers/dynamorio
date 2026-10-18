@@ -5509,6 +5509,7 @@ if (UNIX)
     if (NOT ANDROID)
       tobuild(linux.threadexit2 linux/threadexit2.c) # XXX i#1874: hangs on Android
       tobuild(linux.signalfd linux/signalfd.c) # XXX i#1874: fails natively on Android
+      link_with_pthread(linux.signalfd)
     endif ()
   endif ()
   # i#784: test app behavior on alarm
