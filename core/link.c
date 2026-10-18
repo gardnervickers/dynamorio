@@ -1219,7 +1219,10 @@ unlink_branch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
 #    define INCOMING_PREV_UNKNOWN INT_MIN
 #endif
 
-/* Records prev as the entry before dl on its incoming list (NULL if dl is first). */
+/* Records prev as the entry before dl on its incoming list (NULL if dl is first).
+ * Every change to an incoming list must keep this up to date for the entries it
+ * changes the predecessor of: a removal reads the recorded predecessor.
+ */
 static inline void
 incoming_set_prev(common_direct_linkstub_t *dl, linkstub_t *prev)
 {
@@ -1254,6 +1257,29 @@ incoming_get_prev(common_direct_linkstub_t *dl, linkstub_t **prev /*OUT*/)
     return false;
 #endif
 }
+
+#ifdef DEBUG
+/* Checks that the recorded predecessor of dl, if any, is prev. */
+static void
+incoming_check_prev(common_direct_linkstub_t *dl, linkstub_t *prev)
+{
+    linkstub_t *recorded;
+    if (incoming_get_prev(dl, &recorded))
+        ASSERT(recorded == prev && "incoming list predecessor out of date");
+}
+
+/* Checks the recorded predecessor of every entry of an incoming list. */
+static void
+incoming_check_list(common_direct_linkstub_t *head)
+{
+    linkstub_t *prev = NULL;
+    common_direct_linkstub_t *dl;
+    for (dl = head; dl != NULL; dl = (common_direct_linkstub_t *)dl->next_incoming) {
+        incoming_check_prev(dl, prev);
+        prev = (linkstub_t *)dl;
+    }
+}
+#endif
 
 static inline bool
 incoming_direct_linkstubs_match(common_direct_linkstub_t *dl1,
@@ -1343,7 +1369,17 @@ incoming_remove_link_nosearch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l
     if (dl->next_incoming != NULL) {
         incoming_set_prev((common_direct_linkstub_t *)dl->next_incoming,
                           (linkstub_t *)dprev);
+        DODEBUG({
+            incoming_check_prev((common_direct_linkstub_t *)dl->next_incoming,
+                                (linkstub_t *)dprev);
+        });
     }
+    DODEBUG({
+        if (dprev != NULL)
+            ASSERT(dprev->next_incoming == l);
+        else
+            ASSERT((linkstub_t *)*inlist == l);
+    });
     if (dprev != NULL)
         dprev->next_incoming = dl->next_incoming;
     else {
@@ -1379,6 +1415,7 @@ incoming_remove_link_nosearch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l
     }
     dl->next_incoming = NULL;
     incoming_set_prev(dl, NULL);
+    DOCHECK(CHKLVL_DEFAULT + 1, { incoming_check_list(*inlist); });
     if (LINKSTUB_COARSE_PROXY(l->flags)) {
         /* We don't have any place to keep l so we free now.  We'll
          * re-alloc if we lazily re-link.
@@ -1492,9 +1529,12 @@ add_to_incoming_list(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
         ASSERT(!is_empty_fragment(linkstub_fragment(dcontext, l)));
         dl->next_incoming = (linkstub_t *)*inlist;
         incoming_set_prev(dl, NULL);
-        if (*inlist != NULL)
+        if (*inlist != NULL) {
             incoming_set_prev(*inlist, l);
+            DODEBUG({ incoming_check_prev(*inlist, l); });
+        }
         *inlist = dl;
+        DOCHECK(CHKLVL_DEFAULT + 1, { incoming_check_list(*inlist); });
     }
 }
 

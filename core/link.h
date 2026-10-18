@@ -179,8 +179,11 @@ typedef struct _common_direct_linkstub_t {
      * that branches there walked it.  In the padding after l: the distance to the
      * previous entry in units of 4 bytes, INCOMING_PREV_NONE if we are first
      * (or on no list), or INCOMING_PREV_UNKNOWN if the distance does not fit.
-     * The removal checks the entry it finds against the list, and walks the list
-     * if this is unknown or wrong, so it is only a hint.
+     * This is an invariant that every change to an incoming list maintains
+     * (link.c: incoming_set_prev()), not a hint: the removal reads the entry it
+     * points to, so it must be live.  The removal still checks that entry's
+     * next_incoming against the list, and debug builds check the neighbors on
+     * every change (and the whole list at -checklevel 3).
      */
     int prev_incoming_offs;
 #endif
