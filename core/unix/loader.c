@@ -134,6 +134,11 @@ static bool printed_gdb_commands = false;
 /* Global so visible in release build gdb */
 static char gdb_priv_cmds[4096];
 static size_t gdb_priv_cmds_sofar;
+
+/* A copy of the auxiliary vector, for redirect_getauxval(). */
+#    define PRIVLOAD_AUXV_MAX 64
+static ELF_AUXV_TYPE privload_auxv[PRIVLOAD_AUXV_MAX];
+static uint privload_auxv_num;
 #endif
 
 /* pointing to the I/O data structure in privately loaded libc,
@@ -180,6 +185,9 @@ privload_mod_tls_init(privmod_t *mod);
 
 void
 privload_mod_tls_primary_thread_init(privmod_t *mod);
+
+static void
+privload_snapshot_auxv(void);
 #endif
 
 /***************************************************************************/
@@ -247,6 +255,9 @@ os_loader_init_prologue(void)
     ASSERT_OWN_RECURSIVE_LOCK(true, &privload_lock);
 
     privload_init_search_paths();
+#ifdef LINUX
+    privload_snapshot_auxv();
+#endif
 #ifndef STATIC_LIBRARY
     /* insert libdynamorio.so */
     mod = privload_insert(NULL, get_dynamorio_dll_start(),
@@ -1541,6 +1552,68 @@ redirect_dl_iterate_phdr_app(int (*callback)(struct dl_phdr_info *info, size_t s
     return res;
 }
 
+/* Copies the auxiliary vector for redirect_getauxval().  We take the copy before
+ * any private library's initializer runs, and after early injection has made the
+ * vector describe the app (privload_setup_auxv()).
+ */
+static void
+privload_snapshot_auxv(void)
+{
+    privload_auxv_num = 0;
+    if (is_our_environ_followed_by_auxv() && our_environ != NULL) {
+        char **env = our_environ;
+        while (*env != NULL)
+            env++;
+        bool has_pagesz = false;
+        for (ELF_AUXV_TYPE *auxv = (ELF_AUXV_TYPE *)(env + 1);
+             auxv->a_type != AT_NULL && privload_auxv_num < PRIVLOAD_AUXV_MAX; auxv++) {
+            if (auxv->a_type == AT_PAGESZ)
+                has_pagesz = true;
+            privload_auxv[privload_auxv_num++] = *auxv;
+        }
+        /* The kernel always supplies AT_PAGESZ: without it this is not a real
+         * vector, e.g. after ptrace injection's fake environment.
+         */
+        if (!has_pagesz)
+            privload_auxv_num = 0;
+    }
+    if (privload_auxv_num == 0) {
+        /* For STATIC_LIBRARY our_environ need not be on the initial stack
+         * (i#2122), and a shifting unsetenv can hide the vector (i#909), so ask
+         * the kernel instead.
+         */
+        file_t fd = os_open("/proc/self/auxv", OS_OPEN_READ);
+        if (fd != INVALID_FILE) {
+            ssize_t len = os_read(fd, privload_auxv, sizeof(privload_auxv));
+            os_close(fd);
+            while (len > 0 &&
+                   privload_auxv_num < (size_t)len / sizeof(privload_auxv[0]) &&
+                   privload_auxv[privload_auxv_num].a_type != AT_NULL)
+                privload_auxv_num++;
+        }
+    }
+    LOG(GLOBAL, LOG_LOADER, 2, "%s: %u auxv entries\n", __FUNCTION__, privload_auxv_num);
+}
+
+/* A private libc never runs ld.so's startup code, so GLRO(dl_auxv) in the private
+ * ld.so stays NULL and glibc's getauxval() dereferences it for any type other
+ * than AT_HWCAP and AT_HWCAP2, which it reads from GLRO fields that are themselves
+ * left zero.  libgcc_s from gcc 16 calls getauxval(AT_HWCAP3) from its AArch64
+ * cpu-feature constructor, which then crashed.  We answer from a copy of the real
+ * vector instead.
+ * XXX: glibc also sets errno to ENOENT for a missing type, but we cannot reach
+ * the private libc's errno from here.
+ */
+static unsigned long
+redirect_getauxval(unsigned long type)
+{
+    for (uint i = 0; i < privload_auxv_num; i++) {
+        if (privload_auxv[i].a_type == type)
+            return (unsigned long)privload_auxv[i].a_un.a_val;
+    }
+    return 0;
+}
+
 #    if defined(ARM) && !defined(ANDROID)
 typedef struct _unwind_callback_data_t {
     void *pc;
@@ -1644,6 +1717,9 @@ static const redirect_import_t redirect_imports[] = {
     /* i#1717: C++ exceptions call this */
     { "dl_iterate_phdr", (app_pc)redirect_dl_iterate_phdr,
       (app_pc)redirect_dl_iterate_phdr_app },
+    /* A private libc's getauxval() crashes: see redirect_getauxval(). */
+    { "getauxval", (app_pc)redirect_getauxval },
+    { "__getauxval", (app_pc)redirect_getauxval },
 #    if defined(ARM) && !defined(ANDROID)
     /* i#1717: C++ exceptions call this on ARM Linux */
     { "__gnu_Unwind_Find_exidx", (app_pc)redirect___gnu_Unwind_Find_exidx },
