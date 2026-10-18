@@ -65,6 +65,11 @@
 /* Long enough that a wait running out its timeout means it missed the signal. */
 #define LONG_TIMEOUT_MS 2000
 #define SLEEP_NS 200000
+/* A sleep long enough for DR's own signals to interrupt it, with the app's
+ * signal anywhere in it: some arrive as DR issues it again.
+ */
+#define LONG_SLEEP_NS 20000000
+#define LONG_SLEEP_ITERS 100
 
 enum {
     W_NANOSLEEP, /* glibc's, which is SYS_clock_nanosleep */
@@ -74,21 +79,27 @@ enum {
     W_EPOLL_MASK,
     W_PSELECT_MASK,
     W_FUTEX,
+    W_LONG_SLEEP, /* SYS_nanosleep */
     W_NUM
 };
 static const char *const names[W_NUM] = {
     "nanosleep",       "SYS_nanosleep",         "ppoll",
     "ppoll with mask", "epoll_pwait with mask", "pselect with mask",
-    "futex wait",
+    "futex wait",      "long SYS_nanosleep",
 };
 
-#define IS_SLEEP(which) ((which) == W_NANOSLEEP || (which) == W_SYS_NANOSLEEP)
+#define IS_SLEEP(which) \
+    ((which) == W_NANOSLEEP || (which) == W_SYS_NANOSLEEP || (which) == W_LONG_SLEEP)
 
 static timer_t timer;
 static volatile int flusher_stop;
 static int pipefd[2];
 static int epfd;
 static volatile int handled;
+/* Whether the handler waits too: a wait we reissue under DR in the handler must
+ * not change the interrupted one.
+ */
+static volatile int handler_waits;
 static volatile int futex_word;
 
 static void
@@ -97,6 +108,10 @@ handler(int sig, siginfo_t *info, void *ucxt)
     char c = 1;
     int saved = errno;
     handled = 1;
+    if (handler_waits) {
+        struct timespec ts = { 0, 1000 };
+        nanosleep(&ts, NULL);
+    }
     /* End a wait that the handler ran ahead of, as the signal would have. */
     if (write(pipefd[1], &c, 1) != 1)
         print("write failed\n");
@@ -127,7 +142,8 @@ static int
 try_wait(int which, uint64_t delay_ns, const sigset_t *orig_mask, int *reported)
 {
     struct itimerspec spec = { { 0, 0 }, { 0, (long)delay_ns } };
-    struct timespec req = { 0, SLEEP_NS };
+    long sleep_ns = which == W_LONG_SLEEP ? LONG_SLEEP_NS : SLEEP_NS;
+    struct timespec req = { 0, sleep_ns };
     struct timespec rem = { 12345, 0 }; /* Must not change on success. */
     struct timespec long_ts = { LONG_TIMEOUT_MS / 1000, 0 };
     struct pollfd pfd = { pipefd[0], POLLIN, 0 };
@@ -143,14 +159,15 @@ try_wait(int which, uint64_t delay_ns, const sigset_t *orig_mask, int *reported)
     FD_SET(pipefd[0], &rfds);
     handled = 0;
     futex_word = 0;
-    start = now_ns();
     if (timer_settime(timer, 0, &spec, NULL) != 0) {
         perror("timer_settime");
         exit(1);
     }
+    start = now_ns();
     switch (which) {
     case W_NANOSLEEP: ret = nanosleep(&req, &rem); break;
-    case W_SYS_NANOSLEEP: ret = syscall(SYS_nanosleep, &req, &rem); break;
+    case W_SYS_NANOSLEEP:
+    case W_LONG_SLEEP: ret = syscall(SYS_nanosleep, &req, &rem); break;
     case W_PPOLL: ret = ppoll(&pfd, 1, &long_ts, NULL); break;
     case W_PPOLL_MASK: ret = ppoll(&pfd, 1, &long_ts, &tmp_mask); break;
     case W_EPOLL_MASK: ret = epoll_pwait(epfd, &ev, 1, LONG_TIMEOUT_MS, &tmp_mask); break;
@@ -189,12 +206,12 @@ try_wait(int which, uint64_t delay_ns, const sigset_t *orig_mask, int *reported)
             valid = 0;
         /* The remaining time can include the timer's slack. */
         if (IS_SLEEP(which) &&
-            (rem.tv_sec != 0 || rem.tv_nsec < 0 || rem.tv_nsec > SLEEP_NS + 1000000))
+            (rem.tv_sec != 0 || rem.tv_nsec < 0 || rem.tv_nsec > sleep_ns + 1000000))
             valid = 0;
     } else if (IS_SLEEP(which)) {
         /* Slept the whole time, after the handler or before the signal. */
         before = handled_at_return ? 1 : -1;
-        if (ret != 0 || rem.tv_sec != 12345 || elapsed < SLEEP_NS)
+        if (ret != 0 || rem.tv_sec != 12345 || elapsed < (uint64_t)sleep_ns)
             valid = 0;
     } else {
         /* Only the handler makes the pipe readable: it ran before the wait.  A
@@ -227,12 +244,15 @@ test_wait(int which, int flags)
     memset(&act, 0, sizeof(act));
     act.sa_sigaction = handler;
     act.sa_flags = SA_SIGINFO | flags;
+    handler_waits = (flags & SA_RESTART) != 0;
     if (sigaction(SIGUSR1, &act, NULL) != 0) {
         perror("sigaction");
         exit(1);
     }
     sigprocmask(SIG_BLOCK, NULL, &orig_mask);
-    for (i = 0; i < ITERS; i++) {
+    for (i = 0; i < (which == W_LONG_SLEEP ? LONG_SLEEP_ITERS : ITERS); i++) {
+        if (which == W_LONG_SLEEP)
+            delay = 1 + (uint64_t)(i * 7919 % 20000) * (LONG_SLEEP_NS / 20000);
         r = try_wait(which, delay, &orig_mask, &reported);
         if (r == 0 && reported >= MAX_REPORTED)
             break;

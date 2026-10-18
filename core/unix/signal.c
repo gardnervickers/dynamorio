@@ -5641,6 +5641,15 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
      */
     if (!not_issued && os_syscall_is_masked_wait(dcontext))
         return false;
+    /* Nor do they restart one we issued again after our own signal: restarting it
+     * from sc would also issue our arguments for it (a remaining timeout in our
+     * buffer, which a wait in the handler can reuse) as the app's.
+     */
+    if (!not_issued && os_syscall_reissued_wait_ends_with_eintr(dcontext)) {
+        LOG(THREAD, LOG_ASYNCH, 2, "%s: not restarting syscall %d we issued again\n",
+            __FUNCTION__, dcontext->sys_num);
+        return false;
+    }
 #endif
     /* XXX i#1145: some syscalls are never restarted when interrupted by a signal.
      * We check those that are simple to distinguish below, but not all are.  We have
@@ -5717,6 +5726,17 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
         ASSERT_NOT_REACHED(); /* Inlined syscalls no longer come here. */
     }
 #if defined(AARCHXX) || defined(RISCV64)
+#if defined(LINUX) && defined(AARCH64)
+    /* Restarting from the app's syscall instruction, we handle the syscall again
+     * from the start: give it the app's arguments, not ours.
+     */
+    for (int i = 0; i < 6; i++) {
+        reg_t value;
+        if (os_syscall_app_arg(dcontext, i, &value))
+            sc->regs[i] = value;
+    }
+    os_syscall_note_restart_after_signal(dcontext);
+#endif
     /* dr_reg_stolen is holding DR's TLS on receiving a signal,
      * so we need to put the app's reg value into the ucontext instead.
      * The translation process normally does this for us, but here we're doing
@@ -6185,7 +6205,11 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                  * syscall, which then runs: put the thread at the syscall instruction
                  * with the app state fcache_enter is restoring (all of it is in the
                  * mcontext), treat the syscall as interrupted there, and restart it
-                 * after the handler whatever its SA_RESTART.
+                 * after the handler whatever its SA_RESTART.  A wait with a temporary
+                 * mask instead fails with EINTR, as natively for a signal pending at
+                 * its entry (see handle_system_call(), including its XXX): put the
+                 * thread after the syscall instruction with that result, so the
+                 * post-syscall handler restores the app's mask and arguments.
                  */
                 priv_mcontext_t *mc = get_mcontext(dcontext);
                 LOG(THREAD, LOG_ASYNCH, 2,
@@ -10246,7 +10270,11 @@ is_signal_for_us(kernel_siginfo_t *siginfo, int sig_expecting)
 static void
 restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
 {
-#    if defined(AARCH64) || (defined(X86) && defined(X64)) /* Other syscall ABIs remain NYI. */
+    /* XXX: NYI for other syscall ABIs (other argument registers): there, our
+     * suspend signal or a signal the app ignores or blocks still interrupts a wait
+     * with EINTR.
+     */
+#    if defined(AARCH64) || (defined(X86) && defined(X64))
     sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
     reg_t x0, value;
     int param;

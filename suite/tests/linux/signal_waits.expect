@@ -12,4 +12,6 @@ pselect with mask: ok
 pselect with mask (SA_RESTART): ok
 futex wait: ok
 futex wait (SA_RESTART): ok
+long SYS_nanosleep: ok
+long SYS_nanosleep (SA_RESTART): ok
 all done

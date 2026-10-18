@@ -5522,16 +5522,18 @@ if (UNIX)
     endif ()
     tobuild(linux.signal_racesys linux/signal_racesys.c)
     target_link_libraries(linux.signal_racesys rt)
-    tobuild(linux.signal_waits linux/signal_waits.c)
-    target_link_libraries(linux.signal_waits rt)
-    link_with_pthread(linux.signal_waits)
-    # Without its other thread, for -no_intercept_all_signals (see main_run_list).
-    torunonly(linux.signal_waits_single linux.signal_waits linux/signal_waits.c ""
-      "noflush")
-    # Each unmap of code its other thread ran resets DR's caches, suspending this
-    # thread in its waits, which DR then issues again.
-    torunonly(linux.signal_waits_reset linux.signal_waits linux/signal_waits.c
-      "-enable_reset -reset_every_nth_pending 1" "")
+    if (AARCH64 OR X86) # The test's other thread runs code it writes.
+      tobuild(linux.signal_waits linux/signal_waits.c)
+      target_link_libraries(linux.signal_waits rt)
+      link_with_pthread(linux.signal_waits)
+      # Without its other thread, for -no_intercept_all_signals (see main_run_list).
+      torunonly(linux.signal_waits_single linux.signal_waits linux/signal_waits.c ""
+        "noflush")
+      # Each unmap of code its other thread ran resets DR's caches, suspending this
+      # thread in its waits, which DR then issues again.
+      torunonly(linux.signal_waits_reset linux.signal_waits linux/signal_waits.c
+        "-enable_reset -reset_every_nth_pending 1" "")
+    endif ()
 
     tobuild(linux.signal_pre_syscall linux/signal_pre_syscall.c)
     target_link_libraries(linux.signal_pre_syscall rt)

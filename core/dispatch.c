@@ -2167,6 +2167,11 @@ handle_system_call(dcontext_t *dcontext)
                 /* A wait with a temporary mask fails with EINTR when a signal is
                  * pending at its entry, as its pre-syscall handler does for one
                  * pending when it installs the mask.
+                 * XXX: an approximation, as is that handler's: natively an fd
+                 * already ready, a zero timeout or an invalid argument can take
+                 * precedence.  Handing a kernel-blockable signal back to the
+                 * kernel, blocked until the wait's mask unblocks it, and issuing
+                 * the wait would let the kernel decide.
                  */
                 if (os_syscall_is_masked_wait(dcontext)) {
                     fail_masked_wait = true;
@@ -2210,6 +2215,8 @@ handle_system_call(dcontext_t *dcontext)
             set_at_syscall(dcontext, false);
             dcontext->next_tag = saved_next_tag;
             set_next_tag_to_prior_syscall(dcontext);
+            /* The app issues it again after the handler. */
+            IF_LINUX(os_syscall_restart_undo_pre(dcontext));
             /* This only happens for ignorable syscalls and the waits of
              * os_syscall_is_wait_to_deliver_before(), so there is no pre-syscall
              * handling to undo or worry about duplicating when we re-attempt to

@@ -5693,13 +5693,15 @@ os_syscall_restart_pre(dcontext_t *dcontext)
     ostd->syscall_restart_param = -1;
     ostd->syscall_timeout_valid = false;
     ostd->syscall_reissued_by_us = false;
-    ostd->syscall_rem = NULL;
+    ostd->syscall_restart_hides_eintr = false;
+    ostd->syscall_rem_param = -1;
+    int rem_param = -1;
     switch (dcontext->sys_num) {
 #    ifdef SYS_nanosleep
     case SYS_nanosleep:
         relative = true;
         ts_param = 0;
-        ostd->syscall_rem = (struct timespec *)sys_param(dcontext, 1);
+        rem_param = 1;
         break;
 #    endif
     case SYS_clock_nanosleep:
@@ -5707,7 +5709,7 @@ os_syscall_restart_pre(dcontext_t *dcontext)
         ts_param = 2;
         /* An absolute sleep does not fill in its remaining time. */
         if (relative)
-            ostd->syscall_rem = (struct timespec *)sys_param(dcontext, 3);
+            rem_param = 3;
         break;
     case SYS_futex:
         relative = ((int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK) ==
@@ -5731,10 +5733,19 @@ os_syscall_restart_pre(dcontext_t *dcontext)
         break;
     default: break;
     }
-    if (ostd->syscall_rem != NULL &&
-        !d_r_safe_read(ostd->syscall_rem, sizeof(ostd->syscall_rem_value),
-                       &ostd->syscall_rem_value))
-        ostd->syscall_rem = NULL;
+#    ifdef AARCH64 /* Where we issue sleeps again: see os_syscall_restart_args(). */
+    if (rem_param > 0 && sys_param(dcontext, rem_param) != 0) {
+        /* The kernel fills in a sleep's remaining time whenever a signal interrupts
+         * it, ours included, and fails with EFAULT if it cannot.  Give it our own
+         * buffer, and give the app what it holds only when the app sees the sleep
+         * interrupted (os_syscall_restart_post()).
+         */
+        ostd->syscall_rem_param = rem_param;
+        ostd->syscall_rem_app = sys_param(dcontext, rem_param);
+        memset(&ostd->syscall_rem_shadow, 0, sizeof(ostd->syscall_rem_shadow));
+        set_syscall_param(dcontext, rem_param, (reg_t)&ostd->syscall_rem_shadow);
+    }
+#    endif
     if (relative) {
         ostd->syscall_start_ns = restart_clock_ns();
         struct timespec ts;
@@ -6032,15 +6043,100 @@ os_syscall_restart_post(dcontext_t *dcontext)
                           ostd->syscall_restart_app_value);
         ostd->syscall_restart_param = -1;
     }
-    if (ostd->syscall_reissued_by_us && ostd->syscall_rem != NULL &&
-        MCXT_SYSCALL_RES(get_mcontext(dcontext)) == 0) {
-        /* The sleep completed after we issued it again: undo the kernel's update
-         * of its remaining time when our signal interrupted it.
-         */
-        safe_write_ex(ostd->syscall_rem, sizeof(ostd->syscall_rem_value),
-                      &ostd->syscall_rem_value, NULL);
+    if (ostd->syscall_rem_param > 0) {
+        set_syscall_param(dcontext, ostd->syscall_rem_param, ostd->syscall_rem_app);
+        if ((ptr_int_t)MCXT_SYSCALL_RES(get_mcontext(dcontext)) == -EINTR &&
+            !ostd->syscall_restart_hides_eintr &&
+            !safe_write_ex((void *)ostd->syscall_rem_app,
+                           sizeof(ostd->syscall_rem_shadow), &ostd->syscall_rem_shadow,
+                           NULL)) {
+            /* As the kernel, for a remaining time it cannot write. */
+            set_failure_return_val(dcontext, EFAULT);
+        }
+        ostd->syscall_rem_param = -1;
     }
-    ostd->syscall_rem = NULL;
+    ostd->syscall_restart_hides_eintr = false;
+}
+
+/* For a syscall that is not issued after all (handle_system_call() delivering a
+ * signal first): puts back the arguments os_syscall_restart_pre() changed.
+ */
+void
+os_syscall_restart_undo_pre(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (ostd->syscall_rem_param > 0) {
+        set_syscall_param(dcontext, ostd->syscall_rem_param, ostd->syscall_rem_app);
+        ostd->syscall_rem_param = -1;
+    }
+}
+
+/* For a syscall about to be restarted from the app's syscall instruction after a
+ * signal handler (from a signal context): returns in *value the app's value of
+ * argument param if the context may hold one of ours instead (our remaining-time
+ * buffer, or the arguments of a syscall we issued again).  While the syscall is
+ * under way the mcontext holds the app's values but for os_syscall_restart_pre()'s.
+ */
+bool
+os_syscall_app_arg(dcontext_t *dcontext, int param, reg_t *value)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (param == ostd->syscall_rem_param) {
+        *value = ostd->syscall_rem_app;
+        return true;
+    }
+    if (ostd->syscall_reissued_by_us) {
+        *value = sys_param(dcontext, param);
+        return true;
+    }
+    return false;
+}
+
+/* The -EINTR the current syscall returns is about to become a restart after the
+ * signal handler, so the app does not see it (adjust_syscall_for_restart()).
+ */
+void
+os_syscall_note_restart_after_signal(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    ostd->syscall_restart_hides_eintr = true;
+}
+
+/* Whether the current syscall is a wait we issued again after our own signal
+ * interrupted it (os_syscall_note_reissue()) that an app signal with a handler ends
+ * with EINTR natively whatever its SA_RESTART: -ERESTARTNOHAND,
+ * -ERESTART_RESTARTBLOCK, or plain EINTR.
+ */
+bool
+os_syscall_reissued_wait_ends_with_eintr(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (!ostd->syscall_reissued_by_us)
+        return false;
+    switch (dcontext->sys_num) {
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep:
+#    endif
+    case SYS_clock_nanosleep:
+    case SYS_ppoll:
+    case SYS_pselect6:
+#    ifdef SYS_epoll_wait
+    case SYS_epoll_wait:
+#    endif
+    case SYS_epoll_pwait:
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
+    case SYS_rt_sigsuspend:
+    case SYS_rt_sigtimedwait: return true;
+    case SYS_futex: {
+        /* Without a timeout an interrupted wait gives -ERESTARTSYS. */
+        int cmd = (int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK;
+        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
+            sys_param(dcontext, 3) != 0;
+    }
+    default: return false;
+    }
 }
 #endif /* LINUX */
 

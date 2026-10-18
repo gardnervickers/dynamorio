@@ -251,12 +251,14 @@ typedef struct _os_thread_data_t {
      * it (restart_syscall_interrupted_by_us()): cleared by os_syscall_restart_pre().
      */
     bool syscall_reissued_by_us;
-    /* A sleep's remaining-time buffer and what it held before the sleep: the
-     * kernel fills it in when our signal interrupts the sleep, but a sleep we
-     * issue again and that completes must leave it as natively.
+    /* A sleep's remaining-time argument (syscall_rem_param, or -1), which we
+     * point at syscall_rem_shadow: the app's is syscall_rem_app.
      */
-    struct timespec *syscall_rem;
-    struct timespec syscall_rem_value;
+    int syscall_rem_param;
+    reg_t syscall_rem_app;
+    struct timespec syscall_rem_shadow;
+    /* The syscall's -EINTR is to become a restart after a signal handler. */
+    bool syscall_restart_hides_eintr;
     reg_t syscall_restart_app_value;
 #endif
 #ifdef X86
