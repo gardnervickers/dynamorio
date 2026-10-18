@@ -1696,8 +1696,10 @@ privload_set_libc_errno(int val)
  * kernel's values.  On x86, for one, glibc reports its own bits for AT_HWCAP.
  * XXX: This is not a general initialization of the private ld.so and libc from
  * the vector.  Still unset are GLRO(dl_minsigstacksize) (zero: redirect_sysconf()
- * covers its use in sysconf()), GLRO(dl_pagesize) (the compiled-in
- * EXEC_PAGESIZE), the GLRO hwcap fields that libc's own cpu feature setup reads,
+ * covers the three sysconf() names that assert on it, but not libc's internal
+ * uses), GLRO(dl_pagesize) (the compiled-in EXEC_PAGESIZE, which a private
+ * getpagesize() or sysconf(_SC_PAGESIZE) returns), the GLRO hwcap fields that
+ * libc's own cpu feature setup reads,
  * __libc_enable_secure (AT_SECURE) and the tunables.  And we only intercept
  * imports by name: libc's internal calls to its hidden __getauxval and
  * __getauxval2 still read GLRO(dl_auxv).
@@ -1723,24 +1725,32 @@ redirect_getauxval(unsigned long type)
 #    ifndef _SC_SIGSTKSZ
 #        define _SC_SIGSTKSZ 250
 #    endif
-/* The kernel's arm64 MINSIGSTKSZ and SIGSTKSZ, which glibc uses as its constants. */
+#    ifndef _SC_THREAD_STACK_MIN
+#        define _SC_THREAD_STACK_MIN 75
+#    endif
+/* The kernel's arm64 MINSIGSTKSZ and SIGSTKSZ, which glibc uses as its constants,
+ * and glibc's aarch64 PTHREAD_STACK_MIN.
+ */
 #    define PRIVLOAD_ARM64_MINSIGSTKSZ 5120
 #    define PRIVLOAD_ARM64_SIGSTKSZ 16384
+#    define PRIVLOAD_ARM64_PTHREAD_STACK_MIN 131072
 
 /* The private ld.so's GLRO(dl_minsigstacksize) is also left zero (see
  * redirect_getauxval()), and glibc's sysconf() asserts that it is not for
- * _SC_MINSIGSTKSZ and _SC_SIGSTKSZ.  Since glibc 2.34, SIGSTKSZ and MINSIGSTKSZ
- * are sysconf(_SC_SIGSTKSZ) under _GNU_SOURCE (which C++ defines), so a client
- * sizing a signal stack with them aborted:
+ * _SC_MINSIGSTKSZ, _SC_SIGSTKSZ and _SC_THREAD_STACK_MIN.  Since glibc 2.34,
+ * SIGSTKSZ, MINSIGSTKSZ and PTHREAD_STACK_MIN are sysconf() calls under
+ * _GNU_SOURCE (which C++ defines), so a client sizing a signal or thread stack
+ * with them aborted:
  *   Fatal glibc error: ../sysdeps/unix/sysv/linux/sysconf-sigstksz.h:25
  *   (sysconf_sigstksz): assertion failed: minsigstacksize != 0
- * We answer those two as glibc does on AArch64, from AT_MINSIGSTKSZ, and pass
- * everything else to the private libc.
+ * We answer those three as glibc does on AArch64, with dl_minsigstacksize as
+ * AT_MINSIGSTKSZ (glibc's 5120 if absent), and pass every other name, including
+ * _SC_PAGESIZE (see above), to the private libc.
  */
 static long
 redirect_sysconf(int name)
 {
-    if (name == _SC_MINSIGSTKSZ || name == _SC_SIGSTKSZ) {
+    if (name == _SC_MINSIGSTKSZ || name == _SC_SIGSTKSZ || name == _SC_THREAD_STACK_MIN) {
         long minsig = 0;
         for (uint i = 0; i < privload_auxv_num; i++) {
             if (privload_auxv[i].a_type == AT_MINSIGSTKSZ)
@@ -1750,6 +1760,8 @@ redirect_sysconf(int name)
             minsig = PRIVLOAD_ARM64_MINSIGSTKSZ;
         if (name == _SC_MINSIGSTKSZ)
             return minsig;
+        if (name == _SC_THREAD_STACK_MIN)
+            return MAX(minsig, PRIVLOAD_ARM64_PTHREAD_STACK_MIN);
         long size = MAX(minsig, PRIVLOAD_ARM64_MINSIGSTKSZ) * 4;
         return MAX(size, PRIVLOAD_ARM64_SIGSTKSZ);
     }
