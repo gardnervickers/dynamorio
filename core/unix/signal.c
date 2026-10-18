@@ -5725,11 +5725,12 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
     } else {
         ASSERT_NOT_REACHED(); /* Inlined syscalls no longer come here. */
     }
-#ifdef LINUX
+#if defined(LINUX) && (defined(AARCH64) || (defined(X86) && defined(X64)))
     /* Restarting from the app's syscall instruction, we handle the syscall again
      * from the start: give it the app's arguments, not the ones its pre-syscall
      * handling replaced with ours (a mask or timeout buffer of this thread's, which
      * a syscall in the signal handler can reuse), whether or not we issued it again.
+     * XXX: not done on x86-32 or ARM32, where pre_system_call() does not save them.
      */
     reg_t app_arg[6];
     for (int i = 0; i < 6; i++) {

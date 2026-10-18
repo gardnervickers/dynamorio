@@ -8102,8 +8102,13 @@ pre_system_call(dcontext_t *dcontext)
 #endif
 
 #ifdef LINUX
-    /* Before any handler below swaps an argument for something of ours. */
+#    if defined(AARCH64) || (defined(X86) && defined(X64))
+    /* Before any handler below swaps an argument for something of ours.  Only
+     * where a restart from a signal restores them: on x86-32 reading the sixth
+     * would be an unchecked read of the app's stack.
+     */
     os_syscall_save_app_args(dcontext);
+#    endif
     os_syscall_restart_pre(dcontext);
 #endif
 
