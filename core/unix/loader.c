@@ -151,6 +151,8 @@ static bool privload_auxv_complete;
 static ELF_AUXV_TYPE *privload_initial_auxv;
 /* The private libc's __errno_location(), for redirect_getauxval(). */
 static int *(*privload_libc_errno_loc)(void);
+/* The private libc's sysconf(), for redirect_sysconf(). */
+static long (*privload_libc_sysconf)(int);
 #endif
 
 /* pointing to the I/O data structure in privately loaded libc,
@@ -360,6 +362,7 @@ os_loader_exit(void)
 #if defined(LINUX) && defined(AARCH64)
     /* The private libc is gone: a re-attach loads it again. */
     privload_libc_errno_loc = NULL;
+    privload_libc_sysconf = NULL;
 #endif
 #ifdef LINUX
     /* Put printed_gdb_commands into its original state for potential
@@ -735,6 +738,8 @@ privload_os_finalize(privmod_t *privmod)
 #    ifdef AARCH64
     privload_libc_errno_loc = (int *(*)(void))get_proc_address_from_os_data(
         &opd->os_data, opd->load_delta, "__errno_location", NULL);
+    privload_libc_sysconf = (long (*)(int))get_proc_address_from_os_data(
+        &opd->os_data, opd->load_delta, "sysconf", NULL);
 #    endif
     /* i#5133: glibc 2.32+ has ld.so call a hardcoded initializer before calling the
      * regular ELF constructors.
@@ -1676,10 +1681,9 @@ privload_set_libc_errno(int val)
  * We only do this on AArch64, where glibc's AT_HWCAP and AT_HWCAP2 are the
  * kernel's values.  On x86, for one, glibc reports its own bits for AT_HWCAP.
  * XXX: This is not a general initialization of the private ld.so and libc from
- * the vector.  Still unset are GLRO(dl_minsigstacksize) (zero: a private
- * sysconf(_SC_SIGSTKSZ), and so glibc 2.34+'s dynamic SIGSTKSZ, asserts),
- * GLRO(dl_pagesize) (the compiled-in EXEC_PAGESIZE), the GLRO hwcap fields that
- * libc's own cpu feature setup reads,
+ * the vector.  Still unset are GLRO(dl_minsigstacksize) (zero: redirect_sysconf()
+ * covers its use in sysconf()), GLRO(dl_pagesize) (the compiled-in
+ * EXEC_PAGESIZE), the GLRO hwcap fields that libc's own cpu feature setup reads,
  * __libc_enable_secure (AT_SECURE) and the tunables.  And we only intercept
  * imports by name: libc's internal calls to its hidden __getauxval and
  * __getauxval2 still read GLRO(dl_auxv).
@@ -1693,6 +1697,52 @@ redirect_getauxval(unsigned long type)
     }
     privload_set_libc_errno(ENOENT);
     return 0;
+}
+
+#    ifndef AT_MINSIGSTKSZ
+#        define AT_MINSIGSTKSZ 51
+#    endif
+#    ifndef _SC_MINSIGSTKSZ
+#        define _SC_MINSIGSTKSZ 249
+#    endif
+#    ifndef _SC_SIGSTKSZ
+#        define _SC_SIGSTKSZ 250
+#    endif
+/* The kernel's arm64 MINSIGSTKSZ and SIGSTKSZ, which glibc uses as its constants. */
+#    define PRIVLOAD_ARM64_MINSIGSTKSZ 5120
+#    define PRIVLOAD_ARM64_SIGSTKSZ 16384
+
+/* The private ld.so's GLRO(dl_minsigstacksize) is also left zero (see
+ * redirect_getauxval()), and glibc's sysconf() asserts that it is not for
+ * _SC_MINSIGSTKSZ and _SC_SIGSTKSZ.  Since glibc 2.34, SIGSTKSZ and MINSIGSTKSZ
+ * are sysconf(_SC_SIGSTKSZ) under _GNU_SOURCE (which C++ defines), so a client
+ * sizing a signal stack with them aborted:
+ *   Fatal glibc error: ../sysdeps/unix/sysv/linux/sysconf-sigstksz.h:25
+ *   (sysconf_sigstksz): assertion failed: minsigstacksize != 0
+ * We answer those two as glibc does on AArch64, from AT_MINSIGSTKSZ, and pass
+ * everything else to the private libc.
+ */
+static long
+redirect_sysconf(int name)
+{
+    if (name == _SC_MINSIGSTKSZ || name == _SC_SIGSTKSZ) {
+        long minsig = 0;
+        for (uint i = 0; i < privload_auxv_num; i++) {
+            if (privload_auxv[i].a_type == AT_MINSIGSTKSZ)
+                minsig = (long)privload_auxv[i].a_un.a_val;
+        }
+        if (minsig == 0)
+            minsig = PRIVLOAD_ARM64_MINSIGSTKSZ;
+        if (name == _SC_MINSIGSTKSZ)
+            return minsig;
+        long size = MAX(minsig, PRIVLOAD_ARM64_MINSIGSTKSZ) * 4;
+        return MAX(size, PRIVLOAD_ARM64_SIGSTKSZ);
+    }
+    if (privload_libc_sysconf == NULL) {
+        privload_set_libc_errno(EINVAL);
+        return -1;
+    }
+    return (*privload_libc_sysconf)(name);
 }
 #endif /* LINUX && AARCH64 */
 
@@ -1804,6 +1854,9 @@ static const redirect_import_t redirect_imports[] = {
     /* A private libc's getauxval() crashes: see redirect_getauxval(). */
     { "getauxval", (app_pc)redirect_getauxval },
     { "__getauxval", (app_pc)redirect_getauxval },
+    /* A private libc's sysconf() asserts for these: see redirect_sysconf(). */
+    { "sysconf", (app_pc)redirect_sysconf },
+    { "__sysconf", (app_pc)redirect_sysconf },
 #    endif
 #    if defined(ARM) && !defined(ANDROID)
     /* i#1717: C++ exceptions call this on ARM Linux */
