@@ -661,6 +661,7 @@ drreg_respill_aflags_after_write(void *drcontext, per_thread_t *pt, instrlist_t 
                                  instr_t *inst, instr_t *next, bool force_respill)
 {
     drreg_status_t res = DRREG_SUCCESS;
+    uint app_slot = MAX_SPILLS;
     if ((force_respill ||
          TESTANY(EFLAGS_WRITE_ARITH, instr_get_eflags(inst, DR_QUERY_INCLUDE_ALL))) &&
         /* Is everything written later? */
@@ -671,6 +672,7 @@ drreg_respill_aflags_after_write(void *drcontext, per_thread_t *pt, instrlist_t 
                 "%s @%d." PFX ": re-spilling aflags after app write\n", __FUNCTION__,
                 pt->live_idx, get_where_app_pc(inst));
             /* Release current aflags slot if any. We'll reserve a new one if needed. */
+            app_slot = pt->aflags.slot;
             reset_aflags_spill_slot(pt);
             /* The spill goes after inst, so any scratch gpr it reserves must be
              * chosen by the liveness after an app inst: inst may write a gpr that
@@ -702,8 +704,20 @@ drreg_respill_aflags_after_write(void *drcontext, per_thread_t *pt, instrlist_t 
                 pt->aflags.xchg == DR_REG_XAX)
                 drreg_move_aflags_from_reg(drcontext, bb, inst, pt, true);
 #endif
+            app_slot = pt->aflags.slot;
             reset_aflags_spill_slot(pt);
             pt->aflags.native = true;
+        }
+        /* As for a gpr (see drreg_insert_respill_all()), the slot we released
+         * keeps the app flags until inst writes them, for a fault at inst: hold it
+         * until we are done with inst, so that a tool value spill before inst does
+         * not take it.  This matters on x86, where the gprs come after us.
+         * XXX: untested on x86, where drreg-test has no case for it (a faulting
+         * write-only instr such as popcnt with its destination reserved).
+         */
+        if (app_slot != MAX_SPILLS && pt->slot_use[app_slot] == DR_REG_NULL) {
+            pt->slot_use[app_slot] = IF_X86_ELSE(DR_REG_XAX, DR_REG_START_GPR);
+            hold_tmp_slot(pt, app_slot);
         }
     }
 
