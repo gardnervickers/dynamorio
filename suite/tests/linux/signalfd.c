@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <poll.h>
+#include <sched.h>
 #include <pthread.h>
 #include <string.h>
 #include <sys/syscall.h>
@@ -342,8 +343,14 @@ send_thread(void *arg)
     int sig = *(int *)arg;
     while (!race_go)
         ;
-    for (int i = 0; i < 20; i++)
+    /* A few, not a burst: under DR, fault signals nest in its signal handler,
+     * which leaves them unblocked for its own faults, and a burst overflows its
+     * signal stack.
+     */
+    for (int i = 0; i < 3; i++) {
         syscall(SYS_tgkill, getpid(), main_tid, sig);
+        sched_yield();
+    }
     return NULL;
 }
 

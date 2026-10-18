@@ -443,13 +443,22 @@ signalfd_finish_closes(void)
         /* Handlers already writing are brief. */
         while ((atomic_aligned_read_int(&pipe->state) & ~SIGFD_PIPE_CLOSED) != 0)
             os_thread_yield();
-        /* Each record goes back to the thread that gave the pipe its signals (or
+        /* The records go back to the thread that gave the pipe its signals (or
          * this one, if that has exited): one we hold reaches our handler, which now
-         * queues it.
+         * queues it.  Our signals are all standard ones, which the kernel keeps
+         * pending once, so only the first record of each goes back (sending them
+         * all would also nest them in our handler).
          */
+        kernel_sigset_t sent;
+        kernel_sigemptyset(&sent);
         while (!signalfd_exiting &&
                dynamorio_syscall(SYS_read, 3, pipe->read_fd, &rec, sizeof(rec)) ==
                    sizeof(rec)) {
+            if (rec.ssi_signo == 0 || rec.ssi_signo > MAX_SIGNUM ||
+                ((int)rec.ssi_signo < OFFS_RT &&
+                 kernel_sigismember(&sent, (int)rec.ssi_signo)))
+                continue;
+            kernel_sigaddset(&sent, (int)rec.ssi_signo);
             signalfd_record_to_siginfo(&rec, &si);
             if (!signalfd_requeue(pipe->owner, &si) &&
                 !signalfd_requeue(get_sys_thread_id(), &si)) {
