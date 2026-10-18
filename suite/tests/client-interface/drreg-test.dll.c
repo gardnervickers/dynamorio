@@ -53,7 +53,9 @@ uint tls_offs_app2app_spilled_reg;
 uint tls_offs_test_reg_1;
 uint tls_offs_aflags;
 #ifdef AARCH64
-/* Test #41: TEST_REG's dedicated slot, and where TEST_REG2's tool value went. */
+/* Tests #41 and #42: TEST_REG's dedicated slot, and where TEST_REG2's tool value
+ * went.
+ */
 static int test41_slot_offs = -1;
 static int test41_tool_spill_offs;
 #endif
@@ -1131,18 +1133,22 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
             CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
         }
 #ifdef AARCH64
-    } else if (subtest == DRREG_TEST_41_C) {
-        /* As #40, but TEST_REG is dead and so never spilled: drreg should not keep
-         * its slot from TEST_REG2's tool value (see event_instru2instru()).
+    } else if (subtest == DRREG_TEST_41_C || subtest == DRREG_TEST_42_C) {
+        /* As #40, but TEST_REG is dead and so never spilled (#41), or spilled and
+         * then overwritten by the app with a dead value while reserved (#42): drreg
+         * should not keep its slot from TEST_REG2's tool value (see
+         * event_instru2instru()).
          */
-        dr_log(drcontext, DR_LOG_ALL, 1, "drreg test #41\n");
+        dr_log(drcontext, DR_LOG_ALL, 1, "drreg test #41/#42\n");
         if (instr_is_nop(inst)) {
             CHECK(drreg_reserve_register(drcontext, bb, inst, &allowed_test_reg_1,
                                          &reg) == DRREG_SUCCESS,
                   "cannot reserve register");
             res = drreg_reservation_info_ex(drcontext, TEST_REG, &info);
-            CHECK(res == DRREG_SUCCESS && !info.app_value_retained && !info.is_dr_slot,
-                  "dead reg should own a dedicated slot without a spill");
+            CHECK(res == DRREG_SUCCESS &&
+                      info.app_value_retained == (subtest == DRREG_TEST_42_C) &&
+                      !info.is_dr_slot,
+                  "reg should own a dedicated slot, spilled only in #42");
             test41_slot_offs = info.tls_offs;
             CHECK(drreg_reserve_register(drcontext, bb, inst, &allowed_test_reg_2,
                                          &reg) == DRREG_SUCCESS,
@@ -1204,9 +1210,9 @@ event_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
         return DR_EMIT_DEFAULT;
     }
 #ifdef AARCH64
-    if (subtest == DRREG_TEST_41_C) {
+    if (subtest == DRREG_TEST_41_C || subtest == DRREG_TEST_42_C) {
         /* TEST_REG2's tool value goes into the slot of TEST_REG, which the app instr
-         * writing both drops and which never held an app value.
+         * writing both drops and which holds no app value that anyone needs.
          */
         test41_tool_spill_offs = -1;
         for (inst = instrlist_first(bb); inst != NULL; inst = instr_get_next(inst)) {

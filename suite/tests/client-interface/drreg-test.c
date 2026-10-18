@@ -110,6 +110,10 @@ void
 test_asm_fault_restore_gpr_dropped_unspilled_slot();
 void
 test41_fault();
+void
+test_asm_fault_restore_gpr_dropped_stale_slot();
+void
+test42_fault();
 #    endif
 
 static SIGJMP_BUF mark;
@@ -391,8 +395,9 @@ handle_signal_gpr_dropped_unspilled_slot(int signal, siginfo_t *siginfo,
 {
     if (signal == SIGSEGV) {
         sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
-        if (sc->SC_XIP != (ptr_uint_t)test41_fault)
-            print("ERROR: unexpected fault pc in test #41!\n");
+        if (sc->SC_XIP != (ptr_uint_t)test41_fault &&
+            sc->SC_XIP != (ptr_uint_t)test42_fault)
+            print("ERROR: unexpected fault pc in test #41/#42!\n");
     }
     SIGLONGJMP(mark, 1);
 }
@@ -953,6 +958,11 @@ main(int argc, const char *argv[])
      */
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_gpr_dropped_unspilled_slot();
+    }
+
+    /* The same where a dead app write replaced the app value in the slot. */
+    if (SIGSETJMP(mark) == 0) {
+        test_asm_fault_restore_gpr_dropped_stale_slot();
     }
 #    endif
 
@@ -3095,6 +3105,31 @@ ADDRTAKEN_LABEL(test41_fault:)
 
         b        epilog41
     epilog41:
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+
+DECLARE_GLOBAL(test42_fault)
+#define FUNCNAME test_asm_fault_restore_gpr_dropped_stale_slot
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        /* XXX i#3289: prologue missing */
+        b        test42
+     test42:
+        movz     TEST_REG_ASM, DRREG_TEST_42_ASM
+        movz     TEST_REG_ASM, DRREG_TEST_42_ASM
+        nop
+
+        /* Read reg so that its app value is live and spilled. */
+        add      x0, TEST_REG_ASM, TEST_REG_ASM
+        /* Overwrite it while reserved with a value that the ldp kills. */
+        movz     TEST_REG_ASM, TEST_INSTRUMENTATION_MARKER_2
+        movz     x0, TEST_INSTRUMENTATION_MARKER_1
+ADDRTAKEN_LABEL(test42_fault:)
+        ldp      TEST_REG_ASM, TEST_REG2_ASM, [x0] /* crash */
+
+        b        epilog42
+    epilog42:
         ret
         END_FUNC(FUNCNAME)
 #undef FUNCNAME

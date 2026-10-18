@@ -102,6 +102,10 @@ typedef struct _reg_info_t {
      * reservation).
      */
     bool ever_spilled;
+    /* The app overwrote the reg while reserved, with a value dead beyond that write,
+     * which we did not spill: the slot has an old app value that no one needs.
+     */
+    bool app_value_stale;
 
     /* Where is the app value for this reg? */
     bool native;   /* app value is in original app reg */
@@ -799,6 +803,7 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                  * inserting before inst (the old instr_get_prev(next)) would
                  * spill before the callee's dr_set_mcontext() changes.
                  */
+                pt->reg[GPR_IDX(reg)].app_value_stale = !app_live;
                 if (!app_live) {
                     /* Nothing to save. */
                 } else if (restored_for_read[GPR_IDX(reg)]) {
@@ -831,7 +836,8 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                 __FUNCTION__, pt->live_idx, get_where_app_pc(inst),
                 get_register_name(reg));
             uint slot = pt->reg[GPR_IDX(reg)].slot;
-            bool slot_has_app_value = pt->reg[GPR_IDX(reg)].ever_spilled;
+            bool slot_has_app_value = pt->reg[GPR_IDX(reg)].ever_spilled &&
+                !pt->reg[GPR_IDX(reg)].app_value_stale;
             if (pt->reg[GPR_IDX(reg)].ever_spilled)
                 pt->reg[GPR_IDX(reg)].ever_spilled = false; /* no need to restore */
             res = drreg_restore_reg_now(drcontext, bb, inst, pt, reg);
@@ -840,8 +846,9 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
             /* The slot keeps the app value until inst writes reg: a fault at inst
              * needs it.  Hold the slot until we are done with inst, so that a
              * reserved register's tool value spill before inst does not take it.
-             * A slot we never spilled to has nothing to keep, and holding it could
-             * leave that spill without a slot.
+             * A slot we never spilled to, or whose app value a dead app write
+             * replaced, has nothing to keep, and holding it could leave that spill
+             * without a slot.
              */
             if (slot_has_app_value && pt->slot_use[slot] == DR_REG_NULL) {
                 pt->slot_use[slot] = reg;
@@ -1205,6 +1212,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
             pt->slot_use[slot] = reg;
             pt->reg[GPR_IDX(reg)].ever_spilled = false;
         }
+        pt->reg[GPR_IDX(reg)].app_value_stale = false;
     } else {
         LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ": %s already spilled to slot %d\n",
             __FUNCTION__, pt->live_idx, get_where_app_pc(where), get_register_name(reg),
@@ -1749,6 +1757,7 @@ drreg_move_aflags_from_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].in_use = false;
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].native = true;
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].ever_spilled = false;
+        pt->reg[DR_REG_XAX - DR_REG_START_GPR].app_value_stale = false;
         pt->aflags.xchg = DR_REG_NULL;
     }
 #endif
@@ -1795,6 +1804,7 @@ drreg_spill_aflags(void *drcontext, instrlist_t *ilist, instr_t *where, per_thre
                                pt->live_idx) == REG_LIVE) {
             spill_reg(drcontext, pt, DR_REG_XAX, xax_slot, ilist, where);
             pt->reg[DR_REG_XAX - DR_REG_START_GPR].ever_spilled = true;
+            pt->reg[DR_REG_XAX - DR_REG_START_GPR].app_value_stale = false;
         } else {
             /* XXX: Re-analyzing this: we shouldn't need this slot?
              * drreg_move_aflags_from_reg() undoes it for this xax-is-dead case; can
