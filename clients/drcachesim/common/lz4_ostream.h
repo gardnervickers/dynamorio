@@ -42,6 +42,7 @@
 #endif
 
 #include <array>
+#include <fstream>
 #include <streambuf>
 #include <vector>
 #include <lz4frame.h>
@@ -55,6 +56,8 @@ public:
     {
         auto res = LZ4F_createCompressionContext(&lzctx_, LZ4F_VERSION);
         if (LZ4F_isError(res)) {
+            lzctx_ = nullptr;
+            failed_ = true;
             return;
         }
 
@@ -63,6 +66,10 @@ public:
         // aborts under _GLIBCXX_ASSERTIONS, which gcc 15+ enables at -O0.
         dest_buf_.resize(LZ4F_compressBound(src_buf_.size(), nullptr));
         file_ = new std::ofstream(path);
+        if (!*file_) {
+            failed_ = true;
+            return;
+        }
 
         char *base = src_buf_.data();
         setp(base, base + src_buf_.size() - 1);
@@ -72,43 +79,90 @@ public:
 
     ~lz4_ostreambuf_t()
     {
-        sync();
-        write_footer();
+        if (!failed_) {
+            sync();
+            write_footer();
+        }
         if (file_ != nullptr) {
             delete file_;
             file_ = nullptr;
         }
-        LZ4F_freeCompressionContext(lzctx_);
+        if (lzctx_ != nullptr)
+            LZ4F_freeCompressionContext(lzctx_);
     }
 
 private:
     int
     overflow(int extra_char) override
     {
-        if (file_ == nullptr)
+        if (failed_)
             return traits_type::eof();
 
         if (extra_char != traits_type::eof()) {
             *pptr() = traits_type::to_char_type(extra_char);
             pbump(1);
         }
-
-        int size = static_cast<int>(pptr() - pbase());
-        pbump(-size);
-        auto ret = LZ4F_compressUpdate(lzctx_, dest_buf_.data(), dest_buf_.size(),
-                                       pbase(), size, nullptr);
-        if (LZ4F_isError(ret)) {
+        if (!compress_pending())
             return traits_type::eof();
-        }
-
-        file_->write(dest_buf_.data(), ret);
         return traits_type::not_eof(extra_char);
     }
 
+    // Compresses and writes out the data in our buffer, and then flushes both what
+    // LZ4 holds back and the file.
     int
     sync() override
     {
-        return overflow(traits_type::eof());
+        if (failed_ || !compress_pending())
+            return -1;
+        auto res = LZ4F_flush(lzctx_, dest_buf_.data(), dest_buf_.size(), nullptr);
+        if (LZ4F_isError(res)) {
+            fail();
+            return -1;
+        }
+        if (!write_out(res))
+            return -1;
+        if (!file_->flush()) {
+            fail();
+            return -1;
+        }
+        return 0;
+    }
+
+    // Hands the data in our buffer to LZ4 and writes what it produces.  The data is
+    // consumed either way: on an error we accept nothing more rather than
+    // compress it again.
+    bool
+    compress_pending()
+    {
+        int size = static_cast<int>(pptr() - pbase());
+        pbump(-size);
+        if (size == 0)
+            return true;
+        auto res = LZ4F_compressUpdate(lzctx_, dest_buf_.data(), dest_buf_.size(),
+                                       pbase(), size, nullptr);
+        if (LZ4F_isError(res)) {
+            fail();
+            return false;
+        }
+        return write_out(res);
+    }
+
+    bool
+    write_out(size_t size)
+    {
+        if (size > 0 && !file_->write(dest_buf_.data(), size)) {
+            fail();
+            return false;
+        }
+        return true;
+    }
+
+    // Stops accepting data: the stream using us then fails its writes.
+    void
+    fail()
+    {
+        failed_ = true;
+        setp(nullptr, nullptr);
     }
 
     void
@@ -117,9 +171,10 @@ private:
         auto res =
             LZ4F_compressBegin(lzctx_, dest_buf_.data(), dest_buf_.size(), nullptr);
         if (LZ4F_isError(res)) {
+            fail();
             return;
         }
-        file_->write(dest_buf_.data(), res);
+        write_out(res);
     }
 
     void
@@ -127,9 +182,11 @@ private:
     {
         auto res = LZ4F_compressEnd(lzctx_, dest_buf_.data(), dest_buf_.size(), nullptr);
         if (LZ4F_isError(res)) {
+            fail();
             return;
         }
-        file_->write(dest_buf_.data(), res);
+        if (write_out(res))
+            file_->flush();
     }
 
 private:
@@ -138,6 +195,7 @@ private:
     std::array<char, buffer_size_> src_buf_;
     std::vector<char> dest_buf_;
     LZ4F_compressionContext_t lzctx_ = nullptr;
+    bool failed_ = false;
 };
 
 class lz4_ostream_t : public std::ostream {
