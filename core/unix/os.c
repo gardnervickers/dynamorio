@@ -225,6 +225,21 @@ char **our_environ;
 #    define SYSNUM_EXIT_THREAD SYS_exit
 #endif
 
+#if defined(LINUX) && defined(AARCH64)
+/* prctl(PR_SET_TSC) can deny a thread the counter that KSTATS reads (see
+ * os_timer_counter_readable()).
+ */
+#    ifndef PR_GET_TSC
+#        define PR_GET_TSC 25
+#    endif
+#    ifndef PR_SET_TSC
+#        define PR_SET_TSC 26
+#    endif
+#    ifndef PR_TSC_ENABLE
+#        define PR_TSC_ENABLE 1
+#    endif
+#endif
+
 #ifdef ANDROID
 /* Custom prctl flags specific to Android (xref i#1861) */
 #    define PR_SET_VMA 0x53564d41
@@ -1304,24 +1319,21 @@ bool
 os_timer_counter_readable(void)
 {
 #if defined(AARCH64) && defined(LINUX)
-#    ifndef PR_GET_TSC
-#        define PR_GET_TSC 25
-#    endif
-#    ifndef PR_TSC_SIGSEGV
-#        define PR_TSC_SIGSEGV 2
-#    endif
     /* Linux lets EL0 read CNTVCT_EL0 and CNTFRQ_EL0, directly or (for timer
      * errata) by trapping and emulating the reads, unless the thread has asked
      * with prctl(PR_SET_TSC, PR_TSC_SIGSEGV) for the reads to raise SIGSEGV, as
-     * record-and-replay tools do.  Kernels before 6.12 have no such prctl on
-     * AArch64 (PR_GET_TSC fails) and always allow the reads.
+     * record-and-replay tools do.  We trust only an answer from PR_GET_TSC: kernels
+     * before 6.12 have no such prctl on AArch64 (and always allow the reads), but a
+     * seccomp filter can make it fail too, after the thread disabled the counter.
+     * (KSTATS then needs a 6.12 kernel.)
      */
     int mode = 0;
-    if (dynamorio_syscall(SYS_prctl, 2, (ptr_uint_t)PR_GET_TSC, (ptr_uint_t)&mode) == 0 &&
-        mode == PR_TSC_SIGSEGV)
-        return false;
-#endif
+    return dynamorio_syscall(SYS_prctl, 2, (ptr_uint_t)PR_GET_TSC, (ptr_uint_t)&mode) ==
+        0 &&
+        mode == PR_TSC_ENABLE;
+#else
     return true;
+#endif
 }
 
 timestamp_t

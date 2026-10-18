@@ -190,8 +190,8 @@ kstat_init()
      * so we can read it at CPL 3
      */
     if (!os_timer_counter_readable()) {
-        SYSLOG_INTERNAL_WARNING("-kstats disabled: this thread cannot read the "
-                                "timestamp counter");
+        SYSLOG_INTERNAL_WARNING("-kstats disabled: this thread may not be able to "
+                                "read the timestamp counter");
         options_make_writable();
         dynamo_options.kstats = false;
         options_restore_readonly();
@@ -263,7 +263,7 @@ kstat_thread_init(dcontext_t *dcontext)
     thread_kstats_t *new_thread_kstats;
     if (!DYNAMO_OPTION(kstats))
         return; /* dcontext->thread_kstats stays NULL */
-    /* A thread that cannot read the counter is not timed. */
+    /* A thread that may not be able to read the counter is not timed. */
     if (!os_timer_counter_readable()) {
         LOG(THREAD, LOG_STATS, 1, "kstats off: thread cannot read the counter\n");
         return;
