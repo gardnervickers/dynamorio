@@ -938,6 +938,7 @@ main(int argc, const char *argv[])
      */
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_gpr_tool_value_moved_for_read();
+        print("ERROR: no fault in test #39!\n");
     }
 
 #    ifdef AARCH64
@@ -948,6 +949,7 @@ main(int argc, const char *argv[])
      */
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_gpr_dropped_slot();
+        print("ERROR: no fault in test #40!\n");
     }
 
     intercept_signal(SIGSEGV, (handler_3_t)&handle_signal_gpr_dropped_unspilled_slot,
@@ -958,11 +960,13 @@ main(int argc, const char *argv[])
      */
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_gpr_dropped_unspilled_slot();
+        print("ERROR: no fault in test #41!\n");
     }
 
     /* The same where a dead app write replaced the app value in the slot. */
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_gpr_dropped_stale_slot();
+        print("ERROR: no fault in test #42!\n");
     }
 #    endif
 
