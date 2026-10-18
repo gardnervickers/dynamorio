@@ -5487,6 +5487,11 @@ if (UNIX)
     tobuild(linux.syscall_pwait linux/syscall_pwait.cpp)
     link_with_pthread(linux.syscall_pwait)
   endif ()
+  if (LINUX)
+    # The app's TLS base moving across unmaps, remaps and mprotects.
+    tobuild(linux.tls_remap linux/tls_remap.c)
+    link_with_pthread(linux.tls_remap)
+  endif ()
   if (LINUX AND NOT ANDROID) # Only tests RT sigaction which is not supported on Android.
     tobuild(linux.sigaction_nosignals linux/sigaction_nosignals.c)
   endif ()

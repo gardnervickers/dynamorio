@@ -103,6 +103,14 @@ DECLARE_NEVERPROT_VAR(static int unmaps_in_flight, 0);
  */
 DECLARE_NEVERPROT_VAR(static int unmap_generation, 0);
 
+/* Nonzero while the app may have changed its mappings without DR seeing it, so a
+ * cached entry may be out of date (a miss still asks the OS): from dr_app_setup(),
+ * which leaves the process native, or from the process leaving DR's control
+ * (os_process_not_under_dynamorio()), until memcache_update_all_from_os() rebuilds
+ * the cache once every thread is back under DR (os_process_under_dynamorio_complete()).
+ */
+DECLARE_NEVERPROT_VAR(static int stale_from_native, 0);
+
 void
 memcache_unmap_begin(void)
 {
@@ -134,6 +142,7 @@ memcache_init(void)
                           all_memory_areas);
     vmvector_set_callbacks(all_memory_areas, allmem_info_free, allmem_info_dup,
                            allmem_should_merge, allmem_info_merge);
+    ATOMIC_4BYTE_ALIGNED_WRITE(&stale_from_native, dr_api_entry ? 1 : 0, false);
 }
 
 void
@@ -149,6 +158,18 @@ memcache_initialized(void)
     return (all_memory_areas != NULL && !vmvector_empty(all_memory_areas) &&
             /* not really set until vm_areas_init() */
             dynamo_initialized);
+}
+
+bool
+memcache_up_to_date(void)
+{
+    return memcache_initialized() && atomic_aligned_read_int(&stale_from_native) == 0;
+}
+
+void
+memcache_mark_stale(void)
+{
+    ATOMIC_4BYTE_ALIGNED_WRITE(&stale_from_native, 1, false);
 }
 
 /* HACK to get recursive write lock for internal and external use
@@ -676,6 +697,8 @@ memcache_update_all_from_os(void)
     /* We clear the entire cache to avoid false positive queries. */
     vmvector_reset_vector(GLOBAL_DCONTEXT, all_memory_areas);
     os_walk_address_space(&iter, false);
+    /* Under the lock, so a reader that sees this takes the lock after the rebuild. */
+    ATOMIC_4BYTE_ALIGNED_WRITE(&stale_from_native, 0, false);
     memcache_unlock();
     memquery_iterator_stop(&iter);
 }

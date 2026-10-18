@@ -3080,6 +3080,8 @@ os_process_under_dynamorio_complete(dcontext_t *dcontext)
 void
 os_process_not_under_dynamorio(dcontext_t *dcontext)
 {
+    /* The app may now change its mappings without our seeing it. */
+    IF_NO_MEMQUERY(memcache_mark_stale());
     /* We only support regular process-wide signal handlers for mixed-mode control. */
     signal_remove_handlers(dcontext);
     unhook_vsyscall();
@@ -7689,17 +7691,23 @@ os_switch_seg_to_context(dcontext_t *dcontext, reg_id_t seg, bool to_app)
              * Also rule out an unwritable region, which seems to happen on arm
              * where at process init the thread reg points at rodata in libc
              * until properly set to a writable mmap later.
-             * We ask /proc/self/maps alone and do not read the memory:
-             * get_memory_info() can also read the start of the mapping looking for
-             * an ELF header, which faults with SIGBUS beyond the end of a mapped
-             * file (and is done even on a cache hit at -checklevel 2), and
-             * sig_detach() calls us with SIGBUS blocked.  This takes
-             * memory_info_buf_lock, as get_memory_info() could.
+             * Neither query reads the memory there (it could raise SIGBUS beyond
+             * the end of a mapped file, and sig_detach() calls us with SIGBUS
+             * blocked): the memory cache, on a miss or at -checklevel 2, asks the
+             * OS only for bounds and protection.  We use the cache, which avoids
+             * reading /proc/self/maps on every thread creation, unless it may lack
+             * changes the app made while native, before
+             * os_process_under_dynamorio_complete() rebuilds it.
+             * Either query may take memory_info_buf_lock.
              */
-            dr_mem_info_t info;
-            bool have_type;
-            if (!memquery_from_os(os_tls->app_lib_tls_base, &info, &have_type) ||
-                !TESTALL(MEMPROT_READ | MEMPROT_WRITE, info.prot))
+            uint prot;
+            bool ok;
+            if (IF_MEMQUERY_ELSE(false, memcache_up_to_date())) {
+                ok = get_memory_info(os_tls->app_lib_tls_base, NULL, NULL, &prot);
+            } else {
+                ok = get_memory_info_from_os(os_tls->app_lib_tls_base, NULL, NULL, &prot);
+            }
+            if (!ok || !TESTALL(MEMPROT_READ | MEMPROT_WRITE, prot))
                 app_mem_valid = false;
         }
         if (!app_mem_valid) {
@@ -11294,13 +11302,10 @@ get_memory_info(const byte *pc, byte **base_pc, size_t *size,
                 uint *prot /* OUT optional, returns MEMPROT_* value */)
 {
     dr_mem_info_t info;
-    if (is_vmm_reserved_address((byte *)pc, 1, NULL, NULL)) {
-        if (!query_memory_ex_from_os(pc, &info) || info.type == DR_MEMTYPE_FREE)
-            return false;
-    } else {
-        if (!query_memory_ex(pc, &info) || info.type == DR_MEMTYPE_FREE)
-            return false;
-    }
+    if (is_vmm_reserved_address((byte *)pc, 1, NULL, NULL))
+        return get_memory_info_from_os(pc, base_pc, size, prot);
+    if (!query_memory_ex(pc, &info) || info.type == DR_MEMTYPE_FREE)
+        return false;
     if (base_pc != NULL)
         *base_pc = info.base_pc;
     if (size != NULL)
@@ -11346,12 +11351,23 @@ query_memory_ex_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info)
     return res;
 }
 
+/* Unlike query_memory_ex_from_os(), this does not classify the region as image or
+ * data, so it reads only the OS's mapping metadata and never the memory itself
+ * (looking for an ELF header there raises SIGBUS beyond the end of a mapped file).
+ * Returns false for an unmapped address, but true for a mapped PROT_NONE region.
+ */
 bool
 get_memory_info_from_os(const byte *pc, byte **base_pc, size_t *size,
                         uint *prot /* OUT optional, returns MEMPROT_* value */)
 {
     dr_mem_info_t info;
-    if (!query_memory_ex_from_os(pc, &info) || info.type == DR_MEMTYPE_FREE)
+    bool have_type = false;
+    if (!memquery_from_os(pc, &info, &have_type))
+        return false;
+    /* memquery_from_os() succeeds for an unmapped address too, giving the free
+     * interval around it the type DR_MEMTYPE_FREE; it gives no type for a mapping.
+     */
+    if (have_type && info.type == DR_MEMTYPE_FREE)
         return false;
     if (base_pc != NULL)
         *base_pc = info.base_pc;
