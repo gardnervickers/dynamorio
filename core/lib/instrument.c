@@ -6609,6 +6609,10 @@ dr_set_mcontext(void *drcontext, dr_mcontext_t *context)
         /* It would be nice to fail for #DR_XFER_CALLBACK_RETURN but we'd need to
          * store yet more state to do so.  The pc will be ignored, and xsi
          * changes will likely cause crashes.
+         * XXX: On AArch64 the frame's whole PSTATE becomes context->nzcv, which
+         * dr_get_mcontext() filled with it but a client may compute as just the
+         * condition flags: DIT, SSBS and TCO (PSTATE_APP_STATE_BITS) are then
+         * cleared in the app's PSTATE.  NZCV-only writes should keep the rest.
          */
         return mcontext_to_os_context(dcontext->client_data->os_cxt, context, NULL);
     }

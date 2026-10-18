@@ -5026,6 +5026,11 @@ send_signal_to_client(dcontext_t *dcontext, int sig, sigframe_rt_t *frame,
         /* propagate client changes */
         CLIENT_ASSERT(si.mcontext->flags == DR_MC_ALL,
                       "signal mcontext flags cannot be changed");
+        /* XXX: On AArch64 the frame's whole PSTATE becomes si.mcontext->nzcv,
+         * which holds it unless the client stored just condition flags there:
+         * then DIT, SSBS and TCO (PSTATE_APP_STATE_BITS) are cleared in the
+         * delivered frame.  NZCV-only writes should keep the rest.
+         */
         mcontext_to_ucontext(uc, dr_mcontext_as_priv_mcontext(si.mcontext));
     } else if (action == DR_SIGNAL_SUPPRESS && raw_sc != NULL) {
         /* propagate client changes */
