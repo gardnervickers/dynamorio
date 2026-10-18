@@ -810,6 +810,7 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                 __FUNCTION__, pt->live_idx, get_where_app_pc(inst),
                 get_register_name(reg));
             uint slot = pt->reg[GPR_IDX(reg)].slot;
+            bool slot_has_app_value = pt->reg[GPR_IDX(reg)].ever_spilled;
             if (pt->reg[GPR_IDX(reg)].ever_spilled)
                 pt->reg[GPR_IDX(reg)].ever_spilled = false; /* no need to restore */
             res = drreg_restore_reg_now(drcontext, bb, inst, pt, reg);
@@ -818,8 +819,10 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
             /* The slot keeps the app value until inst writes reg: a fault at inst
              * needs it.  Hold the slot until we are done with inst, so that a
              * reserved register's tool value spill before inst does not take it.
+             * A slot we never spilled to has nothing to keep, and holding it could
+             * leave that spill without a slot.
              */
-            if (pt->slot_use[slot] == DR_REG_NULL) {
+            if (slot_has_app_value && pt->slot_use[slot] == DR_REG_NULL) {
                 pt->slot_use[slot] = reg;
                 hold_tmp_slot(pt, slot);
             }

@@ -52,6 +52,9 @@ uint tls_offs_app2app_spilled_aflags;
 uint tls_offs_app2app_spilled_reg;
 uint tls_offs_test_reg_1;
 uint tls_offs_aflags;
+/* Test #41: TEST_REG's dedicated slot, and where TEST_REG2's tool value went. */
+static int test41_slot_offs = -1;
+static int test41_tool_spill_offs;
 
 static bool
 is_drreg_test_label_marker(instr_t *inst)
@@ -1125,6 +1128,34 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
             res = drreg_unreserve_register(drcontext, bb, inst, TEST_REG2);
             CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
         }
+    } else if (subtest == DRREG_TEST_41_C) {
+        /* As #40, but TEST_REG is dead and so never spilled: drreg should not keep
+         * its slot from TEST_REG2's tool value (see event_instru2instru()).
+         */
+        dr_log(drcontext, DR_LOG_ALL, 1, "drreg test #41\n");
+        if (instr_is_nop(inst)) {
+            CHECK(drreg_reserve_register(drcontext, bb, inst, &allowed_test_reg_1,
+                                         &reg) == DRREG_SUCCESS,
+                  "cannot reserve register");
+            res = drreg_reservation_info_ex(drcontext, TEST_REG, &info);
+            CHECK(res == DRREG_SUCCESS && !info.app_value_retained && !info.is_dr_slot,
+                  "dead reg should own a dedicated slot without a spill");
+            test41_slot_offs = info.tls_offs;
+            CHECK(drreg_reserve_register(drcontext, bb, inst, &allowed_test_reg_2,
+                                         &reg) == DRREG_SUCCESS,
+                  "cannot reserve register");
+            instrlist_meta_preinsert(bb, inst,
+                                     XINST_CREATE_load_int(drcontext,
+                                                           opnd_create_reg(TEST_REG2),
+                                                           OPND_CREATE_INT32(MAGIC_VAL)));
+        } else if (instr_is_mov_constant(inst, &val) &&
+                   val == TEST_INSTRUMENTATION_MARKER_1) {
+            res = drreg_unreserve_register(drcontext, bb, inst, TEST_REG);
+            CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
+        } else if (drmgr_is_last_instr(drcontext, inst)) {
+            res = drreg_unreserve_register(drcontext, bb, inst, TEST_REG2);
+            CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
+        }
     }
 #ifdef X86
     drvector_delete(&allowed_test_reg_xax);
@@ -1166,6 +1197,29 @@ event_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
         subtest == DRREG_TEST_35_C || subtest == DRREG_TEST_36_C ||
         subtest == DRREG_TEST_37_C || subtest == DRREG_TEST_39_C ||
         subtest == DRREG_TEST_40_C) {
+        return DR_EMIT_DEFAULT;
+    }
+    if (subtest == DRREG_TEST_41_C) {
+        /* TEST_REG2's tool value goes into the slot of TEST_REG, which the app instr
+         * writing both drops and which never held an app value.
+         */
+        test41_tool_spill_offs = -1;
+        for (inst = instrlist_first(bb); inst != NULL; inst = instr_get_next(inst)) {
+            bool tls, spill;
+            reg_id_t spilled;
+            uint offs;
+            if (instr_is_app(inst) && instr_get_opcode(inst) == OP_ldp) {
+                CHECK(test41_slot_offs != -1, "missing slot of the dead reg");
+                CHECK(test41_tool_spill_offs == test41_slot_offs,
+                      "tool value not spilled to the dropped slot");
+                break;
+            }
+            if (!instr_is_app(inst) &&
+                instr_is_reg_spill_or_restore(drcontext, inst, &tls, &spill, &spilled,
+                                              &offs) &&
+                tls && spill && spilled == TEST_REG2)
+                test41_tool_spill_offs = (int)offs;
+        }
         return DR_EMIT_DEFAULT;
     }
 
