@@ -494,6 +494,8 @@ void
 os_syscall_note_reissue(dcontext_t *dcontext);
 void
 os_syscall_restart_undo_pre(dcontext_t *dcontext);
+void
+os_syscall_save_app_args(dcontext_t *dcontext);
 bool
 os_syscall_app_arg(dcontext_t *dcontext, int param, reg_t *value);
 void

@@ -289,7 +289,8 @@ queue_signal(int sig, int value)
 }
 
 /* Many signals unread: none blocks the sender, and what reaches the fd comes in
- * order from the first one sent, with any still pending after it.  (Natively the
+ * order from the first one sent, with none missing, and any still pending
+ * continue that run.  (Natively the
  * standard signal is pending once, holding the first value; under DR the fd can
  * hold more records.)
  */
@@ -306,7 +307,7 @@ test_saturation(int sig)
     for (i = 0; i < 1000; i++)
         queue_signal(sig, i);
     while (is_readable(fd, 0) && read(fd, &rec, sizeof(rec)) == sizeof(rec)) {
-        if ((int)rec.ssi_signo != sig || rec.ssi_int <= last)
+        if ((int)rec.ssi_signo != sig || rec.ssi_int != last + 1)
             in_order = 0;
         if (first < 0)
             first = rec.ssi_int;
@@ -315,12 +316,12 @@ test_saturation(int sig)
     sigemptyset(&mask);
     sigaddset(&mask, sig);
     while (sigtimedwait(&mask, &si, &zero) == sig) {
-        if (si.si_value.sival_int <= last)
+        if (si.si_value.sival_int != last + 1)
             in_order = 0;
         last = si.si_value.sival_int;
     }
-    print("signal %d: 1000 queued: first read %d, all in order: %s\n", sig, first,
-          in_order ? "yes" : "no");
+    print("signal %d: 1000 queued: first read %d, in order with none missing: %s\n",
+          sig, first, in_order ? "yes" : "no");
     close(fd);
     restore_signal(sig, &orig_mask);
 }

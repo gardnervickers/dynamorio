@@ -109,8 +109,15 @@ handler(int sig, siginfo_t *info, void *ucxt)
     int saved = errno;
     handled = 1;
     if (handler_waits) {
-        struct timespec ts = { 0, 1000 };
+        /* Waits that reuse DR's per-thread buffers for a sleep's timeout and a
+         * temporary mask: this one blocks SIGUSR2.
+         */
+        struct timespec ts = { 0, 1000 }, zero = { 0, 0 };
+        sigset_t mask;
         nanosleep(&ts, NULL);
+        sigprocmask(SIG_BLOCK, NULL, &mask);
+        sigaddset(&mask, SIGUSR2);
+        ppoll(NULL, 0, &zero, &mask);
     }
     /* End a wait that the handler ran ahead of, as the signal would have. */
     if (write(pipefd[1], &c, 1) != 1)
@@ -270,6 +277,149 @@ test_wait(int which, int flags)
           reported == 0 ? "ok" : "FAILED");
 }
 
+static timer_t wake_timer, watchdog_timer;
+static volatile int woken, watchdog_fired;
+
+static void
+wake_handler(int sig)
+{
+    if (sig == SIGALRM)
+        watchdog_fired = 1;
+    else
+        woken = 1;
+}
+
+static timer_t
+new_timer(int sig)
+{
+    struct sigevent sevp;
+    timer_t t;
+    memset(&sevp, 0, sizeof(sevp));
+    sevp.sigev_notify = SIGEV_THREAD_ID;
+    sevp.sigev_signo = sig;
+    sevp._sigev_un._tid = syscall(SYS_gettid);
+    if (timer_create(CLOCK_MONOTONIC, &sevp, &t) != 0) {
+        perror("timer_create");
+        exit(1);
+    }
+    return t;
+}
+
+static void
+arm(timer_t t, uint64_t ns)
+{
+    struct itimerspec spec = { { 0, 0 },
+                               { (time_t)(ns / 1000000000), (long)(ns % 1000000000) } };
+    if (timer_settime(t, 0, &spec, NULL) != 0) {
+        perror("timer_settime");
+        exit(1);
+    }
+}
+
+/* sigsuspend() with SIGUSR1 aimed at its syscall entry, and SIGUSR2, which it
+ * unblocks, sent shortly after to end it if SIGUSR1 came first.  Under DR a
+ * sigsuspend restarted after the SIGUSR1 handler must still unblock SIGUSR2,
+ * though that handler (with SA_RESTART) does a ppoll whose temporary mask blocks
+ * it: a watchdog SIGALRM ending the sigsuspend instead is a failure.
+ */
+static void
+test_sigsuspend(int flags)
+{
+    struct sigaction act;
+    sigset_t orig_mask, mask, usr2;
+    struct timespec two_s = { 2, 0 };
+    uint64_t delay = 1000;
+    int i, reported = 0;
+    memset(&act, 0, sizeof(act));
+    act.sa_sigaction = handler;
+    act.sa_flags = SA_SIGINFO | flags;
+    handler_waits = (flags & SA_RESTART) != 0;
+    sigaction(SIGUSR1, &act, NULL);
+    signal(SIGUSR2, wake_handler);
+    signal(SIGALRM, wake_handler);
+    sigemptyset(&usr2);
+    sigaddset(&usr2, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &usr2, &orig_mask);
+    sigprocmask(SIG_BLOCK, NULL, &mask);
+    sigdelset(&mask, SIGUSR2);
+    for (i = 0; i < ITERS; i++) {
+        int ret, err, before;
+        handled = 0;
+        woken = 0;
+        watchdog_fired = 0;
+        arm(watchdog_timer, 1000000000);
+        arm(timer, delay);
+        arm(wake_timer, delay + 1000000);
+        ret = sigsuspend(&mask);
+        err = errno;
+        before = woken;
+        arm(watchdog_timer, 0);
+        /* Wait for both signals, taking SIGUSR2 if it is still pending. */
+        while (!handled)
+            sched_yield();
+        if (!woken && sigtimedwait(&usr2, NULL, &two_s) == SIGUSR2)
+            woken = 1;
+        drain();
+        if (ret != -1 || err != EINTR || watchdog_fired || !woken) {
+            if (reported++ < MAX_REPORTED) {
+                print("sigsuspend: invalid result ret=%d errno=%d watchdog=%d woken=%d "
+                      "delay=%lluns\n",
+                      ret, ret == -1 ? err : 0, watchdog_fired, woken,
+                      (unsigned long long)delay);
+            } else
+                break;
+        }
+        /* Aim SIGUSR1 at the syscall entry: SIGUSR2 ended it if SIGUSR1 came first. */
+        if (before)
+            delay = delay + delay / 4 + 1;
+        else
+            delay = delay - delay / 4;
+        if (delay < 1)
+            delay = 1;
+        if (delay > 5000000)
+            delay = 5000000;
+    }
+    sigprocmask(SIG_SETMASK, &orig_mask, NULL);
+    print("sigsuspend%s: %s\n", (flags & SA_RESTART) != 0 ? " (SA_RESTART)" : "",
+          reported == 0 ? "ok" : "FAILED");
+}
+
+/* A sleep's remaining time under DR, which may interrupt the sleep itself: an
+ * unwritable or NULL rem is not written on success, and rem == req gets what is
+ * left after an app signal.
+ */
+static void
+test_rem(void)
+{
+    struct sigaction act;
+    int i, bad = 0;
+    for (i = 0; i < 100; i++) {
+        struct timespec ts = { 0, 2000000 };
+        if (syscall(SYS_nanosleep, &ts, (void *)8) != 0)
+            bad++;
+        if (syscall(SYS_nanosleep, &ts, NULL) != 0)
+            bad++;
+    }
+    print("sleeps with an unwritable or NULL rem: %s\n", bad == 0 ? "ok" : "FAILED");
+    memset(&act, 0, sizeof(act));
+    act.sa_sigaction = handler;
+    act.sa_flags = SA_SIGINFO;
+    handler_waits = 0;
+    sigaction(SIGUSR1, &act, NULL);
+    bad = 0;
+    for (i = 0; i < 50; i++) {
+        struct timespec ts = { 0, 50000000 };
+        handled = 0;
+        arm(timer, 10000000);
+        long r = syscall(SYS_nanosleep, &ts, &ts);
+        if (!(r == -1 && errno == EINTR && handled && ts.tv_sec == 0 && ts.tv_nsec > 0 &&
+              ts.tv_nsec < 50000000))
+            bad++;
+        drain();
+    }
+    print("sleep with rem == req: %s\n", bad == 0 ? "ok" : "FAILED");
+}
+
 /* Runs fresh code and unmaps it, again and again. */
 static void *
 flusher(void *arg)
@@ -334,6 +484,8 @@ main(int argc, const char *argv[])
         else
             only = atoi(argv[i]);
     }
+    wake_timer = new_timer(SIGUSR2);
+    watchdog_timer = new_timer(SIGALRM);
     if (!no_flush)
         pthread_create(&flusher_thread, NULL, flusher, NULL);
     for (which = 0; which < W_NUM; which++) {
@@ -342,6 +494,12 @@ main(int argc, const char *argv[])
         test_wait(which, 0);
         test_wait(which, SA_RESTART);
     }
+    if (only < 0 || only == W_NUM) {
+        test_sigsuspend(0);
+        test_sigsuspend(SA_RESTART);
+    }
+    if (only < 0 || only == W_NUM + 1)
+        test_rem();
     flusher_stop = 1;
     if (!no_flush)
         pthread_join(flusher_thread, NULL);

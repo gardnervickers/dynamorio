@@ -259,6 +259,9 @@ typedef struct _os_thread_data_t {
     struct timespec syscall_rem_shadow;
     /* The syscall's -EINTR is to become a restart after a signal handler. */
     bool syscall_restart_hides_eintr;
+    /* The app's arguments to the current syscall (os_syscall_save_app_args()). */
+#    define OS_SYSCALL_APP_ARGS 6
+    reg_t syscall_app_args[OS_SYSCALL_APP_ARGS];
     reg_t syscall_restart_app_value;
 #endif
 #ifdef X86

@@ -14,4 +14,8 @@ futex wait: ok
 futex wait (SA_RESTART): ok
 long SYS_nanosleep: ok
 long SYS_nanosleep (SA_RESTART): ok
+sigsuspend: ok
+sigsuspend (SA_RESTART): ok
+sleeps with an unwritable or NULL rem: ok
+sleep with rem == req: ok
 all done

@@ -5733,7 +5733,8 @@ os_syscall_restart_pre(dcontext_t *dcontext)
         break;
     default: break;
     }
-#    ifdef AARCH64 /* Where we issue sleeps again: see os_syscall_restart_args(). */
+#    if defined(AARCH64) || (defined(X86) && defined(X64))
+    /* Where we issue sleeps again: see os_syscall_restart_args(). */
     if (rem_param > 0 && sys_param(dcontext, rem_param) != 0) {
         /* The kernel fills in a sleep's remaining time whenever a signal interrupts
          * it, ours included, and fails with EFAULT if it cannot.  Give it our own
@@ -6071,25 +6072,33 @@ os_syscall_restart_undo_pre(dcontext_t *dcontext)
     }
 }
 
-/* For a syscall about to be restarted from the app's syscall instruction after a
- * signal handler (from a signal context): returns in *value the app's value of
- * argument param if the context may hold one of ours instead (our remaining-time
- * buffer, or the arguments of a syscall we issued again).  While the syscall is
- * under way the mcontext holds the app's values but for os_syscall_restart_pre()'s.
+/* Saves the app's arguments to the syscall about to run, before its pre-syscall
+ * handling replaces any with ours: a mask of ours for rt_sigsuspend, ppoll,
+ * pselect6, epoll_pwait{,2}, rt_sigtimedwait and signalfd, our remaining-time
+ * buffer for a sleep, and the arguments we issue a syscall with again.
+ */
+void
+os_syscall_save_app_args(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    for (int i = 0; i < OS_SYSCALL_APP_ARGS; i++)
+        ostd->syscall_app_args[i] = sys_param(dcontext, i);
+}
+
+/* For the current syscall about to be restarted from the app's syscall instruction
+ * after a signal handler (from a signal context): returns in *value the app's
+ * value of argument param.  Its pre-syscall handling runs again from the start,
+ * so the context must hold what the app passed, not what we passed the kernel:
+ * our buffers are per-thread, and a syscall in the handler can reuse them.
  */
 bool
 os_syscall_app_arg(dcontext_t *dcontext, int param, reg_t *value)
 {
     os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
-    if (param == ostd->syscall_rem_param) {
-        *value = ostd->syscall_rem_app;
-        return true;
-    }
-    if (ostd->syscall_reissued_by_us) {
-        *value = sys_param(dcontext, param);
-        return true;
-    }
-    return false;
+    if (param < 0 || param >= OS_SYSCALL_APP_ARGS)
+        return false;
+    *value = ostd->syscall_app_args[param];
+    return true;
 }
 
 /* The -EINTR the current syscall returns is about to become a restart after the
@@ -8092,7 +8101,11 @@ pre_system_call(dcontext_t *dcontext)
     }
 #endif
 
-    IF_LINUX(os_syscall_restart_pre(dcontext));
+#ifdef LINUX
+    /* Before any handler below swaps an argument for something of ours. */
+    os_syscall_save_app_args(dcontext);
+    os_syscall_restart_pre(dcontext);
+#endif
 
     switch (dcontext->sys_num) {
 

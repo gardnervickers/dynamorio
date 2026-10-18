@@ -5725,18 +5725,33 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
     } else {
         ASSERT_NOT_REACHED(); /* Inlined syscalls no longer come here. */
     }
-#if defined(AARCHXX) || defined(RISCV64)
-#if defined(LINUX) && defined(AARCH64)
+#ifdef LINUX
     /* Restarting from the app's syscall instruction, we handle the syscall again
-     * from the start: give it the app's arguments, not ours.
+     * from the start: give it the app's arguments, not the ones its pre-syscall
+     * handling replaced with ours (a mask or timeout buffer of this thread's, which
+     * a syscall in the signal handler can reuse), whether or not we issued it again.
      */
+    reg_t app_arg[6];
     for (int i = 0; i < 6; i++) {
-        reg_t value;
-        if (os_syscall_app_arg(dcontext, i, &value))
-            sc->regs[i] = value;
+        if (!os_syscall_app_arg(dcontext, i, &app_arg[i]))
+            app_arg[i] = 0;
     }
+#    ifdef AARCH64
+    for (int i = 0; i < 6; i++)
+        sc->regs[i] = app_arg[i];
+#    elif defined(X86) && defined(X64)
+    sc->SC_XDI = app_arg[0];
+    sc->SC_XSI = app_arg[1];
+    sc->SC_XDX = app_arg[2];
+    sc->SC_FIELD(r10) = app_arg[3];
+    sc->SC_FIELD(r8) = app_arg[4];
+    sc->SC_FIELD(r9) = app_arg[5];
+#    endif
     os_syscall_note_restart_after_signal(dcontext);
+    LOG(THREAD, LOG_ASYNCH, 2, "%s: restarting syscall %d with the app's arguments\n",
+        __FUNCTION__, dcontext->sys_num);
 #endif
+#if defined(AARCHXX) || defined(RISCV64)
     /* dr_reg_stolen is holding DR's TLS on receiving a signal,
      * so we need to put the app's reg value into the ucontext instead.
      * The translation process normally does this for us, but here we're doing

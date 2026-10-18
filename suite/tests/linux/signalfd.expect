@@ -34,7 +34,7 @@ signal 11: pending after closing its fd unread: yes
 signal 10: pending after closing its fd unread: yes
 signal 11: read of one pending before the fd: 11
 signal 10: read of one pending before the fd: 10
-signal 11: 1000 queued: first read 0, all in order: yes
+signal 11: 1000 queued: first read 0, in order with none missing: yes
 signal 11: pending after a close racing sends, every time: yes
 ignored signal 12: read: 12
 signal 11: update to signal 7 returns the fd: yes
