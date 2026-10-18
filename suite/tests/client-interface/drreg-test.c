@@ -99,6 +99,10 @@ void
 test_asm_fault_restore_multi_phase_aflags_nested_spill_regions_insertion_outer();
 void
 test_asm_fault_restore_gpr_tool_value_moved_for_read();
+#    ifdef AARCH64
+void
+test_asm_fault_restore_gpr_dropped_slot();
+#    endif
 
 static SIGJMP_BUF mark;
 
@@ -356,6 +360,19 @@ handle_signal_gpr_tool_value_moved(int signal, siginfo_t *siginfo, ucontext_t *u
     }
     SIGLONGJMP(mark, 1);
 }
+
+#        ifdef AARCH64
+static void
+handle_signal_gpr_dropped_slot(int signal, siginfo_t *siginfo, ucontext_t *ucxt)
+{
+    if (signal == SIGSEGV) {
+        sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+        if (sc->TEST_REG_SIG != DRREG_TEST_40_C)
+            print("ERROR: spilled register value was not preserved in test #40!\n");
+    }
+    SIGLONGJMP(mark, 1);
+}
+#        endif
 
 #    elif defined(WINDOWS)
 #        include <windows.h>
@@ -891,6 +908,17 @@ main(int argc, const char *argv[])
     if (SIGSETJMP(mark) == 0) {
         test_asm_fault_restore_gpr_tool_value_moved_for_read();
     }
+
+#    ifdef AARCH64
+    intercept_signal(SIGSEGV, (handler_3_t)&handle_signal_gpr_dropped_slot, false);
+
+    /* Test fault reg restore at an app write of an unreserved reg pending its
+     * restore, where the instr also writes a reserved reg.
+     */
+    if (SIGSETJMP(mark) == 0) {
+        test_asm_fault_restore_gpr_dropped_slot();
+    }
+#    endif
 
     /* XXX i#511: add more fault tests and other tricky corner cases */
 
@@ -2983,6 +3011,30 @@ GLOBAL_LABEL(FUNCNAME:)
 #endif
         END_FUNC(FUNCNAME)
 #undef FUNCNAME
+
+#ifdef AARCH64
+#define FUNCNAME test_asm_fault_restore_gpr_dropped_slot
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        /* XXX i#3289: prologue missing */
+        b        test40
+     test40:
+        movz     TEST_REG_ASM, DRREG_TEST_40_ASM
+        movz     TEST_REG_ASM, DRREG_TEST_40_ASM
+        nop
+
+        /* Read reg so that its app value is live and spilled. */
+        add      x0, TEST_REG_ASM, TEST_REG_ASM
+        movz     x0, TEST_INSTRUMENTATION_MARKER_1
+        /* Writes both regs (TEST_REG's number is the lower one). */
+        ldp      TEST_REG_ASM, TEST_REG2_ASM, [x0] /* crash */
+
+        b        epilog40
+    epilog40:
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+#endif
 
 START_DATA
     /* Should be atleast (TEST_FAUX_SPILL_TLS_OFFS+1)*8 bytes.

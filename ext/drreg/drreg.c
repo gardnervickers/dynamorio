@@ -809,11 +809,20 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
                 "%s @%d." PFX ": dropping slot for unreserved reg %s after app write\n",
                 __FUNCTION__, pt->live_idx, get_where_app_pc(inst),
                 get_register_name(reg));
+            uint slot = pt->reg[GPR_IDX(reg)].slot;
             if (pt->reg[GPR_IDX(reg)].ever_spilled)
                 pt->reg[GPR_IDX(reg)].ever_spilled = false; /* no need to restore */
             res = drreg_restore_reg_now(drcontext, bb, inst, pt, reg);
             if (res != DRREG_SUCCESS)
                 drreg_report_error(res, "slot release on app write failed");
+            /* The slot keeps the app value until inst writes reg: a fault at inst
+             * needs it.  Hold the slot until we are done with inst, so that a
+             * reserved register's tool value spill before inst does not take it.
+             */
+            if (pt->slot_use[slot] == DR_REG_NULL) {
+                pt->slot_use[slot] = reg;
+                hold_tmp_slot(pt, slot);
+            }
             pt->pending_unreserved--;
         }
     }
