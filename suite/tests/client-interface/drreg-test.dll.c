@@ -52,9 +52,11 @@ uint tls_offs_app2app_spilled_aflags;
 uint tls_offs_app2app_spilled_reg;
 uint tls_offs_test_reg_1;
 uint tls_offs_aflags;
+#ifdef AARCH64
 /* Test #41: TEST_REG's dedicated slot, and where TEST_REG2's tool value went. */
 static int test41_slot_offs = -1;
 static int test41_tool_spill_offs;
+#endif
 
 static bool
 is_drreg_test_label_marker(instr_t *inst)
@@ -1128,6 +1130,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
             res = drreg_unreserve_register(drcontext, bb, inst, TEST_REG2);
             CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
         }
+#ifdef AARCH64
     } else if (subtest == DRREG_TEST_41_C) {
         /* As #40, but TEST_REG is dead and so never spilled: drreg should not keep
          * its slot from TEST_REG2's tool value (see event_instru2instru()).
@@ -1156,6 +1159,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
             res = drreg_unreserve_register(drcontext, bb, inst, TEST_REG2);
             CHECK(res == DRREG_SUCCESS, "default unreserve should always work");
         }
+#endif
     }
 #ifdef X86
     drvector_delete(&allowed_test_reg_xax);
@@ -1199,6 +1203,7 @@ event_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
         subtest == DRREG_TEST_40_C) {
         return DR_EMIT_DEFAULT;
     }
+#ifdef AARCH64
     if (subtest == DRREG_TEST_41_C) {
         /* TEST_REG2's tool value goes into the slot of TEST_REG, which the app instr
          * writing both drops and which never held an app value.
@@ -1222,6 +1227,7 @@ event_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
         }
         return DR_EMIT_DEFAULT;
     }
+#endif
 
     drreg_init_and_fill_vector(&allowed, false);
     drreg_set_vector_entry(&allowed, TEST_REG, true);
