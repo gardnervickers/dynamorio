@@ -9452,8 +9452,9 @@ timeval_to_usec(struct timeval *t1)
 static inline void
 usec_to_timeval(uint64 usec, struct timeval *t1)
 {
-    t1->tv_sec = (long)usec / 1000000;
-    t1->tv_usec = (long)usec % 1000000;
+    /* Divide before narrowing: a 32-bit long holds only about 35 minutes of usec. */
+    t1->tv_sec = (long)(usec / 1000000);
+    t1->tv_usec = (long)(usec % 1000000);
 }
 
 static void
