@@ -427,7 +427,10 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
                 instr_get_opcode(instr_get_prev(inst)) == OP_subs)) ||
               (instr_get_opcode(inst) == OP_b &&
                (instr_get_prev(inst) != NULL &&
-                instr_is_exclusive_store(instr_get_prev(inst)))))
+                (instr_is_exclusive_store(instr_get_prev(inst)) ||
+                 (instr_get_opcode(instr_get_prev(inst)) == OP_cbnz &&
+                  instr_get_prev(instr_get_prev(inst)) != NULL &&
+                  instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst))))))))
 #elif defined(RISCV64)
             /* Do not reset for bne in LR/SC mangling, nor for the jal after SC.
              * This should be kept in sync with mangle_exclusive_monitor_op().

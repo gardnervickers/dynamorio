@@ -181,6 +181,10 @@ typedef struct _spill_state_t {
     ptr_uint_t ldstex_value;
     ptr_uint_t ldstex_value2; /* For 2nd value of a pair. */
     ptr_uint_t ldstex_size;
+#    ifdef AARCH64
+    ptr_uint_t ldstex_epoch; /* Seedbox guest exception return epoch. */
+    reg_t ldstex_status; /* Full original status register for fault restoration. */
+#    endif
 #    ifdef ARM
     /* In A32 mode we have no OP_cbnz so we have to save the flags. */
     reg_t ldstex_flags;
@@ -260,6 +264,10 @@ typedef struct _local_state_extended_t {
 #    define TLS_LDSTEX_VALUE_SLOT ((ushort)offsetof(spill_state_t, ldstex_value))
 #    define TLS_LDSTEX_VALUE2_SLOT ((ushort)offsetof(spill_state_t, ldstex_value2))
 #    define TLS_LDSTEX_SIZE_SLOT ((ushort)offsetof(spill_state_t, ldstex_size))
+#    ifdef AARCH64
+#        define TLS_LDSTEX_EPOCH_SLOT ((ushort)offsetof(spill_state_t, ldstex_epoch))
+#        define TLS_LDSTEX_STATUS_SLOT ((ushort)offsetof(spill_state_t, ldstex_status))
+#    endif
 #    ifdef ARM
 #        define TLS_LDSTEX_FLAGS_SLOT ((ushort)offsetof(spill_state_t, ldstex_flags))
 #    endif

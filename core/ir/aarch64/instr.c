@@ -569,7 +569,8 @@ bool
 instr_reads_thread_register(instr_t *instr)
 {
     return (instr_get_opcode(instr) == OP_mrs && opnd_is_reg(instr_get_src(instr, 0)) &&
-            opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_TPIDR_EL0);
+            (opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_TPIDR_EL0 ||
+             opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_TPIDRRO_EL0));
 }
 
 bool

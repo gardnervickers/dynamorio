@@ -1918,24 +1918,18 @@ is_our_spill_or_restore(void *drcontext, instr_t *instr, bool *spill DR_PARAM_OU
             uint DR_max_offs = opnd_get_disp(
                 dr_reg_spill_slot_opnd(drcontext, dr_max_opnd_accessible_spill_slot()));
             uint max_DR_slot = (uint)dr_max_opnd_accessible_spill_slot();
+            /* Private core slots outside the public spill range must not wrap
+             * into a public slot number: their values have already been restored
+             * by core translation before drreg reconstructs client spills.
+             */
             if (DR_min_offs > DR_max_offs) {
-                if (offs > DR_min_offs) {
-                    slot = (offs - DR_min_offs) / sizeof(reg_t);
-                } else if (offs < DR_max_offs) {
-                    /* Fix hidden slot regardless of low-to-high or vice versa. */
-                    slot = max_DR_slot + 1;
-                } else {
-                    slot = (DR_min_offs - offs) / sizeof(reg_t);
-                }
+                if (offs > DR_min_offs || offs < DR_max_offs)
+                    return false;
+                slot = (DR_min_offs - offs) / sizeof(reg_t);
             } else {
-                if (offs > DR_max_offs) {
-                    slot = (offs - DR_max_offs) / sizeof(reg_t);
-                } else if (offs < DR_min_offs) {
-                    /* Fix hidden slot regardless of low-to-high or vice versa. */
-                    slot = max_DR_slot + 1;
-                } else {
-                    slot = (offs - DR_min_offs) / sizeof(reg_t);
-                }
+                if (offs < DR_min_offs || offs > DR_max_offs)
+                    return false;
+                slot = (offs - DR_min_offs) / sizeof(reg_t);
             }
             if (slot > max_DR_slot) {
                 /* This is not a drreg spill, but some TLS access by

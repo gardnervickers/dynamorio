@@ -100,7 +100,11 @@ extern const reg_id_t d_r_reg_id_to_virtual[];
 #elif defined(AARCHXX)
 /* We only normally use r0-r5 but we support more in translation code */
 #    define REG_START_SPILL DR_REG_R0
-#    define REG_STOP_SPILL DR_REG_R10 /* r10 might be used in syscall mangling */
+#    ifdef AARCH64
+#        define REG_STOP_SPILL DR_REG_X30 /* Exclusive status and high-pressure scratch. */
+#    else
+#        define REG_STOP_SPILL DR_REG_R10 /* r10 might be used in syscall mangling */
+#    endif
 #elif defined(RISCV64)
 #    define REG_START_SPILL DR_REG_A0
 #    define REG_STOP_SPILL DR_REG_A5

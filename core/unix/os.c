@@ -2257,7 +2257,14 @@ os_tls_app_seg_init(os_local_state_t *os_tls, void *segment)
     os_tls->app_alt_tls_reg = read_thread_register(TLS_REG_ALT);
 #endif
     app_lib_tls_base = get_segment_base(TLS_REG_LIB);
+#ifdef AARCH64
+    /* The dedicated guest uses TPIDRRO for its exception-return epoch. It is
+     * not an application TLS pointer. Translated application reads return zero.
+     */
+    app_alt_tls_base = NULL;
+#else
     app_alt_tls_base = get_segment_base(TLS_REG_ALT);
+#endif
 
     /* If we're a non-initial thread, tls will be set to the parent's value,
      * or to &uninit_tls (i#2089), both of which will be is_dynamo_address().
