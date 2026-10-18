@@ -80,7 +80,7 @@ jobs:
           cmake --version | tee native-evidence/toolchain.log
           gcc-13 --version | tee -a native-evidence/toolchain.log
           cmake -S . -B build-native -G Ninja -DDEBUG=OFF -DBUILD_TESTS=ON \
-            -DBUILD_EXT=ON -DBUILD_CLIENTS=ON -DBUILD_SAMPLES=OFF -DBUILD_DOCS=OFF \
+            -DBUILD_EXT=ON -DBUILD_CLIENTS=ON -DBUILD_SAMPLES=ON -DBUILD_DOCS=OFF \
             2>&1 | tee native-evidence/configure.log
       - name: Build all configured targets
         run: |

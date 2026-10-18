@@ -47,9 +47,11 @@ to be hermetic.
 ## Build and regression scope
 
 Use GCC 13, the Ubuntu 24.04 compiler generation. Configure a 64-bit release
-build (`DEBUG=OFF`) with extensions, clients, tools and tests enabled. Build all
+build (`DEBUG=OFF`) with extensions, clients, tools, samples and tests enabled. Build all
 configured targets, including core, `drrun`, `drmgr`, `drreg` and `drcontainers`.
-Only docs and samples are excluded. Keep warnings as errors. A timed `drrun`
+Only docs are excluded. Samples must remain enabled: this release assigns ARM
+test properties to sample tests without guarding `BUILD_SAMPLES`. Keep warnings
+as errors. A timed `drrun`
 echo smoke must exit successfully and produce the expected marker.
 
 `native_baseline.py` selects existing release tests by exact base name, with
