@@ -55,7 +55,12 @@
 
 #define CYCLES 12
 
-static volatile int sideline_exit, sideline_ready, lost, iters;
+/* Shared with the sideline thread: sideline_ready publishes its DIT setup
+ * (release/acquire), sideline_exit and iters need no ordering (relaxed), and
+ * lost is read after the join.
+ */
+static int sideline_exit, sideline_ready, iters;
+static int lost;
 
 static inline uint64_t
 read_dit(void)
@@ -83,10 +88,10 @@ static void *
 sideline(void *arg)
 {
     set_dit();
-    sideline_ready = 1;
-    while (!sideline_exit) {
+    __atomic_store_n(&sideline_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&sideline_exit, __ATOMIC_RELAXED)) {
         syscall(SYS_getppid);
-        iters++;
+        __atomic_fetch_add(&iters, 1, __ATOMIC_RELAXED);
         if (read_dit() == 0) {
             lost++;
             set_dit();
@@ -106,6 +111,7 @@ main(void)
     int total_lost = 0, cycles_lost = 0;
     for (int c = 0; c < CYCLES; c++) {
         pthread_t thread;
+        /* Set before the thread exists: pthread_create() orders these. */
         sideline_exit = 0;
         sideline_ready = 0;
         lost = 0;
@@ -114,16 +120,16 @@ main(void)
             return 1;
         }
         dr_app_setup();
-        while (!sideline_ready)
+        while (!__atomic_load_n(&sideline_ready, __ATOMIC_ACQUIRE))
             sleep_us(100);
         dr_app_start();
         sleep_us(20000);
         dr_app_stop_and_cleanup();
         /* Native again: the sideline checks the DIT the detach left it. */
-        int at_detach = iters;
-        while (iters < at_detach + 100)
+        int at_detach = __atomic_load_n(&iters, __ATOMIC_RELAXED);
+        while (__atomic_load_n(&iters, __ATOMIC_RELAXED) < at_detach + 100)
             sleep_us(100);
-        sideline_exit = 1;
+        __atomic_store_n(&sideline_exit, 1, __ATOMIC_RELAXED);
         pthread_join(thread, NULL);
         total_lost += lost;
         cycles_lost += lost > 0;

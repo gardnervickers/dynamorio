@@ -57,7 +57,8 @@ void
 sigcontext_set_app_pstate(sigcontext_t *sc)
 {
     /* We sample only DIT: we may be in a signal handler, where TCO is not the
-     * app's (see PSTATE_APP_STATE_BITS), and reading SSBS needs FEAT_SSBS.
+     * app's (see PSTATE_APP_STATE_BITS), and reading SSBS with MRS needs
+     * FEAT_SSBS2 (FEAT_SSBS alone has only the MSR immediate form).
      */
 #ifndef DR_HOST_NOT_TARGET
     if (proc_has_feature(FEATURE_DIT)) {
