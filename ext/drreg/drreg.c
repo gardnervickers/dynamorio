@@ -182,6 +182,13 @@ static int get_app_value_note_tag[2];
  */
 static int tool_value_note_tag;
 #define TOOL_VALUE_NOTE ((void *)&tool_value_note_tag)
+/* These notes exist only in an ilist: state restoration has them when DR gives
+ * it the fragment's ilist, which it rebuilds by calling our instrumentation
+ * again (also from a copy of the app code, with -xl8_code_copy).  For a
+ * fragment with stored translations and no code copy, DR gives us none, and
+ * drreg_event_restore_state_without_ilist() can tell neither of these loads
+ * and spills from others: it is best-effort (see sec_drreg_xl8 in drreg.dox).
+ */
 
 static bool
 is_our_spill_or_restore(void *drcontext, instr_t *instr, bool *spill,
