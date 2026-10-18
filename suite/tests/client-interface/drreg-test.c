@@ -99,9 +99,13 @@ void
 test_asm_fault_restore_multi_phase_aflags_nested_spill_regions_insertion_outer();
 void
 test_asm_fault_restore_gpr_tool_value_moved_for_read();
+void
+test39_fault();
 #    ifdef AARCH64
 void
 test_asm_fault_restore_gpr_dropped_slot();
+void
+test40_fault();
 void
 test_asm_fault_restore_gpr_dropped_unspilled_slot();
 void
@@ -359,6 +363,8 @@ handle_signal_gpr_tool_value_moved(int signal, siginfo_t *siginfo, ucontext_t *u
 {
     if (signal == SIGSEGV) {
         sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+        if (sc->SC_XIP != (ptr_uint_t)test39_fault)
+            print("ERROR: unexpected fault pc in test #39!\n");
         if (sc->TEST_REG_SIG != DRREG_TEST_39_C)
             print("ERROR: spilled register value was not preserved in test #39!\n");
     }
@@ -371,6 +377,8 @@ handle_signal_gpr_dropped_slot(int signal, siginfo_t *siginfo, ucontext_t *ucxt)
 {
     if (signal == SIGSEGV) {
         sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+        if (sc->SC_XIP != (ptr_uint_t)test40_fault)
+            print("ERROR: unexpected fault pc in test #40!\n");
         if (sc->TEST_REG_SIG != DRREG_TEST_40_C)
             print("ERROR: spilled register value was not preserved in test #40!\n");
     }
@@ -605,6 +613,8 @@ static LONG WINAPI
 handle_exception_gpr_tool_value_moved(struct _EXCEPTION_POINTERS *ep)
 {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        if (ep->ContextRecord->CXT_XIP != (ptr_uint_t)test39_fault)
+            print("ERROR: unexpected fault pc in test #39!\n");
         if (ep->ContextRecord->TEST_REG_CXT != DRREG_TEST_39_C)
             print("ERROR: spilled register value was not preserved in test #39!\n");
     }
@@ -2978,6 +2988,7 @@ GLOBAL_LABEL(FUNCNAME:)
         END_FUNC(FUNCNAME)
 #undef FUNCNAME
 
+DECLARE_GLOBAL(test39_fault)
 #define FUNCNAME test_asm_fault_restore_gpr_tool_value_moved_for_read
         DECLARE_FUNC_SEH(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
@@ -2993,6 +3004,7 @@ GLOBAL_LABEL(FUNCNAME:)
         nop
 
         mov      REG_XCX, 0
+ADDRTAKEN_LABEL(test39_fault:)
         mov      REG_XCX, PTRSZ [REG_XCX + TEST_REG_ASM] /* crash */
 
         /* Overwrite reg so that it is not restored. */
@@ -3011,6 +3023,7 @@ GLOBAL_LABEL(FUNCNAME:)
         nop
 
         mov      r0, HEX(0)
+ADDRTAKEN_LABEL(test39_fault:)
         ldr      r0, PTRSZ [r0, TEST_REG_ASM] /* crash */
 
         /* Overwrite reg so that it is not restored. */
@@ -3027,6 +3040,7 @@ GLOBAL_LABEL(FUNCNAME:)
         nop
 
         mov      x0, HEX(0)
+ADDRTAKEN_LABEL(test39_fault:)
         ldr      x0, PTRSZ [x0, TEST_REG_ASM] /* crash */
 
         /* Overwrite reg so that it is not restored. */
@@ -3039,6 +3053,7 @@ GLOBAL_LABEL(FUNCNAME:)
 #undef FUNCNAME
 
 #ifdef AARCH64
+DECLARE_GLOBAL(test40_fault)
 #define FUNCNAME test_asm_fault_restore_gpr_dropped_slot
         DECLARE_FUNC_SEH(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
@@ -3053,6 +3068,7 @@ GLOBAL_LABEL(FUNCNAME:)
         add      x0, TEST_REG_ASM, TEST_REG_ASM
         movz     x0, TEST_INSTRUMENTATION_MARKER_1
         /* Writes both regs (TEST_REG's number is the lower one). */
+ADDRTAKEN_LABEL(test40_fault:)
         ldp      TEST_REG_ASM, TEST_REG2_ASM, [x0] /* crash */
 
         b        epilog40
