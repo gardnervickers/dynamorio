@@ -35,9 +35,10 @@
  * DR timers of its own on all three itimers, so that DR multiplexes every one of
  * them, and suspends all other threads whenever the app calls getppid).
  *
- * - Failure cases, one thread: invalid values and which, unreadable new and
+ * - Single-thread cases: invalid values and which, unreadable new and
  *   unwritable old values (which DR, emulating the syscall, faults on in its own
- *   copy), and alarm's result.
+ *   copy), disarming with an interval (which ITIMER_REAL drops), and alarm's
+ *   result.
  * - Contention: periodic app timers on all three while several threads spin and
  *   call getitimer, some into a buffer whose page another thread keeps
  *   write-protecting, one re-arms ITIMER_VIRTUAL and ITIMER_PROF, and one keeps
@@ -46,9 +47,9 @@
  *   app's own timer can have, and ITIMER_REAL, which no thread re-arms, must
  *   deliver about as many signals as natively.
  * - Concurrent setters: several threads set each timer to intervals no other set
- *   uses, arming and disarming it in turn.  Each set's prior value must be what
- *   exactly one other set (or the initial one) installed, as if the sets ran one
- *   at a time, and the timer must end as the remaining set left it.
+ *   uses, arming and disarming the CPU-time timers in turn.  The prior values
+ *   must chain all the sets from the initial timer to the final one in one order
+ *   that keeps each thread's own, as if the sets ran one at a time.
  * - Disarmed: once the app disarms all three, no app signal may arrive while the
  *   client's timers keep running.
  */
@@ -214,9 +215,8 @@ test_failures(void)
     expect_error("setitimer bad usec", setitimer(ITIMER_VIRTUAL, &val, NULL), EINVAL);
     expect_timer("after bad usec", ITIMER_VIRTUAL, 0, 0, 0);
     periodic(ITIMER_VIRTUAL, &val);
-    expect_error("setitimer bad which", setitimer((__itimer_which_t)3, &val, NULL),
-                 EINVAL);
-    expect_error("getitimer bad which", getitimer((__itimer_which_t)-1, &val), EINVAL);
+    expect_error("setitimer bad which", setitimer(3, &val, NULL), EINVAL);
+    expect_error("getitimer bad which", getitimer(-1, &val), EINVAL);
 
     /* An unreadable new value fails without changing the timer. */
     expect_error("setitimer unreadable new",
@@ -235,6 +235,48 @@ test_failures(void)
                  getitimer(ITIMER_VIRTUAL, (struct itimerval *)unmapped), EFAULT);
     if (setitimer(ITIMER_VIRTUAL, &zero, NULL) != 0)
         perror("setitimer");
+
+    /* Disarming with an interval: Linux drops ITIMER_REAL's interval but keeps
+     * those of the CPU-time timers.
+     */
+    struct itimerval old;
+    val.it_interval.tv_sec = 0;
+    val.it_interval.tv_usec = 3000;
+    val.it_value.tv_sec = 5;
+    val.it_value.tv_usec = 0;
+    if (setitimer(ITIMER_REAL, &val, NULL) != 0)
+        perror("setitimer");
+    val.it_interval.tv_usec = 4000;
+    val.it_value.tv_sec = 0;
+    if (setitimer(ITIMER_REAL, &val, &old) != 0)
+        perror("setitimer");
+    if (tv_us(&old.it_interval) != 3000 || tv_us(&old.it_value) < 4000000 ||
+        tv_us(&old.it_value) > 5000000) {
+        print("disarming ITIMER_REAL: prior interval=%ld value=%ld\n",
+              (long)tv_us(&old.it_interval), (long)tv_us(&old.it_value));
+        failures++;
+    }
+    expect_timer("after disarming with an interval", ITIMER_REAL, 0, 0, 0);
+    if (setitimer(ITIMER_REAL, &zero, &old) != 0)
+        perror("setitimer");
+    if (tv_us(&old.it_interval) != 0 || tv_us(&old.it_value) != 0) {
+        print("disarmed ITIMER_REAL: prior interval=%ld value=%ld\n",
+              (long)tv_us(&old.it_interval), (long)tv_us(&old.it_value));
+        failures++;
+    }
+    for (int which = ITIMER_VIRTUAL; which <= ITIMER_PROF; which++) {
+        val.it_value.tv_sec = 0;
+        if (setitimer(which, &val, NULL) != 0)
+            perror("setitimer");
+        expect_timer("after disarming with an interval", which, 4000, 0, 0);
+        if (setitimer(which, &zero, &old) != 0)
+            perror("setitimer");
+        if (tv_us(&old.it_interval) != 4000 || tv_us(&old.it_value) != 0) {
+            print("disarmed %s: prior interval=%ld value=%ld\n", name[which],
+                  (long)tv_us(&old.it_interval), (long)tv_us(&old.it_value));
+            failures++;
+        }
+    }
 
     /* alarm (a syscall of its own on x86, setitimer elsewhere) returns the app's
      * prior timer rounded to the nearest second, and clears the interval.
@@ -425,8 +467,10 @@ test_contention(void)
  * Concurrent setters
  */
 
-/* Set number id (0 for the initial one) installs this interval, unique to it,
- * and arms the timer with it if id_armed(id).
+/* Set number id (0 for the initial one; then SETS_PER_SETTER per setter thread,
+ * in its order) installs this interval, unique to it, and arms the timer with it
+ * if id_armed().  ITIMER_REAL is always armed, as Linux drops a disarmed
+ * ITIMER_REAL's interval (see test_failures()).
  */
 static int64_t
 id_interval(int id)
@@ -435,9 +479,9 @@ id_interval(int id)
 }
 
 static int
-id_armed(int id)
+id_armed(int which, int id)
 {
-    return id == 0 || ((id - 1) % SETS_PER_SETTER) % 2 == 0;
+    return which == ITIMER_REAL || id == 0 || ((id - 1) % SETS_PER_SETTER) % 2 == 0;
 }
 
 static int
@@ -450,10 +494,10 @@ interval_id(int64_t interval)
 }
 
 static void
-id_timer(int id, struct itimerval *val)
+id_timer(int which, int id, struct itimerval *val)
 {
     set_tv(&val->it_interval, id_interval(id));
-    set_tv(&val->it_value, id_armed(id) ? id_interval(id) : 0);
+    set_tv(&val->it_value, id_armed(which, id) ? id_interval(id) : 0);
 }
 
 typedef struct {
@@ -473,7 +517,7 @@ setter_func(void *arg)
             int id = 1 + idx * SETS_PER_SETTER + k;
             struct itimerval val, old;
             spin_rand(&rnd);
-            id_timer(id, &val);
+            id_timer(which, id, &val);
             if (setitimer(which, &val, &old) != 0) {
                 perror("setitimer");
                 old.it_interval.tv_sec = -1;
@@ -485,13 +529,90 @@ setter_func(void *arg)
     return NULL;
 }
 
+/* Checks that the sets of which ran as if one at a time: each set's prior timer
+ * links it to the set before it, and following those links from the initial
+ * timer must visit every set exactly once, each setter's in its own order, and
+ * end at the timer the kernel has now.
+ */
+static void
+check_setters(int which)
+{
+    static int next[NUM_IDS], pos[NUM_IDS];
+    int bad = 0;
+    for (int id = 0; id < NUM_IDS; id++) {
+        next[id] = -1;
+        pos[id] = -1;
+    }
+    for (int id = 1; id < NUM_IDS; id++) {
+        set_result_t *res = &results[which][id];
+        int old_id = interval_id(res->old_interval);
+        if (old_id < 0 || old_id == id || next[old_id] != -1) {
+            if (bad++ < 3) {
+                print("%s: set %d got prior interval %ld (set %d), %s\n", name[which], id,
+                      (long)res->old_interval, old_id,
+                      old_id < 0 || old_id == id ? "not another set's"
+                                                 : "also another set's prior");
+            }
+            continue;
+        }
+        next[old_id] = id;
+        /* An armed periodic timer has some time left, at most an interval
+         * (and some for the CPU-time timers: see check_value()); the kernel
+         * can truncate a CPU-time timer's last microsecond to 0.
+         */
+        int64_t max = id_interval(old_id) + (which == ITIMER_REAL ? 0 : TICK_SLACK_US);
+        int64_t min = which == ITIMER_REAL ? 1 : 0;
+        if (id_armed(which, old_id) ? (res->old_value < min || res->old_value > max)
+                                    : res->old_value != 0) {
+            if (bad++ < 3) {
+                print("%s: set %d got prior value %ld from %s set %d\n", name[which], id,
+                      (long)res->old_value,
+                      id_armed(which, old_id) ? "arming" : "disarming", old_id);
+            }
+        }
+    }
+    int last = 0, count = 0;
+    pos[0] = 0;
+    while (next[last] != -1 && pos[next[last]] == -1) {
+        last = next[last];
+        pos[last] = ++count;
+    }
+    if (count != NUM_IDS - 1) {
+        print("%s: the sets from the initial timer on are only %d of %d\n", name[which],
+              count, NUM_IDS - 1);
+        bad++;
+    }
+    struct itimerval cur;
+    if (getitimer(which, &cur) != 0)
+        perror("getitimer");
+    int final_id = interval_id(tv_us(&cur.it_interval));
+    if (final_id != last) {
+        print("%s: the timer is set %d's, but the last set is %d\n", name[which],
+              final_id, last);
+        bad++;
+    }
+    for (int t = 0; t < NUM_SETTERS; t++) {
+        for (int k = 1; k < SETS_PER_SETTER; k++) {
+            int id = 1 + t * SETS_PER_SETTER + k;
+            if (pos[id] != -1 && pos[id - 1] != -1 && pos[id] < pos[id - 1]) {
+                if (bad++ < 3) {
+                    print("%s: setter %d's set %d came before its set %d\n", name[which],
+                          t, id, id - 1);
+                }
+            }
+        }
+    }
+    if (bad == 0)
+        print("%s: setters ok\n", name[which]);
+}
+
 static void
 test_setters(void)
 {
     pthread_t thread[NUM_SETTERS];
     for (int which = 0; which < 3; which++) {
         struct itimerval val;
-        id_timer(0, &val);
+        id_timer(which, 0, &val);
         if (setitimer(which, &val, NULL) != 0)
             perror("setitimer");
     }
@@ -503,59 +624,8 @@ test_setters(void)
     }
     for (int i = 0; i < NUM_SETTERS; i++)
         pthread_join(thread[i], NULL);
-    for (int which = 0; which < 3; which++) {
-        static int reported[NUM_IDS];
-        int bad = 0;
-        memset(reported, 0, sizeof(reported));
-        for (int id = 1; id < NUM_IDS; id++) {
-            set_result_t *res = &results[which][id];
-            int old_id = interval_id(res->old_interval);
-            if (old_id < 0 || old_id == id || reported[old_id]++ > 0) {
-                if (bad++ < 3) {
-                    print("%s: set %d got prior interval %ld (set %d), %s\n", name[which],
-                          id, (long)res->old_interval, old_id,
-                          old_id < 0 || old_id == id ? "not another set's"
-                                                     : "also another set's prior");
-                }
-                continue;
-            }
-            /* An armed periodic timer has some time left, at most an interval
-             * (and some for the CPU-time timers: see check_value()); the kernel
-             * can truncate a CPU-time timer's last microsecond to 0.
-             */
-            int64_t max =
-                id_interval(old_id) + (which == ITIMER_REAL ? 0 : TICK_SLACK_US);
-            int64_t min = which == ITIMER_REAL ? 1 : 0;
-            if (id_armed(old_id) ? (res->old_value < min || res->old_value > max)
-                                 : res->old_value != 0) {
-                if (bad++ < 3) {
-                    print("%s: set %d got prior value %ld from %s set %d\n", name[which],
-                          id, (long)res->old_value,
-                          id_armed(old_id) ? "arming" : "disarming", old_id);
-                }
-            }
-        }
-        /* The one set no other set saw as its prior must be the timer now. */
-        struct itimerval cur;
-        if (getitimer(which, &cur) != 0)
-            perror("getitimer");
-        int final_id = interval_id(tv_us(&cur.it_interval));
-        for (int id = 0; id < NUM_IDS; id++) {
-            if (reported[id] == 0 && id != final_id) {
-                if (bad++ < 3) {
-                    print("%s: set %d was no set's prior, and the timer has %d\n",
-                          name[which], id, final_id);
-                }
-            }
-        }
-        if (final_id < 0 || reported[final_id] != 0) {
-            print("%s: the timer is interval %ld, which a set replaced\n", name[which],
-                  (long)tv_us(&cur.it_interval));
-            bad++;
-        }
-        if (bad == 0)
-            print("%s: setters ok\n", name[which]);
-    }
+    for (int which = 0; which < 3; which++)
+        check_setters(which);
 }
 
 /***************************************************************************
