@@ -10019,11 +10019,21 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
     ASSERT(((sigframe_rt_t *)xsp)->uc.uc_stack.ss_sp == info->app_sigstack.ss_sp);
 #endif
 
+    /* Restore app segment registers. It is important that we do not restore the
+     * app's blocked sigmask yet. It is better to let that happen automatically
+     * at sigreturn since we've already set it in the signal frame.
+     * This must come before we block SIGSEGV below: on AArch64 it checks the app's
+     * TLS base with get_memory_info(), whose safe_read() of a region's header can
+     * fault, and a fault while SIGSEGV is blocked kills the process.
+     */
+    os_thread_not_under_dynamo(dcontext, /*restore_sigblocked=*/false);
+
     /* Hand the signals we have queued for this thread back to the kernel
      * (resend_pending_signal_at_detach()): otherwise they are freed with its state
      * after the detach and never delivered.  We block them all first;
      * the sigreturn installs the app's mask, and the kernel delivers them then,
      * or keeps those the app blocks pending, as it would have without us.
+     * Nothing from here to the sigreturn may fault.
      */
     if (info->num_pending > 0) {
         kernel_sigset_t all;
@@ -10035,11 +10045,6 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
             resend_pending_signal_at_detach(dcontext, info, sig);
     }
 
-    /* Restore app segment registers. It is important that we do not restore the
-     * app's blocked sigmask yet. It is better to let that happen automatically
-     * at sigreturn since we've already set it in the signal frame.
-     */
-    os_thread_not_under_dynamo(dcontext, /*restore_sigblocked=*/false);
     os_tls_thread_exit(dcontext->local_state);
 
 #ifdef HAVE_SIGALTSTACK
