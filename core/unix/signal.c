@@ -9479,6 +9479,16 @@ init_itimer(dcontext_t *dcontext, bool first)
     memset(info->itimer, 0, sizeof(*info->itimer));
     for (i = 0; i < NUM_ITIMERS; i++) {
         ASSIGN_INIT_RECURSIVE_LOCK_FREE((*info->itimer)[i].lock, shared_itimer_lock);
+#ifdef DEADLOCK_AVOIDANCE
+        /* The first acquisition of a lock puts it on the list of all locks, which
+         * takes innermost_lock.  We do it now, while no other thread can see the
+         * lock, rather than in itimer_lock() with signals blocked, where waiting
+         * for innermost_lock could deadlock: its holder could have been suspended
+         * by a thread whose alarm handler then waits for our itimer lock.
+         */
+        acquire_recursive_lock(&(*info->itimer)[i].lock);
+        release_recursive_lock(&(*info->itimer)[i].lock);
+#endif
     }
     if (first) {
         /* see if app has set up an itimer before we were loaded */
@@ -9501,10 +9511,21 @@ init_itimer(dcontext_t *dcontext, bool first)
  * Never wait with those signals blocked, and never invoke a client or access
  * application memory while holding the lock.  SIGSEGV/SIGBUS remain available
  * for DR's fault handling.  Private timers need the mask too, for reentrancy.
+ *
+ * Acquiring must take no other lock either: init_itimer() puts the locks on the
+ * debug build's list of all locks, which would otherwise take innermost_lock on
+ * the first acquisition, with signals blocked (a thread suspended while holding
+ * innermost_lock would then block us, and its suspender's alarm handler would
+ * wait for us).
  */
 static void
 itimer_lock(thread_sig_info_t *info, int which, kernel_sigset_t *prior_mask)
 {
+#ifdef DEADLOCK_AVOIDANCE
+    /* Registered by init_itimer(), so that acquiring takes no other lock. */
+    ASSERT(!info->shared_itimer ||
+           (*info->itimer)[which].lock.lock.prev_process_lock != NULL);
+#endif
     for (;;) {
         block_all_noncrash_signals_except(prior_mask, 0);
         if (!info->shared_itimer || try_recursive_lock(&(*info->itimer)[which].lock))
