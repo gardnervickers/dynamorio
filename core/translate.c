@@ -816,7 +816,18 @@ translate_restore_clean_call(dcontext_t *tdcontext, translate_walk_t *walk)
      * FIXME i#4219: This is not safe: see comment below.
      */
     LOG(THREAD_GET, LOG_INTERP, 2, "\ttranslating clean call arg crash\n");
+#ifdef AARCH64
+    /* The pushed context has only NZCV of PSTATE (see PSTATE_APP_STATE_BITS):
+     * keep the app's other fields from the interrupted context we were given,
+     * which is that of tdcontext's thread, not necessarily ours.
+     */
+    uint interrupted_pstate = walk->mc->nzcv;
+#endif
     dr_get_mcontext_priv(tdcontext, NULL, walk->mc);
+#ifdef AARCH64
+    walk->mc->nzcv =
+        PSTATE_WITH_BITS_OF(walk->mc->nzcv, interrupted_pstate, PSTATE_APP_STATE_BITS);
+#endif
     /* walk->mc->pc will be fixed up by caller */
 
     /* PR 306410: up to caller to shift signal or SEH frame from dstack
