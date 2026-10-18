@@ -2405,6 +2405,17 @@ PC_OPTION_INTERNAL(bool, store_translations,
 OPTION_DEFAULT_INTERNAL(bool, xl8_code_copy, true,
                         "without -hw_cache_consistency, translate blocks from writable "
                         "pages from a copy of their code")
+/* Without -hw_cache_consistency an app has us flush code with an IC IVAU of one line,
+ * and a flush deletes every fragment on the list of each region it overlaps.  Those
+ * regions used to be whole executable areas, so a line of a JIT's code cache took all
+ * of the cache's fragments with it, and every flush cost more as the cache grew.
+ * Instead, a region of code other than an unmodified image covers at most this many
+ * bytes, aligned to it: a power of 2, rounded up to a page (a block crossing a
+ * boundary is on both lists).  0 keeps whole executable areas.
+ */
+OPTION_DEFAULT_INTERNAL(uint_size, sw_flush_granule, 4 * 1024,
+                        "without -hw_cache_consistency, the most code a fragment list "
+                        "covers outside unmodified images")
 /* i#698: our fpu state xl8 is a perf hit for some apps */
 PC_OPTION(bool, translate_fpu_pc,
           "translate the saved last floating-point pc when FPU state is saved")

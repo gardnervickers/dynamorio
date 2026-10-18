@@ -1588,13 +1588,30 @@ vm_area_overlap(vm_area_vector_t *v, app_pc start, app_pc end)
 
 /*********************** EXPORTED ROUTINES **********************/
 
+/* Returns the most code that the fragment list of a region of code other than an
+ * unmodified image covers (see check_thread_vm_area()), or 0 for whole executable
+ * areas.  Such regions must then not merge with their neighbors.
+ */
+static size_t
+vm_area_flush_granule(void)
+{
+    size_t granule = INTERNAL_OPTION(sw_flush_granule);
+    if (INTERNAL_OPTION(hw_cache_consistency) || granule == 0 ||
+        (granule & (granule - 1)) != 0 /* not a power of 2 */)
+        return 0;
+    return granule < PAGE_SIZE ? PAGE_SIZE : granule;
+}
+
 /* thread-shared initialization that should be repeated after a reset */
 void
 vm_areas_reset_init(void)
 {
     memset(shared_data, 0, sizeof(*shared_data));
-    VMVECTOR_INITIALIZE_VECTOR(&shared_data->areas, VECTOR_SHARED | VECTOR_FRAGMENT_LIST,
-                               shared_vm_areas);
+    VMVECTOR_INITIALIZE_VECTOR(
+        &shared_data->areas,
+        VECTOR_SHARED | VECTOR_FRAGMENT_LIST |
+            (vm_area_flush_granule() > 0 ? VECTOR_NEVER_MERGE_ADJACENT : 0),
+        shared_vm_areas);
 }
 
 void
@@ -1850,7 +1867,11 @@ vm_areas_thread_reset_init(dcontext_t *dcontext)
 {
     thread_data_t *data = (thread_data_t *)dcontext->vm_areas_field;
     memset(dcontext->vm_areas_field, 0, sizeof(thread_data_t));
-    VMVECTOR_INITIALIZE_VECTOR(&data->areas, VECTOR_FRAGMENT_LIST, thread_vm_areas);
+    VMVECTOR_INITIALIZE_VECTOR(
+        &data->areas,
+        VECTOR_FRAGMENT_LIST |
+            (vm_area_flush_granule() > 0 ? VECTOR_NEVER_MERGE_ADJACENT : 0),
+        thread_vm_areas);
     /* data->areas.lock is never used, but we may want to grab it one day,
        e.g. to print other thread areas */
 }
@@ -8274,8 +8295,22 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
 #    endif
 #endif
 
-        add_vm_area(&data->areas, area->start, area->end, area->vm_flags,
-                    area->frag_flags, NULL _IF_DEBUG(area->comment));
+        app_pc list_start = area->start, list_end = area->end;
+        size_t granule = vm_area_flush_granule();
+        if (granule > 0 && !TESTANY(VM_UNMOD_IMAGE, area->vm_flags)) {
+            /* Without hardware cache consistency the app flushes code a line at a
+             * time, and a flush deletes the fragments of every region of ours that it
+             * overlaps: keep the region small (-sw_flush_granule).
+             */
+            app_pc granule_start = (app_pc)ALIGN_BACKWARD(pc, granule);
+            app_pc granule_end = (app_pc)ALIGN_FORWARD(pc + 1, granule);
+            if (granule_start > list_start)
+                list_start = granule_start;
+            if (granule_end > granule_start /* no overflow */ && granule_end < list_end)
+                list_end = granule_end;
+        }
+        add_vm_area(&data->areas, list_start, list_end, area->vm_flags, area->frag_flags,
+                    NULL _IF_DEBUG(area->comment));
         /* get area for actual pc (new area could have been split up) */
         ok = lookup_addr(&data->areas, pc, &local_area);
         ASSERT(ok);
@@ -8330,6 +8365,11 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
     *flags |= frag_flags;
     if (stop != NULL) {
         *stop = area->end;
+        /* A block that continues past our region must be on the next one's list
+         * too, so it must check the next one.
+         */
+        if (vm_area_flush_granule() > 0 && local_area->end < *stop)
+            *stop = local_area->end;
         ASSERT(*stop != NULL);
 #ifdef LINUX
         if (!vmvector_empty(d_r_rseq_areas)) {
