@@ -53,19 +53,17 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame)
     ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
 }
 
-/* The PSTATE fields that our mcontext does not hold (it holds only NZCV) and
- * that DR never writes, so that their hardware values are always the app's.
- */
-#define PSTATE_APP_ONLY_BITS (1ULL << 24) /* DIT */
-
 void
 sigcontext_set_app_pstate(sigcontext_t *sc)
 {
+    /* We sample only DIT: we may be in a signal handler, where TCO is not the
+     * app's (see PSTATE_APP_STATE_BITS), and reading SSBS needs FEAT_SSBS.
+     */
 #ifndef DR_HOST_NOT_TARGET
     if (proc_has_feature(FEATURE_DIT)) {
         reg_t dit;
         asm volatile("mrs %0, s3_3_c4_c2_5" : "=r"(dit)); /* mrs %0, dit */
-        sigcontext_copy_app_pstate(sc, dit);
+        sc->pstate = PSTATE_WITH_BITS_OF(sc->pstate, dit, PSTATE_DIT_BIT);
     }
 #endif
 }
@@ -73,7 +71,7 @@ sigcontext_set_app_pstate(sigcontext_t *sc)
 void
 sigcontext_copy_app_pstate(sigcontext_t *sc, reg_t pstate)
 {
-    sc->pstate = (sc->pstate & ~PSTATE_APP_ONLY_BITS) | (pstate & PSTATE_APP_ONLY_BITS);
+    sc->pstate = PSTATE_WITH_BITS_OF(sc->pstate, pstate, PSTATE_APP_STATE_BITS);
 }
 
 /* Returns the context record at offset in the record list at base (limit bytes

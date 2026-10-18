@@ -707,14 +707,15 @@ void
 save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame);
 
 #if defined(LINUX) && defined(AARCH64)
-/* Sets the PSTATE fields of sc that our mcontext does not hold (it holds only
- * NZCV) to the app's current values.
+/* Sets sc's PSTATE.DIT, which our mcontext does not hold (it holds only NZCV),
+ * to the app's current value: the hardware's.
  */
 void
 sigcontext_set_app_pstate(sigcontext_t *sc);
 
-/* Sets the same PSTATE fields of sc to their values in pstate, which must be a
- * PSTATE the app's code or ours ran with (such as an interrupted context's).
+/* Sets the PSTATE fields of sc that are the app's in an interrupted context
+ * (PSTATE_APP_STATE_BITS) to their values in pstate, the PSTATE of a context
+ * interrupted outside a signal handler (the app's code or ours).
  */
 void
 sigcontext_copy_app_pstate(sigcontext_t *sc, reg_t pstate);
