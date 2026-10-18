@@ -5961,14 +5961,18 @@ flush_fragments_free_futures(app_pc base, size_t size)
  * the fragment lists.  With traces, a trace can also be in the bb ibl tables
  * (-bb_ibt_table_includes_traces), which fragment_remove_from_ibt_tables() does
  * not visit, and with mixed sharing of the bb and trace tables the per-thread
- * passes below do not visit every table: those keep the walk.  Without traces only
- * the bb tables hold targets, and the passes below remove each fragment from
- * every one that can hold it.
+ * passes below do not visit every table: those keep the walk, as does any
+ * sharing of traces or of their tables, even with traces disabled (options can
+ * leave -shared_traces -shared_trace_ibt_tables on under -disable_traces, which
+ * makes SHARED_IBT_TABLES_ENABLED() suppress the per-thread pass for private bb
+ * tables).  Otherwise only the bb tables hold targets, and the passes below
+ * remove each fragment from every one that can hold it.
  */
 static bool
 flush_ibl_walk_needed(void)
 {
-    return DYNAMO_OPTION(coarse_units) || !DYNAMO_OPTION(disable_traces);
+    return DYNAMO_OPTION(coarse_units) || !DYNAMO_OPTION(disable_traces) ||
+        DYNAMO_OPTION(shared_traces) || DYNAMO_OPTION(shared_trace_ibt_tables);
 }
 
 /* This routine begins a flush that requires full thread synch: currently,
