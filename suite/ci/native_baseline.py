@@ -29,52 +29,128 @@ TERMINATE_GRACE = 5
 KILL_GRACE = 5
 
 
+class SessionProcess(subprocess.Popen):
+    """Observe completion without reaping our session-ID ownership anchor.
+
+    This single-threaded helper is the child's sole waiter. communicate() calls
+    wait(), so both wait and poll must leave the leader (even a zombie) attached
+    until cleanup has finished. A pidfd alone does NOT reserve a numeric PID.
+    """
+
+    def poll(self):
+        if self.returncode is None:
+            status = os.waitid(os.P_PID, self.pid,
+                               os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if status is not None:
+                self.returncode = (status.si_status if status.si_code == os.CLD_EXITED
+                                   else -status.si_status)
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is not None:
+            return self.returncode
+        with_pidfd = os.pidfd_open(self.pid)
+        try:
+            if self.poll() is None:
+                if not select.select([with_pidfd], [], [],
+                                     None if timeout is None else max(0, timeout))[0]:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+            return self.poll()
+        finally:
+            os.close(with_pidfd)
+
+    # Popen's KeyboardInterrupt and destructor paths use these internal hooks.
+    _wait = wait
+
+    def _internal_poll(self, _deadstate=None):
+        return self.poll()
+
+    def reap(self):
+        # Called only after the last session scan/signal, including on failure.
+        self.wait(timeout=KILL_GRACE)
+        os.waitpid(self.pid, 0)
+
+
 def session_members(session):
-    """Read Linux process metadata, retaining only our live private session."""
+    """Snapshot candidates only; numeric identities are never signal targets."""
     members = {}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
-        try:
-            stat = (entry / "stat").read_bytes()
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
-            continue
-        # comm can itself contain spaces or ')'; fields after its final ')' are
-        # state, ppid, pgrp, session, ... . Zombies cannot execute or fork.
-        fields = stat[stat.rfind(b")") + 2:].split()
-        if int(fields[3]) == session and fields[0] not in (b"Z", b"X"):
+        fields = process_fields(entry)
+        if fields and int(fields[3]) == session and fields[0] not in (b"Z", b"X"):
             members[int(entry.name)] = int(fields[2])
     return members
 
 
-def signal_groups(members, sig):
-    for group in set(members.values()):
-        try:
-            os.killpg(group, sig)
-        except ProcessLookupError:
-            pass
+def process_fields(entry):
+    try:
+        stat = (entry / "stat").read_bytes()
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return None
+    # comm can itself contain spaces or ')'.
+    return stat[stat.rfind(b")") + 2:].split()
+
+
+def owned_pidfd(pid, session):
+    """Acquire identity BEFORE validation, then prove it survived that read.
+
+    If the number recycled before open, membership rejects the replacement.
+    If it recycled between open and stat, the old pidfd is readable and rejected.
+    After validation, pidfd_send_signal can only signal the validated task, even
+    if it exits and its number is reused. The unreaped leader reserves the SID.
+    """
+    try:
+        fd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return None
+    try:
+        fields = process_fields(Path("/proc") / str(pid))
+        if (fields and int(fields[3]) == session and fields[0] not in (b"Z", b"X")
+                and not select.select([fd], [], [], 0)[0]):
+            return fd
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+    return None
+
+
+def signal_members(session, members, sig):
+    exits = []
+    try:
+        for pid in members:
+            fd = owned_pidfd(pid, session)
+            if fd is not None:
+                exits.append(fd)
+                try:
+                    signal.pidfd_send_signal(fd, sig)
+                except ProcessLookupError:
+                    pass
+        return exits
+    except BaseException:
+        for fd in exits:
+            os.close(fd)
+        raise
 
 
 def terminate_session(process):
-    """Retire all owned groups even when the session leader has exited."""
-    signal_groups(session_members(process.pid), signal.SIGTERM)
+    """Retire session members while the unreaped leader anchors ownership."""
     try:
-        process.wait(timeout=TERMINATE_GRACE)
-    except subprocess.TimeoutExpired:
-        pass
+        exits = signal_members(process.pid, session_members(process.pid), signal.SIGTERM)
+        for fd in exits:
+            os.close(fd)
+        try:
+            process.wait(timeout=TERMINATE_GRACE)
+        except subprocess.TimeoutExpired:
+            pass
     finally:
-        # drrun -killpg creates another group within our session. Discover groups
-        # again after TERM, rather than treating the leader's exit as completion.
+        # drrun -killpg creates another group. Rescan after exits/signals to
+        # include those groups and children forked during TERM handling.
         deadline = time.monotonic() + KILL_GRACE
         while members := session_members(process.pid):
-            exits = []
+            exits = signal_members(process.pid, members, signal.SIGKILL)
             try:
-                for pid in members:
-                    try:
-                        exits.append(os.pidfd_open(pid))
-                    except ProcessLookupError:
-                        pass
-                signal_groups(members, signal.SIGKILL)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("owned CTest session did not exit after SIGKILL")
@@ -88,7 +164,9 @@ def terminate_session(process):
 
 def run_bounded(command, *, timeout, description, capture_output=False):
     """Bound a Linux command and retire its private session on every exit path."""
-    process = subprocess.Popen(
+    if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+        raise RuntimeError("CTest session ownership requires waitable children (SIGCHLD)")
+    process = SessionProcess(
         command, start_new_session=True, text=True,
         stdout=subprocess.PIPE if capture_output else None)
     try:
@@ -103,8 +181,11 @@ def run_bounded(command, *, timeout, description, capture_output=False):
         try:
             terminate_session(process)
         finally:
-            if process.stdout is not None:
-                process.stdout.close()
+            try:
+                process.reap()
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
 
 
 def select_tests(inventory, arch):

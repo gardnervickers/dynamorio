@@ -68,12 +68,29 @@ Empty/missing/disabled required tests fail selection. The exact inventory and
 selection are retained. CTest has a 900-second default per-test timeout and a
 90-minute aggregate bound; explicit upstream timeouts can take precedence.
 Inventory discovery has a separate 60-second bound. Each command runs in a
-private Linux session. On completion or failure, cleanup sends TERM to that
-session's groups, waits up to five seconds for the leader, then sends KILL to
-remaining groups with a five-second cleanup bound. It tracks session membership
-through `/proc`, including groups created by `drrun -killpg` and descendants
-whose leader already exited. Exit notifications bound waiting; a deadline is
-reported as an error. This does not signal processes outside the owned session.
+private Linux session. On completion or failure, cleanup sends TERM to its
+members, waits up to five seconds for the leader, then rescans and sends KILL
+with a five-second cleanup bound. This includes groups created by `drrun -killpg`
+and descendants whose leader already exited. Cleanup failures fail the gate.
+
+The single-threaded helper is the leader's sole waiter. It observes completion
+with `waitid(WNOWAIT)` and retains the unreaped leader until the last cleanup
+scan/signal, reserving the session identity even after command completion.
+For each candidate from `/proc`, it opens a pidfd, reads session membership,
+and checks that the pidfd has not exited across that read. Signals use that
+validated pidfd, never numeric PID/group IDs: recycling before acquisition is
+rejected by membership, recycling during validation by the exit notification,
+and recycling after validation cannot redirect the signal. A pidfd alone does
+not reserve a numeric ID. The leader is reaped after cleanup, including error
+paths (with a bounded wait if cleanup failed). Zombies cannot run or fork and
+need no signal. This requires Linux pidfds and normal child-wait semantics;
+no concurrent reaper or ignored SIGCHLD is supported.
+
+This boundary covers descendants that remain in the private session. Deliberate
+`setsid()` escape is outside scope; a task validated before it changes session
+can still receive its identity-directed signal. No cgroup, daemon, host setting,
+or global process cleanup is used. Exit notifications bound waits and deadlines
+are errors, not passing results.
 No retries, failure allowlists or `continue-on-error` are used. JUnit must
 contain every selected test exactly once, with passing status and no skip,
 failure or error. `api.detach_signal` stays required even if it fails.
