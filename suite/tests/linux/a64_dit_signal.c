@@ -77,7 +77,8 @@ read_dit(void)
 static inline void
 set_dit(void)
 {
-    __asm__ __volatile__("msr dit, #1" ::: "memory");
+    /* msr dit, #1: encoded, as assemblers accept the name only for armv8.4-a. */
+    __asm__ __volatile__(".inst 0xd503415f" ::: "memory");
 }
 
 static void

@@ -6074,8 +6074,9 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 reg_t app_stolen = get_stolen_reg_val(mc);
                 if (app_stolen == tls_base)
                     app_stolen = dcontext->local_state->spill_space.reg_stolen;
-                /* The mcontext has only NZCV of PSTATE: the rest of the
-                 * interrupted PSTATE is the app's.  Dropped, the kernel's
+                /* The mcontext has only NZCV of PSTATE.  The interrupted
+                 * PSTATE's DIT is the app's, as we never write it (unlike, say,
+                 * its BTYPE, which our own branches set): dropped, the kernel's
                  * sigreturn from our handler would clear the app's DIT, and so
                  * would the app's from its handler, whose frame is this context.
                  */
