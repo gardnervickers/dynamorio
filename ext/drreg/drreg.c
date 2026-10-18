@@ -744,6 +744,18 @@ drreg_insert_respill_all(void *drcontext, per_thread_t *pt, instrlist_t *bb,
     drreg_status_t res = DRREG_SUCCESS;
     reg_id_t reg;
 #ifdef X86
+    /* XXX: the aflags pass below leaves the gpr pass the state after inst, not
+     * before it.  For reserved aflags, it schedules saving xax and a lahf (with
+     * a seto if OF is live) after inst, and marks xax as holding the flags.  If
+     * inst also writes xax (e.g., a "popcnt rax, [rcx]" that is not the last
+     * instr), the gpr pass then calls drreg_move_aflags_from_reg() before inst as
+     * if that save and lahf had already run: it may reload xax from a slot before
+     * we saved to it and mark xax native, while the lahf after inst still writes
+     * ah over popcnt's result, and later app reads of xax no longer restore it.
+     * Fixing this needs the passes reordered or the two states kept apart, and
+     * x86 tests that both fault at and run through such an instr: a follow-up for
+     * an x86-capable setup.
+     */
     res = drreg_respill_aflags_after_write(drcontext, pt, bb, inst, next, force_respill);
 #else
     /* Update the GPRs first: on AArchXX the aflags spill below picks a scratch
