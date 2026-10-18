@@ -172,6 +172,19 @@ struct _linkstub_t {
 typedef struct _common_direct_linkstub_t {
     linkstub_t l;
 
+#ifdef X64
+    /* Where the previous entry of the incoming list we are on is, so a link can
+     * be removed without walking the list: a block that many others branch to
+     * (a JIT's runtime stub) collects a long list, and each flush of a block
+     * that branches there walked it.  In the padding after l: the distance to the
+     * previous entry in units of 4 bytes, INCOMING_PREV_NONE if we are first
+     * (or on no list), or INCOMING_PREV_UNKNOWN if the distance does not fit.
+     * The removal checks the entry it finds against the list, and walks the list
+     * if this is unknown or wrong, so it is only a hint.
+     */
+    int prev_incoming_offs;
+#endif
+
     /* outgoing stubs of a fragment never change, and are allocated in
      * an array, but we walk them like a linked list since we don't want
      * to waste space storing the count and all of our access patterns
