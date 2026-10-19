@@ -5667,10 +5667,12 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
 #if defined(X86) && defined(X64)
         /* Optimization for the common case of targeting a prefix on x86_64:
          *    ff 61 08             jmp    0x08(%rcx)[8byte]
-         * The tag is in 0x0(%rcx) so we avoid a decode and pclookup.
+         * The matched tag was saved before restoring app xbx.  The entry in rcx
+         * may already be tombstoned, so it cannot supply the original target.
          */
         if (*pc == 0xff && *(pc + 1) == 0x61 && *(pc + 2) == 0x08) {
-            f = fragment_lookup(dcontext, *(app_pc *)sc->SC_XCX);
+            f = fragment_lookup(dcontext,
+                                dcontext->local_state->spill_space.ibl_hit_target);
         }
 #endif
         if (f == NULL) {

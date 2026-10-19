@@ -3151,6 +3151,16 @@ append_ibl_found(dcontext_t *dcontext, instrlist_t *ilist, ibl_code_t *ibl_code,
         restore_eflags = true;
     }
 
+#ifdef X86
+    if (target_prefix) {
+        /* Preserve the tag we actually matched before restoring app xbx.  Removal
+         * redirects the entry to target_delete and replaces its tag with FAKE_TAG;
+         * neither that handler nor a signal on the hit jump may reload the tag.
+         */
+        APP(ilist, SAVE_TO_TLS(dcontext, SCRATCH_REG1, TLS_IBL_HIT_TARGET_SLOT));
+    }
+#endif
+
 #ifdef HASHTABLE_STATISTICS
     if (INTERNAL_OPTION(hashtable_ibl_stats) ||
         INTERNAL_OPTION(hashtable_ibl_entry_stats)) {

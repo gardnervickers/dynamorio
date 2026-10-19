@@ -166,6 +166,12 @@ typedef struct _spill_state_t {
 #endif
     /* XXX: move this below the tables to fit more on cache line */
     dcontext_t *dcontext;
+#ifdef X86
+    /* Matched tag for a prefix-target IBL hit.  The table entry can be tombstoned
+     * before its target_delete entry runs, after the app's xbx has been restored.
+     */
+    app_pc ibl_hit_target;
+#endif
 #if defined(RISCV64) || defined(AARCHXX)
     /* We store addresses here so we can load pointer-sized addresses into
      * registers with a single instruction in our exit stubs and gencode.
@@ -227,6 +233,7 @@ typedef struct _local_state_extended_t {
 #    define TLS_XBX_SLOT ((ushort)offsetof(spill_state_t, xbx))
 #    define TLS_XCX_SLOT ((ushort)offsetof(spill_state_t, xcx))
 #    define TLS_XDX_SLOT ((ushort)offsetof(spill_state_t, xdx))
+#    define TLS_IBL_HIT_TARGET_SLOT ((ushort)offsetof(spill_state_t, ibl_hit_target))
 #    define TLS_REG0_SLOT TLS_XAX_SLOT
 #    define TLS_REG1_SLOT TLS_XBX_SLOT
 #    define TLS_REG2_SLOT TLS_XCX_SLOT

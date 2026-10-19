@@ -2713,9 +2713,9 @@ emit_indirect_branch_lookup(dcontext_t *dcontext, generated_code_t *code, byte *
        * but one at least was a post-syscall!
        */
 
-    /* load the tag value from the table ptr in xcx into xbx, so    */
-    /* that it gets shuffled into xcx by the following instruction  */
-    /*>>>    mov     (%xcx), %xbx                                   */
+    /* Recover the matched tag, which the following instruction moves into xcx.
+     * The table entry in xcx may already contain FAKE_TAG after removal.
+     */
     if (!ibl_use_target_prefix(ibl_code)) {
         /* case 9688: for no-prefix-target ibl we stored the tag in xax slot
          * in the hit path.  we also restored eflags already.
@@ -2731,9 +2731,7 @@ emit_indirect_branch_lookup(dcontext_t *dcontext, generated_code_t *code, byte *
                                absolute _IF_X64(x86_to_x64_ibl_opt));
         }
     } else {
-        APP(&ilist,
-            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
-                              OPND_CREATE_MEMPTR(SCRATCH_REG2, FRAGMENT_TAG_OFFS)));
+        APP(&ilist, RESTORE_FROM_TLS(dcontext, SCRATCH_REG1, TLS_IBL_HIT_TARGET_SLOT));
     }
 
     /* Add to the patch list right away; hashtable stats could be added
