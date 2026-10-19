@@ -240,7 +240,7 @@ x1011010100xxxxxxxxx01xxxxxxxxxx  r   81   BASE      csneg            wx0 : wx5 
 11010101000000110011xxxx10111111  n   85   BASE        dmb                : imm4
 11010110101111110000001111100000  n   86   BASE       drps                :
 11010101000000110011xxxx10011111  n   87   BASE        dsb                : imm4
-01011110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup bhsd_imm5_reg0 : q5 imm5_dup
+01011110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup  bhsd_imm5_reg0 : q5 imm5_dup
 00001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             d0 : q5 imm5_dup
 01001110000xxxxx000001xxxxxxxxxx  n   88   BASE        dup             q0 : q5 imm5_dup
 00001110000xxxxx000011xxxxxxxxxx  n   88   BASE        dup             d0 : wx5_imm5 bhs_imm5_sz_s
@@ -487,7 +487,7 @@ x001111001011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5 s
 11010101000010000111010100011111  n   576  BASE   ic_iallu                :
 11010101000010000111000100011111  n   577  BASE ic_ialluis                :
 110101010000101101110101001xxxxx  n   578  BASE    ic_ivau                : memx0
-01101110000xxxxx0xxxx1xxxxxxxxxx  n   171  BASE        ins        q0 imm5_dup : q0 q5 imm4idx
+01101110000xxxxx0xxxx1xxxxxxxxxx  n   171  BASE        ins    q0 imm5_dup : q0 q5 imm4idx
 01001110000xxxxx000111xxxxxxxxxx  n   171  BASE        ins    q0 imm5_idx : q0 wx5_imm5 bhsd_imm5_sz
 11010101000000110011xxxx11011111  n   172  BASE        isb                : imm4
 0x001100010000000010xxxxxxxxxxxx  n   173  BASE        ld1  vt0 vt1 vt2 vt3 : memvm vmsz
@@ -798,8 +798,8 @@ x0011010110xxxxx000011xxxxxxxxxx  n   363  BASE       sdiv            wx0 : wx5 
 0x001110xx1xxxxx101011xxxxxxxxxx  n   391  BASE      sminp            dq0 : dq5 dq16 bhs_sz
 0x001110xx110001101010xxxxxxxxxx  n   392  BASE      sminv            dq0 : dq5 bhs_sz_lanes
 00001110xx1xxxxx100000xxxxxxxxxx  n   393  BASE      smlal             q0 : q0 d5 d16 bhs_sz
-0000111110xxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal            q0 : q0 dq5 q16 vindex_SD s_const_sz
-0000111101xxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal            q0 : q0 dq5 q4_16 vindex_H h_sz
+0000111110xxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal             q0 : q0 dq5 q16 vindex_SD s_const_sz
+0000111101xxxxxx0010x0xxxxxxxxxx  n   393  BASE      smlal             q0 : q0 dq5 q4_16 vindex_H h_sz
 01001110xx1xxxxx100000xxxxxxxxxx  n   394  BASE     smlal2             q0 : q0 q5 q16 bhs_sz
 0100111110xxxxxx0010x0xxxxxxxxxx  n   394  BASE     smlal2            dq0 : dq0 dq5 dq16 vindex_SD s_const_sz
 0100111101xxxxxx0010x0xxxxxxxxxx  n   394  BASE     smlal2            dq0 : dq0 dq5 dq16_h_sz vindex_H h_sz
