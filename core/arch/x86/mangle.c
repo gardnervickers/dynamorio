@@ -1599,8 +1599,11 @@ mangle_indirect_call(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     instr_set_opcode(instr, opnd_get_size(target) == OPSZ_2 ? OP_movzx : OP_mov_ld);
     instr_set_dst(instr, 0, opnd_create_reg(reg_target));
     instr_set_src(instr, 0, target); /* src stays the same */
-    if (instrlist_get_translation_target(ilist) != NULL) {
-        /* make sure original raw bits are used for translation */
+    if (instrlist_get_translation_target(ilist) != NULL &&
+        instr_get_translation(instr) == NULL) {
+        /* Decoding from a selfmod snapshot already supplies the application PC.
+         * Raw bits can point into that snapshot instead of application text.
+         */
         instr_set_translation(instr, instr_get_raw_bits(instr));
     }
     instr_set_our_mangling(instr, true);
@@ -1889,8 +1892,11 @@ mangle_indirect_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     instr_set_opcode(instr, opnd_get_size(target) == OPSZ_2 ? OP_movzx : OP_mov_ld);
     instr_set_dst(instr, 0, opnd_create_reg(reg_target));
     instr_set_src(instr, 0, target); /* src stays the same */
-    if (instrlist_get_translation_target(ilist) != NULL) {
-        /* make sure original raw bits are used for translation */
+    if (instrlist_get_translation_target(ilist) != NULL &&
+        instr_get_translation(instr) == NULL) {
+        /* Decoding from a selfmod snapshot already supplies the application PC.
+         * Raw bits can point into that snapshot instead of application text.
+         */
         instr_set_translation(instr, instr_get_raw_bits(instr));
     }
     instr_set_our_mangling(instr, true);
@@ -3729,6 +3735,16 @@ sandbox_top_of_bb(dcontext_t *dcontext, instrlist_t *ilist, bool s2ro, uint flag
     insert_restore_eflags(dcontext, ilist, instr, flags, use_tls,
                           !use_tls _IF_X64(X64_CACHE_MODE_DC(dcontext) &&
                                            !X64_MODE_DC(dcontext) && x86_to_x64_ibl_opt));
+    /* The sandbox has restored all application state.  Separate its mangling
+     * region from a mangled first application instruction with the same PC.
+     * A label is insufficient: both stored translation and ilist recreation
+     * skip zero-length instructions.  Without this boundary, unsupported
+     * sandbox operations poison restoration of an indirect CTI operand fault.
+     */
+    instr_t *boundary = INSTR_CREATE_nop(dcontext);
+    instrlist_preinsert(ilist, instr, boundary);
+    instr_set_meta(boundary);
+    instr_set_our_mangling(boundary, false);
     /* fall-through to bb start */
 }
 
