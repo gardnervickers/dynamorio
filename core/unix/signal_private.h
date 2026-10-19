@@ -334,12 +334,25 @@ typedef struct rt_sigframe {
  * app stack, so that we can deliver to a client at a safe spot
  * in rt form.
  */
+typedef enum {
+    PENDING_SYSCALL_NONE,
+    PENDING_SYSCALL_NOT_ISSUED,
+    /* Kernel supplied the syscall instruction/arguments as a restart point,
+     * not a completed syscall's return PC/result.
+     */
+    PENDING_SYSCALL_KERNEL_RESTART,
+} pending_syscall_origin_t;
+
 typedef struct _sigpending_t {
     sigframe_rt_t rt_frame;
     /* i#182/PR 449996: we provide the faulting access address for SIGSEGV, etc. */
     byte *access_address;
     /* use the sigcontext, not the mcontext (used to restart syscalls for i#1145) */
     bool use_sigcontext;
+    /* Only these explicit restart origins replace the synthetic EINTR landing
+     * when no application handler will return through this frame.
+     */
+    pending_syscall_origin_t syscall_origin;
     /* Was this unblocked at receive time? */
     bool unblocked_at_receipt;
     /* Was this a process-directed signal (signal_is_process_wide() at receipt)? */

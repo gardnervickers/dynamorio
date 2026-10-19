@@ -4854,6 +4854,7 @@ copy_frame_to_pending(dcontext_t *dcontext, sigpending_t *pend, sigframe_rt_t *f
 
     pend->access_address = access_address;
     pend->use_sigcontext = false;
+    pend->syscall_origin = PENDING_SYSCALL_NONE;
 
 #ifdef MACOS
     /* We rely on puc to find sc to we have to fix it up */
@@ -6393,6 +6394,9 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                      * between.
                      */
                     pend->use_sigcontext = true;
+                    pend->syscall_origin = syscall_not_issued
+                        ? PENDING_SYSCALL_NOT_ISSUED
+                        : PENDING_SYSCALL_KERNEL_RESTART;
                 }
             }
 
@@ -7593,6 +7597,24 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
         LOG(THREAD, LOG_ASYNCH, 3, "\tset frame's eip to " PFX "\n", sc->SC_XIP);
     }
 
+    if (info->sigpending[sig]->syscall_origin != PENDING_SYSCALL_NONE) {
+        /* The live continuation contains our synthetic EINTR landing.  Either
+         * the syscall was never issued or the kernel supplied a restart point
+         * (not a completed/partial syscall result).  Retain that continuation
+         * even if suppression/ignore frees this frame without a sigreturn.
+         * Install before the callback so ignored/suppressed mcontext edits do
+         * not change it; an explicit REDIRECT still overrides it below.  Do not
+         * infer this provenance from generic use_sigcontext or a live EINTR.
+         */
+        ASSERT(info->sigpending[sig]->use_sigcontext);
+        LOG(THREAD, LOG_ASYNCH, 2,
+            "restoring syscall continuation before signal disposition: origin=%d\n",
+            info->sigpending[sig]->syscall_origin);
+        dcontext->next_tag = canonicalize_pc_target(dcontext, (app_pc)sc->SC_XIP);
+        ucontext_to_mcontext(mcontext, uc);
+        IF_ARM(dr_set_isa_mode(dcontext, get_pc_mode_from_cpsr(sc), NULL));
+    }
+
     sigcontext_t sc_interrupted = *sc;
     action = send_signal_to_client(dcontext, sig, frame, NULL,
                                    info->sigpending[sig]->access_address,
@@ -7630,8 +7652,12 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
         LOG(THREAD, LOG_ASYNCH, 2, "%s: executing default action\n",
             (action == DR_SIGNAL_BYPASS) ? "client forcing default"
                                          : "app signal handler is SIG_DFL");
-        if (info->sigpending[sig]->use_sigcontext) {
-            /* after the default action we want to go to the sigcontext */
+        if (info->sigpending[sig]->use_sigcontext &&
+            info->sigpending[sig]->syscall_origin == PENDING_SYSCALL_NONE) {
+            /* Explicit syscall continuations were installed before the callback:
+             * without an app handler, DELIVER's mcontext edits do not apply.
+             * Other sigcontext users retain their existing default-action path.
+             */
             dcontext->next_tag = canonicalize_pc_target(dcontext, (app_pc)sc->SC_XIP);
             ucontext_to_mcontext(get_mcontext(dcontext), uc);
             IF_ARM(dr_set_isa_mode(dcontext, get_pc_mode_from_cpsr(sc), NULL));
