@@ -4075,6 +4075,9 @@ os_thread_resume(thread_record_t *tr)
     if (ostd->suspend_count == 0 && ostd->vfork_skips > 0) {
         /* os_thread_suspend_unless_vfork() left this thread running. */
         ostd->vfork_skips--;
+#ifdef LINUX
+        ksynch_wake_all(&ostd->vfork_skips);
+#endif
         d_r_mutex_unlock(&ostd->suspend_lock);
         return true;
     }
@@ -7571,6 +7574,19 @@ os_vfork_post(dcontext_t *dcontext)
     d_r_mutex_lock(&ostd->suspend_lock);
     bool waited = ostd->vfork_waiting;
     ostd->vfork_waiting = false;
+    /* A fork releases all_threads_synch_lock before entering the kernel, but
+     * does not resume its synchronized threads until os_fork_post. Waiting on
+     * that lock alone lets this caller run through the fork snapshot while
+     * still counted as synchronized. Keep it here until every skip is resumed.
+     * Read the futex value under the same lock as its updates, so a resume
+     * between unlock and wait cannot lose the wakeup.
+     */
+    while (ostd->vfork_skips > 0) {
+        int skips = ostd->vfork_skips;
+        d_r_mutex_unlock(&ostd->suspend_lock);
+        ksynch_wait(&ostd->vfork_skips, skips, 0);
+        d_r_mutex_lock(&ostd->suspend_lock);
+    }
     d_r_mutex_unlock(&ostd->suspend_lock);
     if (!waited)
         return;
