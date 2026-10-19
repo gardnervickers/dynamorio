@@ -3146,15 +3146,22 @@ mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                 opnd_create_reg(DR_REG_X0), opnd_create_reg(DR_REG_X30)));
         insert_mov_immed_arch(dcontext, NULL, NULL, (ptr_int_t)pc,
                               opnd_create_reg(DR_REG_X30), ilist, instr, NULL, NULL);
-        if (xt == dr_reg_stolen) {
-            PRE(ilist, instr, /* ldr x0, [x28, #32] */
-                instr_create_restore_from_tls(dcontext, DR_REG_X0, TLS_REG_STOLEN_SLOT));
+        if (xt == dr_reg_stolen || xt == DR_REG_X30) {
+            /* X30 now holds the resume PC, and the stolen register holds TLS.
+             * Recover the application's operand before publishing the range.
+             * App X0 was saved above, so it is available as scratch here.
+             */
+            PRE(ilist, instr,
+                instr_create_restore_from_tls(dcontext, DR_REG_X0,
+                                              xt == DR_REG_X30 ? TLS_REG1_SLOT
+                                                               : TLS_REG_STOLEN_SLOT));
+            xt = DR_REG_X0;
         }
         PRE(ilist, instr, /* stp xT, x30, [x28, #16] */
             INSTR_CREATE_stp(
                 dcontext,
                 opnd_create_base_disp(dr_reg_stolen, DR_REG_NULL, 0, 16, OPSZ_16),
-                opnd_create_reg(xt == dr_reg_stolen ? DR_REG_X0 : xt),
+                opnd_create_reg(xt),
                 opnd_create_reg(DR_REG_X30)));
 #    ifdef DR_HOST_NOT_TARGET
         /* We built all our asm code for the host, but here we need it for the target.
