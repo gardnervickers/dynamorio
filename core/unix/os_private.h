@@ -177,6 +177,11 @@ typedef struct _os_thread_data_t {
      * os_fork_forget_thread().
      */
     byte *pending_clone_dstack;
+    /* Parent-owned clone3 argument copy.  A competing fork must release the
+     * vanished owner's copy without consulting stale syscall parameters.
+     */
+    void *pending_clone_args;
+    size_t pending_clone_args_size;
 
     /* Thread synchronization data held across a fork. */
     thread_record_t **fork_threads;

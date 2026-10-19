@@ -32,4 +32,7 @@ typedef struct {
 
 #define CLONE_ARGS_SIZE_VER0 64
 
+/* Reset caught handlers in the child; ignored dispositions are preserved. */
+#define CLONE_CLEAR_SIGHAND_FLAG 0x100000000ULL
+
 #endif /* _CLONE3_H */

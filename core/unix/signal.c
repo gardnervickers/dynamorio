@@ -1206,6 +1206,9 @@ signal_info_exit_sigaction(dcontext_t *dcontext, thread_sig_info_t *info,
     info->sighand = NULL;
 }
 
+static void
+signal_clear_sighand(dcontext_t *dcontext);
+
 /* Called to finalize per-thread initialization.
  * Inherited and shared fields are set up here.
  * The clone_record contains the continuation pc, which is stored in dcontext->next_tag.
@@ -1307,6 +1310,16 @@ signal_thread_inherit(dcontext_t *dcontext, void *clone_record)
             }
             memcpy(info->sighand->we_intercept, record->info.sighand->we_intercept,
                    SIGARRAY_SIZE * sizeof(bool));
+#ifdef LINUX
+            if (TESTANY(CLONE_CLEAR_SIGHAND_FLAG, record->clone_flags)) {
+                /* clone3(CLONE_VM) has its own kernel handler table when
+                 * CLONE_SIGHAND is absent. Restore our handlers in that child
+                 * before releasing thread_initexit_lock: a synch-all may then
+                 * send it our suspend signal. Reset only its private app table.
+                 */
+                signal_clear_sighand(dcontext);
+            }
+#endif
             d_r_mutex_lock(&record->info.child_lock);
             record->info.num_unstarted_children--;
             d_r_mutex_unlock(&record->info.child_lock);
@@ -1594,23 +1607,13 @@ signal_fork_forget_children(dcontext_t *dcontext)
     info->num_unstarted_children = 0;
 }
 
-/* Called in a fork child before anything else in dynamorio_fork_init(): see
- * os_fork_init().
+/* Apply the kernel's CLONE_CLEAR_SIGHAND reset to this child's private table,
+ * and reinstall DR handlers before another thread can send a suspend signal.
  */
-void
-signal_fork_clear_sighand(dcontext_t *dcontext)
+static void
+signal_clear_sighand(dcontext_t *dcontext)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    if (!info->fork_clear_sighand)
-        return;
-    /* CLONE_CLEAR_SIGHAND: the kernel reset every handler, ours included, to
-     * SIG_DFL (ignored signals stay ignored). Do the same to the app's handlers
-     * and re-arm ours for the signals we intercept. This must come first: until
-     * then a fault in DR, which handles some of its own faults, would kill us, and
-     * the parent's other threads' cleanup in dynamorio_fork_init() checks that
-     * our SIGSEGV handler is in place.
-     */
-    info->fork_clear_sighand = false;
     for (int i = 1; i <= MAX_SIGNUM; i++) {
         kernel_sigaction_t *app = info->sighand->action[i];
         if (app != NULL && app->handler != (handler_t)SIG_IGN) {
@@ -1623,6 +1626,17 @@ signal_fork_clear_sighand(dcontext_t *dcontext)
             sigaction_syscall(i, &act, NULL);
         }
     }
+}
+
+/* Called before the fork child cleans up vanished parent threads. */
+void
+signal_fork_clear_sighand(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (!info->fork_clear_sighand)
+        return;
+    info->fork_clear_sighand = false;
+    signal_clear_sighand(dcontext);
 }
 
 void

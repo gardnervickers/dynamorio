@@ -202,10 +202,6 @@ char **our_environ;
 #include "../module_shared.h"
 #include "os_private.h"
 
-#ifndef CLONE_CLEAR_SIGHAND_FLAG
-/* clone3 only: reset the child's signal handlers to SIG_DFL (SIG_IGN stays). */
-#    define CLONE_CLEAR_SIGHAND_FLAG 0x100000000ULL
-#endif
 #include "../synch.h"
 #include "memquery.h"
 #include "ksynch.h"
@@ -2782,6 +2778,18 @@ os_fork_post(dcontext_t *dcontext, bool parent)
     vmm_heap_fork_post(dcontext, parent);
 }
 
+static void
+release_pending_clone_args(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (ostd->pending_clone_args != NULL) {
+        heap_free(dcontext, ostd->pending_clone_args,
+                  ostd->pending_clone_args_size HEAPACCT(ACCT_OTHER));
+        ostd->pending_clone_args = NULL;
+        ostd->pending_clone_args_size = 0;
+    }
+}
+
 /* In a fork child, for another thread of the parent, which does not exist here,
  * before dynamo_other_thread_exit() cleans it up: neither do the threads or vfork
  * children it was creating. The dstack of a clone it was making is freed unless it
@@ -2792,6 +2800,7 @@ os_fork_forget_thread(dcontext_t *dcontext, thread_record_t **threads, int num_t
 {
     os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
     signal_fork_forget_children(dcontext);
+    release_pending_clone_args(dcontext);
     if (ostd->pending_clone_dstack != NULL) {
         bool in_use = false;
         for (int i = 0; i < num_threads; i++) {
@@ -7650,11 +7659,15 @@ handle_clone_pre(dcontext_t *dcontext)
          */
         dr_clone_args = (clone3_syscall_args_t *)heap_alloc(
             dcontext, app_clone_args_size HEAPACCT(ACCT_OTHER));
+        os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+        ASSERT(ostd->pending_clone_args == NULL);
+        ostd->pending_clone_args = dr_clone_args;
+        ostd->pending_clone_args_size = app_clone_args_size;
         if (!d_r_safe_read(app_clone_args, app_clone_args_size, dr_clone_args)) {
             LOG(THREAD, LOG_SYSCALLS, 2, "\treturning EFAULT to app for clone3\n");
             set_failure_return_val(dcontext, EFAULT);
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            heap_free(dcontext, dr_clone_args, app_clone_args_size HEAPACCT(ACCT_OTHER));
+            release_pending_clone_args(dcontext);
             return false;
         }
         flags = dr_clone_args->flags;
@@ -7766,7 +7779,7 @@ handle_clone_pre(dcontext_t *dcontext)
              */
             ASSERT(app_clone_args_size == (uint)dcontext->sys_param2);
             ASSERT(dr_clone_args == (clone3_syscall_args_t *)dcontext->sys_param1);
-            heap_free(dcontext, dr_clone_args, app_clone_args_size HEAPACCT(ACCT_OTHER));
+            release_pending_clone_args(dcontext);
             /* We do not need these anymore for the fork case. */
             dcontext->sys_param1 = 0;
             dcontext->sys_param2 = 0;
@@ -8230,6 +8243,12 @@ pre_system_call(dcontext_t *dcontext)
                             NULL);
 #    endif
         os_clone_pre(dcontext);
+        /* The dedicated syscall needs the same synch-all exclusion as
+         * clone(CLONE_VFORK): its child must acquire thread_initexit_lock
+         * before the parent can return from the kernel. Publish the wait
+         * before counting the child as uninitialized, as in handle_clone_pre.
+         */
+        IF_LINUX(os_vfork_pre(dcontext, flags));
         os_new_thread_pre();
         break;
     }
@@ -9868,9 +9887,7 @@ post_system_call(dcontext_t *dcontext)
                  * post-syscall natively anyway, there's no need to restore here.
                  */
 #    endif
-                uint app_clone_args_size = (uint)dcontext->sys_param2;
-                heap_free(dcontext, (clone3_syscall_args_t *)dcontext->sys_param1,
-                          app_clone_args_size HEAPACCT(ACCT_OTHER));
+                release_pending_clone_args(dcontext);
             } else if (sysnum == SYS_clone) {
                 set_syscall_param(dcontext, SYSCALL_PARAM_CLONE_STACK,
                                   dcontext->sys_param1);
@@ -9901,6 +9918,7 @@ post_system_call(dcontext_t *dcontext)
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: vfork returned " PFX "\n",
             MCXT_SYSCALL_RES(mc));
         IF_LINUX(ASSERT(was_thread_create_syscall(dcontext)));
+        IF_LINUX(os_vfork_post(dcontext));
         /* restore xsp in parent */
         LOG(THREAD, LOG_SYSCALLS, 2, "vfork: restoring xsp from " PFX " to " PFX "\n",
             mc->xsp, dcontext->sys_param1);
