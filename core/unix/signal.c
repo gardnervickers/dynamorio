@@ -5741,7 +5741,7 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
     return f;
 }
 
-#if defined(LINUX) && defined(AARCH64)
+#if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
 /* Returns whether pc is on our way from d_r_dispatch into do_syscall for a syscall
  * that we deliver pending signals before (one that is ignorable or an unbounded
  * wait: see handle_system_call()), but before its syscall instruction: in
@@ -6046,7 +6046,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
              * other than right after the syscall, so we exclude it (it can't be
              * interrupted so we know we haven't executed it yet).
              */
-#if defined(LINUX) && defined(AARCH64)
+#if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
             cache_pc syscall_pc;
             if (is_before_do_syscall(dcontext, pc, syslen, &syscall_pc)) {
                 /* The signal arrived after fcache_enter checked for pending signals,
@@ -6063,6 +6063,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                     "signal %d arrived on the way to the syscall at " PFX
                     ": interrupting it there\n",
                     sig, syscall_pc);
+#    ifdef AARCH64
                 /* fcache_enter moves the app value of the stolen register from the
                  * mcontext to its TLS slot, leaving our TLS base in the mcontext.
                  */
@@ -6070,9 +6071,12 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 reg_t app_stolen = get_stolen_reg_val(mc);
                 if (app_stolen == tls_base)
                     app_stolen = dcontext->local_state->spill_space.reg_stolen;
+#    endif
                 mcontext_to_ucontext(ucxt, mc);
+#    ifdef AARCH64
                 dcontext->local_state->spill_space.reg_stolen = app_stolen;
                 set_sigcxt_stolen_reg(sc, tls_base);
+#    endif
                 sc->SC_XIP = (reg_t)syscall_pc;
                 pc = syscall_pc;
                 orig_retval_reg = sc->SC_RETURN_REG;
