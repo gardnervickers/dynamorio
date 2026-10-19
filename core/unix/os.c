@@ -9870,14 +9870,16 @@ post_system_call(dcontext_t *dcontext)
         /* in /usr/src/linux/arch/i386/kernel/process.c */
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: clone returned " PFX "\n",
             MCXT_SYSCALL_RES(mc));
+        /* Withdraw the pending owner before rollback frees the stack and drops
+         * the uninitialized count: a competing fork can proceed at that point.
+         * Rollback recovers the stack from the still-live syscall arguments.
+         */
+        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack = NULL;
         if (!success && was_thread_create_syscall(dcontext))
             os_thread_create_failed(dcontext);
         /* Roll back a rejected child's accounting before os_vfork_post waits
-         * for a synch-all that may itself be waiting for that child.  Keep the
-         * clone arguments intact until rollback has recovered the unused stack,
-         * and clear pending stack ownership before the synchronization wait.
+         * for a synch-all that may itself be waiting for that child.
          */
-        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack = NULL;
         os_vfork_post(dcontext);
         /* We switch the lib tls segment back to dr's privlib segment.
          * Please refer to comment on os_switch_lib_tls.
