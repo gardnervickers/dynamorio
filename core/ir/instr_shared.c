@@ -2419,8 +2419,13 @@ instr_get_rel_target(instr_t *instr, /*OUT*/ app_pc *target, bool data_only)
     }
 
 #ifdef X86
-    /* PR 251479: we support rip-rel info in level 1 instrs */
-    if (instr_rip_rel_valid(instr)) {
+    /* PR 251479: we support rip-rel info in level 1 instrs.  When operands
+     * are decoded, use their absolute targets below: decode_from_copy() may
+     * have decoded bytes stored somewhere other than the application PC.
+     * Recomputing from instr->bytes would rebase a data reference onto that
+     * copy (including a selfmod snapshot), rather than the original code.
+     */
+    if (instr_rip_rel_valid(instr) && !instr_operands_valid(instr)) {
         int rip_rel_pos = instr_get_rip_rel_pos(instr);
         if (rip_rel_pos > 0) {
             if (data_only) {
