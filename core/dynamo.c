@@ -2513,6 +2513,13 @@ dynamo_thread_exit_common(dcontext_t *dcontext, thread_id_t id,
         d_r_mutex_lock(&thread_initexit_lock);
 
     ASSERT_OWN_MUTEX(true, &thread_initexit_lock);
+    /* This thread will not return through DR's post-syscall path. A terminated
+     * worker may still carry at_syscall from its final blocking syscall: clear
+     * that live-execution state before trace_abort enters couldbelinking during
+     * fragment cleanup. The init/exit lock excludes a concurrent flush walk.
+     */
+    set_at_syscall(dcontext, false);
+
 #ifdef WINDOWS
     /* need to clean up thread stack before clean up other thread data, but
      * after we're made nolinking

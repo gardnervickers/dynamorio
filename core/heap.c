@@ -139,7 +139,7 @@ static const uint BLOCK_SIZES[] = {
                   HEAP_ALIGNMENT), /* 96 dbg / 92 rel (180 x64 => 184) */
     ALIGN_FORWARD(sizeof(trace_t) + 5 * sizeof(direct_linkstub_t) + sizeof(uint),
                   HEAP_ALIGNMENT), /* 128 dbg / 124 rel (244 x64 => 248) */
-    256, 512, UINT_MAX             /* variable-length */
+    320, 512, UINT_MAX             /* variable-length */
 };
 #define BLOCK_TYPES (sizeof(BLOCK_SIZES) / sizeof(uint))
 

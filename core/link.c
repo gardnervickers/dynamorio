@@ -1093,6 +1093,9 @@ is_linkable(dcontext_t *dcontext, fragment_t *from_f, linkstub_t *from_l,
     if (TEST(LINK_CALLBACK_RETURN, from_l->flags))
         return false;
 #endif
+    if (!TESTANY(FRAG_IS_FUTURE | FRAG_FAKE | FRAG_COARSE_GRAIN, from_f->flags) &&
+        from_f->signal_exit_refs != 0)
+        return false;
     /* never link a selfmod or any other unlinkable exit branch */
     if (TEST(LINK_SPECIAL_EXIT, from_l->flags))
         return false;
@@ -1754,6 +1757,11 @@ link_fragment_outgoing(dcontext_t *dcontext, fragment_t *f, bool new_fragment)
                                   (new_fragment && SHARED_FRAGMENTS_ENABLED()),
                               &change_linking_lock);
     ASSERT(!TEST(FRAG_LINKED_OUTGOING, f->flags));
+    if (f->signal_exit_refs != 0) {
+        ASSERT(!new_fragment);
+        f->signal_relink = true;
+        return;
+    }
     f->flags |= FRAG_LINKED_OUTGOING;
 
     /* new_fragment: already protected

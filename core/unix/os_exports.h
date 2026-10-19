@@ -668,6 +668,12 @@ rseq_insert_start_label(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist);
 
 #endif
 
+/* Release a delayed shared-fragment exit before acknowledging a flush epoch.
+ * Caller has exited the cache, or has stopped and redirected the target thread.
+ */
+void signal_cache_exit(dcontext_t *dcontext);
+bool signal_holds_shared_fragment(dcontext_t *dcontext);
+
 #if defined(X86) && defined(LINUX)
 /* Called from a clean-call return slow path after client code has returned. */
 void

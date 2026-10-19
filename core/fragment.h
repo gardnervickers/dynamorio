@@ -285,6 +285,14 @@ struct _fragment_t {
         translation_info_t *translation_info;
     } in_xlate;
 
+    /* Delayed signal exits from shared fine fragments. Protected by
+     * change_linking_lock; lifetime is covered by the owning threads' existing
+     * shared-flush epochs, until their real cache exit (not a signal-side visit).
+     */
+    uint signal_exit_refs;
+    bool signal_relink;
+    cache_pc signal_syscall_pc;
+
     fragment_t *next_vmarea; /* for chaining fragments in vmarea list */
     fragment_t *prev_vmarea; /* for chaining fragments in vmarea list */
     union {

@@ -5242,21 +5242,32 @@ unlink_fragment_for_signal(dcontext_t *dcontext, fragment_t *f,
      * which means that this thread's DR state is safe, and so it
      * should be ok to acquire a lock.  xref PR 596069.
      *
-     * There is a race where if two threads hit a signal in the same
-     * shared fragment, the first could re-link after the second
-     * un-links but before the second exits, and the second could then
-     * execute the syscall, resulting in arbitrary delay prior to
-     * signal delivery.  We don't want to allocate global memory,
-     * but we could use a static array of counters (since should
-     * be small # of interrupted shared fragments at any one time)
-     * used as refcounts so we only unlink when all are done.
-     * Not bothering to implement now: going to live w/ chance of
-     * long signal delays.  xref PR 596069.
+     * Every interrupted thread claims the shared fragment, even if another
+     * thread already unlinked it. Link admission defers restoration until the
+     * last claimant exits the cache. The existing shared-flush epoch protects
+     * these references: transient signal-side linking visits cannot acknowledge
+     * retirement, and real cache exits release claims before that checkpoint.
      */
     bool changed = false;
+    bool shared = TEST(FRAG_SHARED, f->flags) && !TEST(FRAG_COARSE_GRAIN, f->flags);
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    bool new_claim = shared && info->interrupted != f;
+    if (new_claim) {
+        if (info->interrupted != NULL)
+            signal_cache_exit(dcontext);
+        info->interrupted = f;
+        info->interrupted_pc = pc;
+    }
     bool waslinking = is_couldbelinking(dcontext);
     if (!waslinking)
         enter_couldbelinking(dcontext, NULL, false);
+    SHARED_FLAGS_RECURSIVE_LOCK(f->flags, acquire, change_linking_lock);
+    if (new_claim) {
+        if (f->signal_exit_refs++ == 0) {
+            f->signal_relink = TEST(FRAG_LINKED_OUTGOING, f->flags);
+            f->signal_syscall_pc = NULL;
+        }
+    }
     /* may not be linked if trace_relink or something */
     if (TEST(FRAG_COARSE_GRAIN, f->flags)) {
         /* XXX PR 213040: we don't support unlinking coarse, so we try
@@ -5291,12 +5302,25 @@ unlink_fragment_for_signal(dcontext_t *dcontext, fragment_t *f,
          * changing the target of a short jmp, which is atomic
          * since a one-byte write, so we don't need the change_linking_lock.
          */
-        if (mangle_syscall_code(dcontext, f, pc, false /*do not skip exit cti*/))
+        if (mangle_syscall_code(dcontext, f, pc, false /*do not skip exit cti*/)) {
             changed = true;
+            if (shared &&
+                (f->signal_syscall_pc == NULL || pc < f->signal_syscall_pc))
+                f->signal_syscall_pc = pc;
+        }
     }
+    SHARED_FLAGS_RECURSIVE_LOCK(f->flags, release, change_linking_lock);
     if (!waslinking)
         enter_nolinking(dcontext, NULL, false);
-    return changed;
+    return changed || shared;
+}
+
+bool
+signal_holds_shared_fragment(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    return info != NULL && info->interrupted != NULL &&
+        TEST(FRAG_SHARED, info->interrupted->flags);
 }
 
 #if defined(X86) && defined(LINUX)
@@ -5323,11 +5347,62 @@ signal_clean_call_return(void)
 }
 #endif
 
+/* Different owners can interrupt on opposite sides of a syscall in a trace.
+ * Restore every signal-owned barrier after the earliest claimed PC. Only signal
+ * and nudge handoffs modify these skip branches, and their last owner calls us.
+ */
+static void
+restore_signal_syscalls(dcontext_t *dcontext, fragment_t *f)
+{
+    byte *pc = f->signal_syscall_pc;
+    byte *segment = pc;
+    byte *end = fragment_body_end_pc(dcontext, f);
+    instr_t instr;
+    instr_init(dcontext, &instr);
+    while (pc < end) {
+        instr_reset(dcontext, &instr);
+        byte *next = decode(dcontext, pc, &instr);
+        ASSERT(next != NULL && next > pc);
+        if (next == NULL || next <= pc)
+            break;
+        if (instr_is_syscall(&instr)) {
+            mangle_syscall_code(dcontext, f, segment, true);
+            segment = next;
+        }
+        pc = next;
+    }
+    instr_free(dcontext, &instr);
+}
+
 static void
 relink_interrupted_fragment(dcontext_t *dcontext, thread_sig_info_t *info)
 {
     if (info->interrupted == NULL)
         return;
+    if (TEST(FRAG_SHARED, info->interrupted->flags)) {
+        fragment_t *f = info->interrupted;
+        acquire_recursive_lock(&change_linking_lock);
+        ASSERT(f->signal_exit_refs > 0);
+        info->interrupted = NULL;
+        info->interrupted_pc = NULL;
+        if (dcontext->interrupted_for_nudge == f)
+            dcontext->interrupted_for_nudge = NULL;
+        if (--f->signal_exit_refs == 0) {
+            /* A flush/replacement may already have retired this fragment. */
+            if (!TEST(FRAG_WAS_DELETED, f->flags) &&
+                TEST(FRAG_LINKED_INCOMING, f->flags)) {
+                if (f->signal_relink &&
+                    !TESTANY(FRAG_CANNOT_DELETE | FRAG_LINKED_OUTGOING, f->flags))
+                    link_fragment_outgoing(dcontext, f, false);
+                if (f->signal_syscall_pc != NULL)
+                    restore_signal_syscalls(dcontext, f);
+            }
+            f->signal_relink = false;
+            f->signal_syscall_pc = NULL;
+        }
+        release_recursive_lock(&change_linking_lock);
+        return;
+    }
     /* i#2066: if we were building a trace, it may already be re-linked */
     if (!TEST(FRAG_LINKED_OUTGOING, info->interrupted->flags)) {
         LOG(THREAD, LOG_ASYNCH, 3, "\tre-linking outgoing for interrupted F%d\n",
@@ -5357,54 +5432,32 @@ relink_interrupted_fragment(dcontext_t *dcontext, thread_sig_info_t *info)
 }
 
 static bool
-interrupted_inlined_syscall(dcontext_t *dcontext, fragment_t *f,
-                            byte *pc /*interruption pc*/)
+interrupted_at_inlined_syscall(dcontext_t *dcontext, fragment_t *f,
+                               byte *pc /* interruption pc */)
 {
-    bool pre_or_post_syscall = false;
+    bool at_syscall = false;
     if (TEST(FRAG_HAS_SYSCALL, f->flags)) {
-        /* PR 596147: if the thread is currently in an inlined
-         * syscall when a signal comes in, we can't delay and bound the
-         * delivery time: we need to deliver now.  Should decode
-         * backward and see if syscall.  We assume our translation of
-         * the interruption state is fine to re-start: i.e., the syscall
-         * is complete if kernel has pc at post-syscall point, and
-         * kernel set EINTR in eax if necessary.
+        /* Before an inlined syscall we must deliver now: the syscall could block.
+         * A restarted syscall also has its PC rewound here by the kernel.
+         * After a completed syscall, delay until the normal cache exit instead.
+         * The next instruction may be client meta code with no translation: its
+         * spill/restore sequence must finish before we relocate application state.
          */
-        /* Interrupted fcache, so ok to alloc memory for decode */
         instr_t instr;
-        byte *nxt_pc;
         instr_init(dcontext, &instr);
-        nxt_pc = decode(dcontext, pc, &instr);
-        if (nxt_pc != NULL && instr_valid(&instr) && instr_is_syscall(&instr)) {
-            /* pre-syscall but post-jmp so can't skip syscall */
-            pre_or_post_syscall = true;
-        } else {
-            size_t syslen = syscall_instr_length(FRAG_ISA_MODE(f->flags));
-            instr_reset(dcontext, &instr);
-            nxt_pc = decode(dcontext, pc - syslen, &instr);
-            if (nxt_pc != NULL && instr_valid(&instr) && instr_is_syscall(&instr)) {
-#if defined(X86) && !defined(MACOS)
-                /* decoding backward so check for exit cti jmp prior
-                 * to syscall to ensure no mismatch
-                 */
-                instr_reset(dcontext, &instr);
-                nxt_pc = decode(dcontext, pc - syslen - JMP_LONG_LENGTH, &instr);
-                if (nxt_pc != NULL && instr_valid(&instr) &&
-                    instr_get_opcode(&instr) == OP_jmp) {
-                    /* post-inlined-syscall */
-                    pre_or_post_syscall = true;
-                }
-#else
-                /* On Mac and ARM we have some TLS spills in between so we just
-                 * trust that this is a syscall (esp on ARM w/ aligned instrs).
-                 */
-                pre_or_post_syscall = true;
-#endif
-            }
-        }
+        byte *next_pc = decode(dcontext, pc, &instr);
+        at_syscall = next_pc != NULL && instr_valid(&instr) && instr_is_syscall(&instr);
         instr_free(dcontext, &instr);
     }
-    return pre_or_post_syscall;
+    return at_syscall;
+}
+
+void
+signal_cache_exit(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (info != NULL && info->interrupted != NULL)
+        relink_interrupted_fragment(dcontext, info);
 }
 
 #if defined(LINUX) && defined(AARCH64)
@@ -5911,10 +5964,9 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 ASSERT(f != NULL);
                 ASSERT(!TEST(FRAG_COARSE_GRAIN, f->flags)); /* checked above */
                 LOG(THREAD, LOG_ASYNCH, 2, "\tdelaying until exit F%d\n", f->id);
-                if (interrupted_inlined_syscall(dcontext, f, pc)) {
-                    /* PR 596147: if delayable signal arrives after syscall-skipping
-                     * jmp, either at syscall or post-syscall, we deliver
-                     * immediately, since we can't bound the delay
+                if (interrupted_at_inlined_syscall(dcontext, f, pc)) {
+                    /* PR 596147: at the syscall itself we are past its skip
+                     * branch and cannot bound the delay if the syscall blocks.
                      */
                     receive_now = true;
                     LOG(THREAD, LOG_ASYNCH, 2,

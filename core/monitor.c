@@ -1691,6 +1691,9 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
     SHARED_FLAGS_RECURSIVE_LOCK(f->flags, acquire, change_linking_lock);
 
     md->last_fragment_flags = f->flags;
+    /* A signal may have temporarily hidden the outgoing links we must restore. */
+    if (f->signal_exit_refs != 0 && f->signal_relink)
+        md->last_fragment_flags |= FRAG_LINKED_OUTGOING;
     if ((f->flags & FRAG_CANNOT_DELETE) == 0) {
         /* don't let this fragment be deleted, we'll need it as
          * dcontext->last_exit for extend_trace
@@ -1742,8 +1745,11 @@ internal_restore_last(dcontext_t *dcontext)
         md->last_fragment->flags &= ~FRAG_CANNOT_DELETE;
     }
     /* flags may not match, e.g., if frag was marked as trace head */
-    ASSERT((md->last_fragment_flags & (FRAG_CANNOT_DELETE | FRAG_LINKED_OUTGOING)) ==
-           (md->last_fragment->flags & (FRAG_CANNOT_DELETE | FRAG_LINKED_OUTGOING)));
+    ASSERT((md->last_fragment_flags & FRAG_CANNOT_DELETE) ==
+           (md->last_fragment->flags & FRAG_CANNOT_DELETE));
+    ASSERT(md->last_fragment->signal_exit_refs != 0 ||
+           (md->last_fragment_flags & FRAG_LINKED_OUTGOING) ==
+               (md->last_fragment->flags & FRAG_LINKED_OUTGOING));
     /* hold lock across FRAG_CANNOT_DELETE changes and all other flag checks, too */
     SHARED_FLAGS_RECURSIVE_LOCK(md->last_fragment->flags, release, change_linking_lock);
 

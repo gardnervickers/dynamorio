@@ -4284,6 +4284,7 @@ fcache_reset_all_caches_proactively(uint target)
                 }
             }
             last_exit_deleted(dcontext);
+            IF_UNIX(signal_cache_exit(dcontext));
             if (target == RESET_PENDING_DELETION) {
                 /* case 7394: need to abort other threads' trace building
                  * since the reset xfer to d_r_dispatch will disrupt it

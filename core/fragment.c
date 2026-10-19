@@ -2048,6 +2048,7 @@ fragment_thread_reset_free(dcontext_t *dcontext)
     if (RUNNING_WITHOUT_CODE_CACHE())
         return;
 
+    IF_UNIX(signal_cache_exit(dcontext));
     /* Dec ref count on any shared tables that are pointed to. */
     dec_all_table_ref_counts(dcontext, pt);
 
@@ -2263,6 +2264,9 @@ fragment_init_heap(fragment_t *f, app_pc tag, int direct_exits, int indirect_exi
     f->flags = flags; /* MUST set before calling fcache_add_fragment or
                        * FRAGMENT_EXIT_STUBS */
     f->tag = tag;
+    f->signal_exit_refs = 0;
+    f->signal_relink = false;
+    f->signal_syscall_pc = NULL;
     /* Let fragment_create() fill in; other users are building fake fragments */
     DODEBUG({ f->id = -1; });
     f->next_vmarea = NULL;      /* must be set by caller */
@@ -2524,6 +2528,8 @@ fragment_recreate_with_linkstubs(dcontext_t *dcontext, fragment_t *f_src)
 void
 fragment_free(dcontext_t *dcontext, fragment_t *f)
 {
+    ASSERT(TESTANY(FRAG_FAKE | FRAG_COARSE_GRAIN, f->flags) ||
+           f->signal_exit_refs == 0);
     dcontext_t *alloc_dc = FRAGMENT_ALLOC_DC(dcontext, f->flags);
     uint heapsz;
     int direct_exits = 0;
@@ -5441,6 +5447,7 @@ check_flush_queue(dcontext_t *dcontext, fragment_t *was_I_flushed)
      */
     ATOMIC_4BYTE_ALIGNED_READ(&flushtime_global, &local_flushtime_global);
     if (DYNAMO_OPTION(shared_deletion) &&
+        IF_UNIX(!signal_holds_shared_fragment(dcontext) &&)
         pt->flushtime_last_update < local_flushtime_global) {
 #ifdef LINUX
         rseq_shared_fragment_flushtime_update(dcontext);
@@ -5794,6 +5801,11 @@ enter_couldbelinking(dcontext_t *dcontext, fragment_t *was_I_flushed,
     pt->soon_to_be_linking = false;
 
     pt->could_be_linking = true;
+    /* Until this acknowledgement our existing shared epoch keeps the interrupted
+     * fragment alive. A signal-side couldbelinking visit returns to the cache.
+     */
+    if (cache_transition)
+        IF_UNIX(signal_cache_exit(dcontext));
     not_flushed = check_flush_queue(dcontext, was_I_flushed);
     d_r_mutex_unlock(&pt->linking_lock);
 
@@ -5814,6 +5826,8 @@ enter_threadexit(dcontext_t *dcontext)
         return;
 
     d_r_mutex_lock(&pt->linking_lock);
+    /* No cache return remains for an exiting thread. */
+    IF_UNIX(signal_cache_exit(dcontext));
     /* must dec ref count on shared regions before we die */
     check_flush_queue(dcontext, NULL);
     pt->could_be_linking = false;
@@ -6051,6 +6065,7 @@ flush_fragments_synchall_start(dcontext_t *ignored, app_pc base, size_t size,
                 }
             }
             if (dcontext == my_dcontext || thread_synch_successful(flush_threads[i])) {
+                IF_UNIX(signal_cache_exit(dcontext));
                 last_exit_deleted(dcontext);
                 /* case 7394: need to abort other threads' trace building
                  * since the reset xfer to d_r_dispatch will disrupt it.
