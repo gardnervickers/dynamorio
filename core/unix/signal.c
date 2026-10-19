@@ -10007,7 +10007,7 @@ is_signal_for_us(kernel_siginfo_t *siginfo, int sig_expecting)
 static void
 restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
 {
-#    ifdef AARCH64 /* XXX: NYI elsewhere (other argument registers). */
+#    if defined(AARCH64) || (defined(X86) && defined(X64)) /* Other syscall ABIs remain NYI. */
     sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
     reg_t x0, value;
     int param;
@@ -10026,11 +10026,27 @@ restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
         return;
     LOG(THREAD, LOG_ASYNCH, 2, "restarting syscall %d interrupted by our signal\n",
         dcontext->sys_num);
+#        ifdef AARCH64
     sc->SC_RETURN_REG = x0;
-    /* A stop and continue may have turned the syscall into restart_syscall. */
-    sc->SC_SYSNUM_REG = dcontext->sys_num;
     if (param > 0)
         sc->regs[param] = value;
+#        else
+    /* Linux x86-64 syscall arguments are rdi, rsi, rdx, r10, r8, r9.
+     * Unlike AArch64, rax holds only the result/syscall number, not arg 0.
+     */
+    sc->SC_XDI = x0;
+    switch (param) {
+    case -1: break;
+    case 1: sc->SC_XSI = value; break;
+    case 2: sc->SC_XDX = value; break;
+    case 3: sc->SC_R10 = value; break;
+    case 4: sc->SC_R8 = value; break;
+    case 5: sc->SC_R9 = value; break;
+    default: ASSERT_NOT_REACHED(); return;
+    }
+#        endif
+    /* A stop and continue may have turned the syscall into restart_syscall. */
+    sc->SC_SYSNUM_REG = dcontext->sys_num;
     sc->SC_XIP -= syscall_instr_length(dr_get_isa_mode(dcontext));
 #    endif
 }
