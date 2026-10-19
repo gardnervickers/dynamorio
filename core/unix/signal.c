@@ -7114,6 +7114,20 @@ main_signal_handler_C(byte *xsp)
             ASSERT_NOT_REACHED();
         }
 #endif
+        /* A user-sent fault-class signal has no faulting memory operand.  In
+         * particular, it can interrupt a memory query holding locks that target
+         * computation would acquire again.  Classify it before both target
+         * analysis and TRY/EXCEPT recovery: an asynchronous signal must not be
+         * mistaken for a fault from an active probe.  Keep the ordinary delivery
+         * path and siginfo, without interpreting the pid/uid union as si_addr.
+         */
+        if (is_sys_kill(dcontext, pc, (byte *)sc->SC_XSP, siginfo)) {
+            if (dcontext->currently_stopped)
+                execute_native_handler(dcontext, sig, frame, xsp);
+            else
+                record_pending_signal(dcontext, sig, ucxt, frame, false, NULL);
+            break;
+        }
         if (is_safe_read_ucxt(ucxt) ||
             (!dynamo_initialized && global_try_except.try_except_state != NULL) ||
             (dcontext != GLOBAL_DCONTEXT &&
