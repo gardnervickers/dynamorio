@@ -7249,6 +7249,19 @@ os_enforce_app_fd_limit(dcontext_t *dcontext, int sysnum, ptr_int_t result)
     if (!sysnum_creates_fd(sysnum))
         return false;
     switch (sysnum) {
+#ifdef LINUX
+#    ifdef SYS_signalfd
+    case SYS_signalfd:
+#    endif
+    case SYS_signalfd4:
+        /* Only fd == -1 allocates. Updating an existing descriptor is valid even
+         * after the app lowers its soft limit below that descriptor: do not close
+         * it or replace the successful mask update with EMFILE.
+         */
+        if ((int)dcontext->sys_param0 != -1)
+            return false;
+        break;
+#endif
     case SYS_fcntl:
         if (dcontext->sys_param1 != F_DUPFD && dcontext->sys_param1 != F_DUPFD_CLOEXEC)
             return false;
