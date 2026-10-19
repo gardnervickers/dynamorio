@@ -302,6 +302,7 @@ memquery_iterator_next(memquery_iter_t *iter)
     if (len < 6)
         mi->comment_buffer[0] = '\0';
     iter->prot = permstr_to_memprot(perm);
+    iter->shared = perm[3] == 's';
 #ifdef ANDROID
     /* i#1861: the Android kernel supports custom comments which can't merge */
     if (iter->comment[0] != '\0')
@@ -381,4 +382,32 @@ memquery_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info,
         *have_type = true;
     }
     return true;
+}
+
+/* Read current mapping identity from the kernel, not an fd (which can be closed
+ * or reused while its mappings remain alive).  The VMA boundary also prevents
+ * a protection change spanning private and shared maps from merging their
+ * different cache-consistency requirements.
+ */
+bool
+os_is_shared_mapping(const byte *pc, app_pc *mapping_end)
+{
+    memquery_iter_t iter;
+    bool shared = false;
+    if (mapping_end != NULL)
+        *mapping_end = NULL;
+    if (!memquery_iterator_start(&iter, (app_pc)pc, false))
+        return false;
+    while (memquery_iterator_next(&iter)) {
+        if (iter.vm_start > pc)
+            break;
+        if (pc < iter.vm_end) {
+            shared = iter.shared;
+            if (mapping_end != NULL)
+                *mapping_end = iter.vm_end;
+            break;
+        }
+    }
+    memquery_iterator_stop(&iter);
+    return shared;
 }

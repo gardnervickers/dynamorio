@@ -774,6 +774,10 @@ is_address_on_stack(dcontext_t *dcontext, app_pc address);
 bool
 is_driver_address(app_pc addr);
 
+/* Code backed by a kernel shared mapping needs validation through aliases. */
+bool
+is_shared_mapped_code(app_pc addr);
+
 /* FIXME clean up: safe_apc_or_thread_target, apc_thread_policy_helper and
  * aslr_report_violation should all be ifdef WINDOWS, and may be in a
  * different file

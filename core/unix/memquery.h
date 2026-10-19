@@ -42,6 +42,7 @@ typedef struct _memquery_iter_t {
     app_pc vm_start;
     app_pc vm_end;
     uint prot;
+    bool shared; /* Linux MAP_SHARED: backing may change through another mapping. */
     size_t offset; /* offset into the file being mapped */
     /* XXX: use ino_t?  We need to know what size code to use for the
      * scanf and I don't trust that we, the maps file, and any clients

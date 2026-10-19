@@ -485,6 +485,11 @@ bool
 get_memory_info_from_os(const byte *pc, byte **base_pc, size_t *size, uint *prot);
 bool
 query_memory_ex_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
+#ifdef LINUX
+/* mapping_end is optional; returns the current kernel VMA's end when found. */
+bool
+os_is_shared_mapping(const byte *pc, app_pc *mapping_end);
+#endif
 void
 os_check_new_app_module(dcontext_t *dcontext, app_pc pc);
 #endif

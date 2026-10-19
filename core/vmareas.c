@@ -133,6 +133,8 @@ enum {
 
     /* i#1114: for areas containing JIT code flushed via annotation or inference */
     VM_JIT_MANAGED = 0x2000,
+    /* Kernel MAP_SHARED backing can change without writes to this VA. */
+    VM_SHARED_MAPPING = 0x4000,
 };
 
 /* simple way to disable sandboxing */
@@ -2702,7 +2704,7 @@ vm_area_load_coarse_unit(app_pc *start DR_PARAM_INOUT, app_pc *end DR_PARAM_INOU
  * check_thread_vm_area will mark it read only when a thread goes to build a
  * block from the region */
 static bool
-add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
+add_executable_vm_area_one(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
                        bool have_writelock _IF_DEBUG(const char *comment))
 {
     vm_area_t *existing_area = NULL;
@@ -2716,7 +2718,8 @@ add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
     {
         /* we only expect certain flags */
         uint expect = VM_WRITABLE | VM_UNMOD_IMAGE | VM_MADE_READONLY |
-            VM_DELAY_READONLY | VM_WAS_FUTURE | VM_EXECUTED_FROM | VM_DRIVER_ADDRESS;
+            VM_DELAY_READONLY | VM_WAS_FUTURE | VM_EXECUTED_FROM | VM_DRIVER_ADDRESS |
+            VM_SHARED_MAPPING;
 #    ifdef PROGRAM_SHEPHERDING
         expect |= VM_PATTERN_REVERIFY;
 #    endif
@@ -2804,6 +2807,43 @@ add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
         coarse_unit_free(GLOBAL_DCONTEXT, tofree);
     }
     return true;
+}
+
+/* A read-only shared mapping is not immutable: its backing bytes can be
+ * changed by a writable alias, including one created after translation or in
+ * another process.  Protecting this virtual address cannot intercept those
+ * stores.  Reuse selfmod validation for shared mappings instead of relying on
+ * protection faults.  Private mappings retain the existing fast path.
+ */
+static bool
+add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
+                       bool have_writelock _IF_DEBUG(const char *comment))
+{
+#ifdef LINUX
+    if (INTERNAL_OPTION(hw_cache_consistency)) {
+        bool result = true;
+        while (start < end) {
+            app_pc map_end;
+            bool shared = os_is_shared_mapping(start, &map_end);
+            app_pc part_end = map_end != NULL && map_end < end ? map_end : end;
+            uint part_vm_flags = vm_flags;
+            uint part_frag_flags = frag_flags;
+            if (shared) {
+                part_vm_flags &= ~VM_DELAY_READONLY;
+                part_vm_flags |= VM_SHARED_MAPPING;
+                part_frag_flags &= ~FRAG_COARSE_GRAIN;
+                part_frag_flags |= FRAG_SELFMOD_SANDBOXED;
+            }
+            result = add_executable_vm_area_one(start, part_end, part_vm_flags,
+                                                part_frag_flags, have_writelock
+                                                _IF_DEBUG(comment)) && result;
+            start = part_end;
+        }
+        return result;
+    }
+#endif
+    return add_executable_vm_area_one(start, end, vm_flags, frag_flags, have_writelock
+                                      _IF_DEBUG(comment));
 }
 
 /* Used to add dr allocated memory regions that may execute out of the cache */
@@ -3941,6 +3981,14 @@ is_driver_address(app_pc addr)
         return TEST(VM_DRIVER_ADDRESS, vm_flags);
     }
     return false;
+}
+
+bool
+is_shared_mapped_code(app_pc addr)
+{
+    uint vm_flags;
+    return get_executable_area_vm_flags(addr, &vm_flags) &&
+        TEST(VM_SHARED_MAPPING, vm_flags);
 }
 
 #ifdef PROGRAM_SHEPHERDING /********************************************/
@@ -7895,6 +7943,12 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
         }
 #endif
     }
+
+#ifdef LINUX
+    if (area == NULL && INTERNAL_OPTION(hw_cache_consistency) &&
+        os_is_shared_mapping(pc, NULL))
+        frag_flags |= FRAG_SELFMOD_SANDBOXED;
+#endif
 
     /* Ensure we looked up the mem attributes, if a new area */
     ASSERT(area != NULL || size > 0);
