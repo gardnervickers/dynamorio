@@ -7598,7 +7598,20 @@ os_thread_create_failed(dcontext_t *dcontext)
             (clone3_syscall_args_t *)dcontext->sys_param1;
         flags = get_stored_clone3_flags(dcontext);
         dstack = (byte *)(ptr_uint_t)dr_clone_args->stack + DYNAMORIO_STACK_SIZE;
-    } else {
+    }
+#    ifdef SYS_vfork
+    else if (dcontext->sys_num == SYS_vfork) {
+        /* Dedicated vfork saves the application stack in sys_param1, not a
+         * clone stack argument.  Its published pending stack is still ours
+         * when the kernel returns an error without creating a child.
+         */
+        flags = dcontext->sys_param0;
+        dstack = ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack;
+        ASSERT(dstack != NULL);
+        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack = NULL;
+    }
+#    endif
+    else {
         /* The stack parameter still holds the dstack spot below the record. */
         flags = dcontext->sys_param0;
         dstack = get_clone_record_dstack(
@@ -8239,8 +8252,10 @@ pre_system_call(dcontext_t *dcontext)
 #    ifdef MACOS
         create_clone_record(dcontext, (reg_t *)&mc->xsp, NULL, NULL);
 #    else
-        create_clone_record(dcontext, (reg_t *)&mc->xsp /*child uses parent sp*/, NULL,
-                            NULL);
+        void *crec = create_clone_record(
+            dcontext, (reg_t *)&mc->xsp /*child uses parent sp*/, NULL, NULL);
+        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack =
+            get_clone_record_dstack(crec);
 #    endif
         os_clone_pre(dcontext);
         /* The dedicated syscall needs the same synch-all exclusion as
@@ -9918,7 +9933,19 @@ post_system_call(dcontext_t *dcontext)
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: vfork returned " PFX "\n",
             MCXT_SYSCALL_RES(mc));
         IF_LINUX(ASSERT(was_thread_create_syscall(dcontext)));
-        IF_LINUX(os_vfork_post(dcontext));
+#    ifdef LINUX
+        if (!success)
+            os_thread_create_failed(dcontext);
+        /* On success the initialized child owns its stack; on failure the
+         * unused stack and child accounting have just been released.
+         */
+        ((os_thread_data_t *)dcontext->os_field)->pending_clone_dstack = NULL;
+        /* Do not publish a completed child's stack across the synchronization
+         * wait.  For failure, also undo the uninitialized-child count before
+         * waiting for a synch-all that could be waiting on that count.
+         */
+        os_vfork_post(dcontext);
+#    endif
         /* restore xsp in parent */
         LOG(THREAD, LOG_SYSCALLS, 2, "vfork: restoring xsp from " PFX " to " PFX "\n",
             mc->xsp, dcontext->sys_param1);
