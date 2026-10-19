@@ -331,6 +331,56 @@ bb_snapshot_selfmod_code(dcontext_t *dcontext, build_bb_t *bb)
 }
 #endif
 
+#if defined(X86) && defined(UNIX)
+/* Decode sandboxed instructions from the same immutable bytes that emit saves for
+ * validation and recreation.  In particular, a CTI's decoded target must never
+ * be paired with a later copy of its displacement from writable app memory.
+ */
+static byte *
+bb_decode_selfmod_x86(dcontext_t *dcontext, build_bb_t *bb)
+{
+    byte *next;
+    size_t off, nread;
+    if (bb->pretend_pc != NULL)
+        return decode_from_copy(dcontext, bb->cur_pc,
+                                bb->pretend_pc + (bb->cur_pc - bb->start_pc), bb->instr);
+    if (!bb->for_cache || !TEST(FRAG_SELFMOD_SANDBOXED, bb->flags))
+        return decode(dcontext, bb->cur_pc, bb->instr);
+    if (bb->selfmod_copy == NULL) {
+        bb->selfmod_copy_cap = (DYNAMO_OPTION(max_bb_instrs) + 1) * MAX_INSTR_LENGTH;
+        bb->selfmod_copy = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, byte, bb->selfmod_copy_cap,
+                                            ACCT_FRAGMENT, PROTECTED);
+    }
+    off = bb->cur_pc - bb->start_pc;
+    ASSERT(off == bb->selfmod_copy_len);
+    ASSERT(off + MAX_INSTR_LENGTH <= bb->selfmod_copy_cap);
+    for (;;) {
+        byte *copy = bb->selfmod_copy + off;
+        /* A valid instruction can end at an unreadable page boundary.  Speculative
+         * read-ahead must not turn that into an application fault.
+         */
+        memset(copy, 0, MAX_INSTR_LENGTH);
+        safe_read_ex(bb->cur_pc, MAX_INSTR_LENGTH, copy, &nread);
+        next = decode_from_copy(dcontext, copy, bb->cur_pc, bb->instr);
+        if (next != NULL && (size_t)(next - copy) <= nread) {
+            bb->selfmod_copy_len = off + (next - copy);
+            return bb->cur_pc + (next - copy);
+        }
+        if (nread == MAX_INSTR_LENGTH)
+            return NULL;
+        /* Preserve normal invalid-instruction/access-fault handling.  If the app
+         * changed the mapping in the meantime, retry rather than emit bytes from
+         * this live-memory probe with a different saved copy.
+         */
+        instr_reset(dcontext, bb->instr);
+        next = decode(dcontext, bb->cur_pc, bb->instr);
+        if (next == NULL)
+            return NULL;
+        instr_reset(dcontext, bb->instr);
+    }
+}
+#endif
+
 static void
 bb_free_selfmod_copy(build_bb_t *bb)
 {
@@ -1787,7 +1837,7 @@ bb_process_mov_seg(dcontext_t *dcontext, build_bb_t *bb)
     /* Set cur_pc back to the start of this instruction and delete this
      * instruction from the bb ilist.
      */
-    bb->cur_pc = instr_get_raw_bits(bb->instr);
+    bb->cur_pc = bb->instr_start;
     instrlist_remove(bb->ilist, bb->instr);
     instr_destroy(dcontext, bb->instr);
     /* Set instr to NULL in order to get translation of exit cti correct. */
@@ -3571,14 +3621,18 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
                 byte *decode_pc = bb_snapshot_selfmod_code(dcontext, bb);
 #endif
                 /* only going through this do loop once! */
+#if defined(X86) && defined(UNIX)
+                bb->cur_pc = bb_decode_selfmod_x86(dcontext, bb);
+#else
                 bb->cur_pc = IF_AARCH64_ELSE(
                     decode_from_copy_with_ldstex(dcontext, decode_pc, orig_pc, bb->instr),
                     decode(dcontext, bb->cur_pc, bb->instr));
+#endif
 #ifdef AARCH64
                 if (decode_pc != bb->instr_start && bb->cur_pc != NULL) {
                     /* Decoded from our copy of the app code. */
                     bb->cur_pc = bb->instr_start + (bb->cur_pc - decode_pc);
-                    instr_set_raw_bits(bb->instr, bb->instr_start,
+                    instr_set_raw_bits(bb->instr, decode_pc,
                                        (uint)(bb->cur_pc - bb->instr_start));
                 }
                 /* Decoding from a copy invalidates the raw bits, but mangling (e.g.,
