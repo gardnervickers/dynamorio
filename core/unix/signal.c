@@ -7864,6 +7864,14 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
 #endif
         dcontext = NULL; /* Clear for the not-yet-start or not-init cases above. */
     }
+    /* No application handler runs for SIG_IGN.  Return through the original
+     * signal frame without changing its context or mask, before allocating or
+     * copying a handler frame or applying handler-only flags such as SA_ONESHOT.
+     * The retained action lock above has already been released.
+     */
+    if (info->sighand->action[sig] != NULL &&
+        info->sighand->action[sig]->handler == (handler_t)SIG_IGN)
+        return;
     kernel_ucontext_t *uc = get_ucontext_from_rt_frame(our_frame);
     sigcontext_t *sc = SIGCXT_FROM_UCXT(uc);
 
