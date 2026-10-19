@@ -668,4 +668,10 @@ rseq_insert_start_label(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist);
 
 #endif
 
+#if defined(X86) && defined(LINUX)
+/* Called from a clean-call return slow path after client code has returned. */
+void
+signal_clean_call_return(void);
+#endif
+
 #endif /* _OS_EXPORTS_H_ */

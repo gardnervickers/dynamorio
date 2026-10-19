@@ -5290,6 +5290,30 @@ unlink_fragment_for_signal(dcontext_t *dcontext, fragment_t *f,
     return changed;
 }
 
+#if defined(X86) && defined(LINUX)
+void
+signal_clean_call_return(void)
+{
+    dcontext_t *dcontext = get_thread_private_dcontext();
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    cache_pc pc = (cache_pc)__builtin_return_address(0);
+    fragment_t *f;
+    /* A signal interrupted the client, which may have held DR locks.  Its
+     * handler could only queue it.  The client has now returned, so unlinking
+     * is safe and ensures a linked application loop reaches the dispatcher.
+     */
+    if (dcontext->signals_pending <= 0 || info->interrupted != NULL)
+        return;
+    f = fragment_pclookup(dcontext, pc, NULL);
+    ASSERT(f != NULL);
+    if (f != NULL && !TEST(FRAG_COARSE_GRAIN, f->flags) &&
+        unlink_fragment_for_signal(dcontext, f, pc)) {
+        info->interrupted = f;
+        info->interrupted_pc = pc;
+    }
+}
+#endif
+
 static void
 relink_interrupted_fragment(dcontext_t *dcontext, thread_sig_info_t *info)
 {

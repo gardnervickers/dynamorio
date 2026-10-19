@@ -735,6 +735,54 @@ insert_parameter_preparation(dcontext_t *dcontext, instrlist_t *ilist, instr_t *
 }
 #endif /* X86 */
 
+#if defined(X86) && defined(LINUX)
+static void
+insert_clean_call_pending_signal_check(dcontext_t *dcontext, instrlist_t *ilist,
+                                       instr_t *where, byte *encode_pc)
+{
+    instr_t *slow = INSTR_CREATE_label(dcontext);
+    instr_t *done = INSTR_CREATE_label(dcontext);
+    uint saved, padding;
+    /* Optimized clean calls may leave some app registers live.  Preserve both
+     * those and flags on the fast path and all state around the slow C helper.
+     * We are already on the DR stack: never switch to its top a second time.
+     */
+    PRE(ilist, where, INSTR_CREATE_push(dcontext, opnd_create_reg(REG_XAX)));
+    PRE(ilist, where, INSTR_CREATE_pushf(dcontext));
+    insert_get_mcontext_base(dcontext, ilist, where, REG_XAX);
+    PRE(ilist, where,
+        INSTR_CREATE_cmp(dcontext,
+                         opnd_create_dcontext_field_via_reg_sz(
+                             dcontext, REG_XAX, SIGPENDING_OFFSET, OPSZ_1),
+                         OPND_CREATE_INT8(0)));
+    PRE(ilist, where, INSTR_CREATE_jcc(dcontext, OP_jg, opnd_create_instr(slow)));
+    PRE(ilist, where, INSTR_CREATE_popf(dcontext));
+    PRE(ilist, where, INSTR_CREATE_pop(dcontext, opnd_create_reg(REG_XAX)));
+    PRE(ilist, where, INSTR_CREATE_jmp(dcontext, opnd_create_instr(done)));
+    PRE(ilist, where, slow);
+    PRE(ilist, where, INSTR_CREATE_popf(dcontext));
+    PRE(ilist, where, INSTR_CREATE_pop(dcontext, opnd_create_reg(REG_XAX)));
+    saved = insert_push_all_registers(dcontext, NULL, ilist, where,
+                                      get_ABI_stack_alignment(),
+                                      OPND_CREATE_INT32(0), DR_REG_NULL);
+    insert_clear_eflags(dcontext, NULL, ilist, where);
+    padding = (get_ABI_stack_alignment() - saved % get_ABI_stack_alignment()) %
+        get_ABI_stack_alignment();
+    if (padding != 0)
+        PRE(ilist, where,
+            INSTR_CREATE_lea(dcontext, opnd_create_reg(REG_XSP),
+                             OPND_CREATE_MEM_lea(REG_XSP, REG_NULL, 0, -(int)padding)));
+    insert_meta_call_vargs(dcontext, ilist, where, META_CALL_RETURNS, encode_pc,
+                           (void *)signal_clean_call_return, 0, NULL);
+    if (padding != 0)
+        PRE(ilist, where,
+            INSTR_CREATE_lea(dcontext, opnd_create_reg(REG_XSP),
+                             OPND_CREATE_MEM_lea(REG_XSP, REG_NULL, 0, padding)));
+    insert_pop_all_registers(dcontext, NULL, ilist, where, get_ABI_stack_alignment());
+    PRE(ilist, where, done);
+}
+#endif
+
 /* Inserts a complete call to callee with the passed-in arguments.
  * Assumes the stack pointer is currently get_ABI_stack_alignment() aligned.
  * Clean calls ensure this by using clean base of dstack and having
@@ -811,6 +859,11 @@ insert_meta_call_vargs(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
             XINST_CREATE_add(dcontext, opnd_create_reg(REG_XSP),
                              OPND_CREATE_INT32(stack_for_params)));
     }
+
+#if defined(X86) && defined(LINUX)
+    if (TEST(META_CALL_CLEAN, flags) && !TEST(META_CALL_RETURNS_TO_NATIVE, flags))
+        insert_clean_call_pending_signal_check(dcontext, ilist, instr, encode_pc);
+#endif
 
     if (TEST(META_CALL_CLEAN, flags) && should_track_where_am_i()) {
         uint whereami;
