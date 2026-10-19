@@ -727,7 +727,8 @@ emit_fragment_common(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist, uint 
                 !INTERNAL_OPTION(pad_jmps_return_excess_padding)));
         /* size is stored at the end, but included in copy_sz */
         memcpy(vmcode_get_writable_addr(copy_pc), selfmod_copy, copy_sz - sizeof(uint));
-        *((uint *)vmcode_get_writable_addr(copy_pc + copy_sz - sizeof(uint))) = copy_sz;
+        *((uint *)vmcode_get_writable_addr(copy_pc + copy_sz - sizeof(uint))) = copy_sz |
+            (bb_build_selfmod_s2ro(dcontext) ? SELFMOD_COPY_S2RO : 0);
         /* count copy as part of fragment */
         pc = copy_pc + copy_sz;
     }

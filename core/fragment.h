@@ -561,10 +561,18 @@ typedef struct _per_thread_t {
          ? (ASSERT(false && "fake fragment_t has no exit stubs!"), (linkstub_t *)NULL) \
          : ((linkstub_t *)(((byte *)(f)) + FRAGMENT_STRUCT_SIZE((f)->flags))))
 
+/* The size and sandbox layout policy are retained with the code copy.  A flush
+ * can remove or replace the VM area before an old fragment is reconstructed.
+ * Fragment sizes are bounded below this reserved high bit.
+ */
+#define SELFMOD_COPY_S2RO 0x80000000U
+#define FRAGMENT_SELFMOD_COPY_INFO(f) \
+    (*((uint *)((f)->start_pc + (f)->size - sizeof(uint))))
+#define FRAGMENT_SELFMOD_S2RO(f) TEST(SELFMOD_COPY_S2RO, FRAGMENT_SELFMOD_COPY_INFO(f))
 /* selfmod copy size is stored at very end of fragment space */
 #define FRAGMENT_SELFMOD_COPY_SIZE(f)                  \
     (ASSERT(TEST(FRAG_SELFMOD_SANDBOXED, (f)->flags)), \
-     (*((uint *)((f)->start_pc + (f)->size - sizeof(uint)))))
+     (FRAGMENT_SELFMOD_COPY_INFO(f) & ~SELFMOD_COPY_S2RO))
 #define FRAGMENT_SELFMOD_COPY_CODE_SIZE(f) (FRAGMENT_SELFMOD_COPY_SIZE(f) - sizeof(uint))
 #define FRAGMENT_SELFMOD_COPY_PC(f)                    \
     (ASSERT(TEST(FRAG_SELFMOD_SANDBOXED, (f)->flags)), \

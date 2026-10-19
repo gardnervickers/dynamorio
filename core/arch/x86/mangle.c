@@ -3167,8 +3167,11 @@ sandbox_rep_instr(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr, inst
     instr_t *jmp;
     app_pc after_write;
     uint opndsize = opnd_size_in_bytes(opnd_get_size(instr_get_dst(instr, 0)));
-    uint flags =
-        instr_eflags_to_fragment_eflags(forward_eflags_analysis(dcontext, ilist, next));
+    /* A flush may relocate the thread to the next app instruction and deliver
+     * a pending signal there.  Even flags overwritten by that instruction are
+     * observable in its signal context: do not leak the sandbox comparisons.
+     */
+    uint flags = 0;
     bool use_tls = IF_X64_ELSE(true, false);
     IF_X64(bool x86_to_x64_ibl_opt = DYNAMO_OPTION(x86_to_x64_ibl_opt);)
     instr_t *next_app = next;
@@ -3309,8 +3312,11 @@ sandbox_write(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr, instr_t 
      */
     instr_t *ok = INSTR_CREATE_label(dcontext), *jmp;
     uint opndsize = opnd_size_in_bytes(opnd_get_size(op));
-    uint flags =
-        instr_eflags_to_fragment_eflags(forward_eflags_analysis(dcontext, ilist, next));
+    /* A flush may relocate the thread to the next app instruction and deliver
+     * a pending signal there.  Even flags overwritten by that instruction are
+     * observable in its signal context: do not leak the sandbox comparisons.
+     */
+    uint flags = 0;
     bool use_tls = IF_X64_ELSE(true, false);
     IF_X64(bool x86_to_x64_ibl_opt = DYNAMO_OPTION(x86_to_x64_ibl_opt);)
     instr_t *get_addr_at = next;
@@ -3813,7 +3819,7 @@ finalize_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, fragment_t *f
 #ifdef X64
     int k = ((ptr_uint_t)f->tag) > UINT_MAX ? 1 : 0;
 #endif
-    i = (sandbox_top_of_bb_check_s2ro(dcontext, f->tag)) ? 1 : 0;
+    i = FRAGMENT_SELFMOD_S2RO(f) ? 1 : 0;
     j = (TEST(FRAG_WRITES_EFLAGS_6, f->flags)
              ? 0
              : (TEST(FRAG_WRITES_EFLAGS_OF, f->flags) ? 1 : 2));

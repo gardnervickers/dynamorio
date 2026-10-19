@@ -1353,7 +1353,7 @@ recreate_ilist_from_code_copy(dcontext_t *dcontext, fragment_t *f)
     ilist = recreate_bb_ilist(dcontext, copy, (byte *)f->tag, copy + info->code_copy_size,
                               FRAG_HAS_TRANSLATION_INFO, NULL, NULL,
                               false /*don't check vm areas!*/, true /*mangle*/, NULL,
-                              true /*call client*/, false /*!for_trace*/);
+                              true /*call client*/, false /*!for_trace*/, -1);
     if (ilist == NULL)
         return NULL;
     /* Translations the bb builder set after the client (e.g., of the final jump) are
@@ -1414,7 +1414,7 @@ recreate_selfmod_ilist(dcontext_t *dcontext, fragment_t *f)
                               selfmod_copy + FRAGMENT_SELFMOD_COPY_CODE_SIZE(f),
                               FRAG_SELFMOD_SANDBOXED, NULL, NULL,
                               false /*don't check vm areas!*/, true /*mangle*/, NULL,
-                              true /*call client*/, false /*!for_trace*/);
+                              true /*call client*/, false /*!for_trace*/, FRAGMENT_SELFMOD_S2RO(f));
     ASSERT(ilist != NULL); /* shouldn't fail: our own code is always readable! */
     /* The bb builder gave the client app pcs already, but translations it set after
      * the client (e.g., of the final jump) are still in the copy.

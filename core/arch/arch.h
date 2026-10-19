@@ -755,7 +755,7 @@ set_selfmod_sandbox_offsets(dcontext_t *dcontext);
 bool
 insert_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, uint flags,
                        app_pc start_pc, app_pc end_pc, /* end is open */
-                       bool record_translation, bool for_cache);
+                       bool record_translation, bool for_cache, bool s2ro);
 #    ifdef X86
 void
 sandbox_rep_instr(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr, instr_t *next,

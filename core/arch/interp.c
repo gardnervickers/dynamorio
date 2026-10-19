@@ -234,6 +234,7 @@ typedef struct {
     byte *selfmod_copy;
     size_t selfmod_copy_len; /* bytes from start_pc copied so far */
     size_t selfmod_copy_cap;
+    int selfmod_s2ro; /* -1 selects policy; 0/1 retain the emitted layout */
     bool selfmod_copy_incomplete; /* some instr was decoded from the app code */
     /* -xl8_code_copy: the end of the code [start_pc, app_copy_end) that the fragment
      * stores a copy of, to translate from, or NULL.
@@ -272,6 +273,7 @@ init_build_bb(build_bb_t *bb, app_pc start_pc, bool app_interp, bool for_cache,
     bb->check_vm_area = true;
     bb->start_pc = start_pc;
     bb->app_interp = app_interp;
+    bb->selfmod_s2ro = -1;
     bb->for_cache = for_cache;
     if (bb->for_cache)
         bb->record_vmlist = true;
@@ -389,6 +391,14 @@ bb_free_selfmod_copy(build_bb_t *bb)
                         ACCT_FRAGMENT, PROTECTED);
         bb->selfmod_copy = NULL;
     }
+}
+
+bool
+bb_build_selfmod_s2ro(dcontext_t *dcontext)
+{
+    build_bb_t *bb = (build_bb_t *)dcontext->bb_build_info;
+    ASSERT(bb != NULL && bb->selfmod_s2ro >= 0);
+    return bb->selfmod_s2ro != 0;
 }
 
 /* Returns the copy of the app code that the sandboxed bb being built for the cache
@@ -4766,6 +4776,10 @@ mangle_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
 #ifdef ARCH_SUPPORTS_HW_CACHE_CONSISTENCY
     if (TEST(FRAG_SELFMOD_SANDBOXED, bb->flags)) {
         byte *selfmod_start, *selfmod_end;
+        /* Relocation and asynchronous signal contexts observe flags even when
+         * the first app instruction overwrites them before reading them.
+         */
+        IF_X86(bb->flags &= ~(FRAG_WRITES_EFLAGS_6 | FRAG_WRITES_EFLAGS_OF));
         /* sandbox requires that bb have no direct cti followings!
          * check_thread_vm_area should have ensured this for us
          */
@@ -4784,8 +4798,11 @@ mangle_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             selfmod_start = bb->start_pc;
             selfmod_end = bb->cur_pc;
         }
+        if (bb->selfmod_s2ro < 0)
+            bb->selfmod_s2ro = sandbox_top_of_bb_check_s2ro(dcontext, selfmod_start);
         if (!insert_selfmod_sandbox(dcontext, bb->ilist, bb->flags, selfmod_start,
-                                    selfmod_end, bb->record_translation, bb->for_cache)) {
+                                    selfmod_end, bb->record_translation, bb->for_cache,
+                                    bb->selfmod_s2ro != 0)) {
             /* have to rebuild bb using full decode -- it has invalid instrs
              * in middle, which we don't want to deal w/ for sandboxing!
              */
@@ -5578,7 +5595,8 @@ instrlist_t *
 recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_pc,
                   uint flags, uint *res_flags DR_PARAM_OUT,
                   uint *res_exit_type DR_PARAM_OUT, bool check_vm_area, bool mangle,
-                  void **vmlist_out DR_PARAM_OUT, bool call_client, bool for_trace)
+                  void **vmlist_out DR_PARAM_OUT, bool call_client, bool for_trace,
+                  int selfmod_s2ro)
 {
     build_bb_t bb;
 
@@ -5597,6 +5615,7 @@ recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_
      * termination but not been included in the bb (i#1441).
      * It only applies to full_decode.
      */
+    bb.selfmod_s2ro = selfmod_s2ro;
     bb.stop_pc = stop_pc;
     bb.check_vm_area = check_vm_area;
     /* The callers that check vm areas recreate an existing fragment and pass its
@@ -5731,7 +5750,8 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
         ilist = recreate_bb_ilist(
             dcontext, (byte *)f->tag, (byte *)f->tag, NULL /*default stop*/,
             f->flags & FRAG_SELFMOD_SANDBOXED /*as built*/, &flags, NULL,
-            true /*check vm area*/, mangle, NULL, call_client, false /*not for_trace*/);
+            true /*check vm area*/, mangle, NULL, call_client, false /*not for_trace*/,
+            TEST(FRAG_SELFMOD_SANDBOXED, f->flags) ? FRAGMENT_SELFMOD_S2RO(f) : -1);
         ASSERT(ilist != NULL);
         if (ilist == NULL) /* a race */
             goto recreate_fragment_done;
@@ -5767,7 +5787,7 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
             bb = recreate_bb_ilist(
                 dcontext, apc, apc, NULL /*default stop*/, 0 /*no pre flags*/, &flags,
                 &md.final_exit_flags, true /*check vm area*/, !mangle_at_end,
-                (mangle_at_end ? &vmlist : NULL), call_client, true /*for_trace*/);
+                (mangle_at_end ? &vmlist : NULL), call_client, true /*for_trace*/, -1);
             ASSERT(bb != NULL);
             if (bb == NULL) {
                 instrlist_clear_and_destroy(dcontext, ilist);

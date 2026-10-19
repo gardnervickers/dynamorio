@@ -2373,7 +2373,7 @@ sandbox_top_of_bb_check_s2ro(dcontext_t *dcontext, app_pc start_pc)
 bool
 insert_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, uint flags,
                        app_pc start_pc, app_pc end_pc, /* end is open */
-                       bool record_translation, bool for_cache)
+                       bool record_translation, bool for_cache, bool s2ro)
 {
     instr_t *instr, *next;
 
@@ -2395,7 +2395,7 @@ insert_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, uint flags,
         instrlist_set_translation_target(ilist, instr_get_translation(instr));
     }
 
-    sandbox_top_of_bb(dcontext, ilist, sandbox_top_of_bb_check_s2ro(dcontext, start_pc),
+    sandbox_top_of_bb(dcontext, ilist, s2ro,
                       flags, start_pc, end_pc,
                       for_cache _IF_X86(NULL) _IF_X86(NULL) _IF_X86(NULL));
 

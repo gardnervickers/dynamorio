@@ -1517,7 +1517,7 @@ instrlist_t *
 recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc,
                   app_pc stop_pc /*optional, only for full_decode*/, uint flags,
                   uint *res_flags, uint *res_exit_type, bool check_vm_area, bool mangle,
-                  void **vmlist, bool call_client, bool for_trace);
+                  void **vmlist, bool call_client, bool for_trace, int selfmod_s2ro);
 
 instrlist_t *
 recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
@@ -1526,6 +1526,8 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
 
 app_pc
 find_app_bb_end(dcontext_t *dcontext, byte *start_pc, uint flags);
+bool
+bb_build_selfmod_s2ro(dcontext_t *dcontext);
 byte *
 bb_build_selfmod_copy(dcontext_t *dcontext, app_pc tag, size_t *size DR_PARAM_OUT);
 app_pc
