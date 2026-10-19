@@ -1796,6 +1796,8 @@ typedef enum {
 #define REG_START_32 DR_REG_START_32
 #define REG_STOP_32 DR_REG_STOP_32
 #define REG_XSP DR_REG_XSP
+#define REG_LAST_VALID_ENUM DR_REG_LAST_VALID_ENUM
+#define REG_LAST_ENUM DR_REG_LAST_ENUM
 /* Backward compatibility with REG_ constants (we now use DR_REG_ to avoid
  * conflicts with the REG_ enum in <sys/ucontext.h>: i#34).
  * Clients should set(DynamoRIO_REG_COMPATIBILITY ON) prior to
