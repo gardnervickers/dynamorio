@@ -6436,6 +6436,12 @@ is_sys_kill(dcontext_t *dcontext, byte *pc, byte *xsp, kernel_siginfo_t *info)
     if (info->si_code <= 0)
         return true;
 #endif
+    /* Native/probe callers have no generated syscall state.  In particular,
+     * GLOBAL_DCONTEXT is a sentinel, not a thread whose fields we can inspect.
+     * The si_code classification above does not require a private context.
+     */
+    if (dcontext == NULL || dcontext == GLOBAL_DCONTEXT)
+        return false;
     return (is_at_do_syscall(dcontext, pc, xsp) &&
             (dcontext->sys_num == SYS_kill ||
 #ifdef LINUX
@@ -6904,7 +6910,12 @@ main_signal_handler_C(byte *xsp)
      * when handling safe_read faults.  This lets us pass the check for a
      * dcontext below and causes us to use the global log.
      */
+    /* A user-sent signal during a no-context probe must retain NULL and use
+     * the native delivery path below, not recover the probe or queue on the
+     * GLOBAL_DCONTEXT sentinel.  Only real faults need the global probe path.
+     */
     if (dcontext == NULL && (sig == SIGSEGV || sig == SIGBUS) &&
+        !is_sys_kill(dcontext, (byte *)sc->SC_XIP, (byte *)sc->SC_XSP, siginfo) &&
         (is_safe_read_ucxt(ucxt) ||
          (!dynamo_initialized && global_try_except.try_except_state != NULL &&
           global_try_tid == get_sys_thread_id()))) {
