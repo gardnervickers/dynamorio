@@ -162,7 +162,13 @@ static inline bool
 is_annotation_jump_over_dead_code(instr_t *instr)
 {
     app_pc xl8 = instr_get_translation(instr);
-    return xl8 != NULL && *(ushort *)xl8 == ANNOTATION_JUMP_OVER_LABEL_REFERENCE;
+    /* A one-byte instruction may be the last byte of a readable page.  Only
+     * inspect the two-byte annotation prefix after decoding a jump, and use
+     * its decoded bytes (which may be a selfmod snapshot).
+     */
+    return xl8 != NULL && instr_is_ubr(instr) && instr_raw_bits_valid(instr) &&
+        instr->length >= sizeof(ushort) &&
+        *(ushort *)instr_get_raw_bits(instr) == ANNOTATION_JUMP_OVER_LABEL_REFERENCE;
 }
 #    endif
 
@@ -180,7 +186,9 @@ is_decoded_valgrind_annotation_tail(instr_t *instr)
 static inline bool
 is_encoded_valgrind_annotation_tail(app_pc instr_start_pc)
 {
-    return (((*(uint *)instr_start_pc) & 0xffffff) == ENCODED_VALGRIND_ANNOTATION_TAIL);
+    return instr_start_pc[0] == (ENCODED_VALGRIND_ANNOTATION_TAIL & 0xff) &&
+        instr_start_pc[1] == ((ENCODED_VALGRIND_ANNOTATION_TAIL >> 8) & 0xff) &&
+        instr_start_pc[2] == ((ENCODED_VALGRIND_ANNOTATION_TAIL >> 16) & 0xff);
 }
 
 /* Return true if xchg_start_pc is definitely the last instruction of a Valgrind
@@ -217,7 +225,8 @@ is_encoded_valgrind_annotation(app_pc xchg_start_pc, app_pc bb_start, app_pc pag
 static inline bool
 is_encoded_valgrind_annotation_tail(app_pc instr_start_pc)
 {
-    return (*(ushort *)instr_start_pc == ENCODED_VALGRIND_ANNOTATION_TAIL);
+    return instr_start_pc[0] == (ENCODED_VALGRIND_ANNOTATION_TAIL & 0xff) &&
+        instr_start_pc[1] == ((ENCODED_VALGRIND_ANNOTATION_TAIL >> 8) & 0xff);
 }
 
 /* Return true if xchg_start_pc is definitely the last instruction of a Valgrind
