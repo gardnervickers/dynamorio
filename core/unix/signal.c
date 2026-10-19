@@ -677,8 +677,17 @@ unset_initial_crash_handlers(dcontext_t *dcontext)
             init_info.sighand->threads_unmasked[i] = 0;
     });
     signal_info_exit_sigaction(GLOBAL_DCONTEXT, &init_info, false /*!other_thread*/);
-    /* Undo the unblock-all */
-    sigprocmask_syscall(SIG_SETMASK, &init_sigmask, NULL, sizeof(init_sigmask));
+    /* Undo the initialization mask only if returning to application code.
+     * Early injection can retain init_info until process cleanup.  In that case
+     * block_cleanup_and_terminate() has blocked signals for the terminating
+     * thread, and signal_thread_exit() has already removed its handlers and
+     * timer state.  Restoring the startup mask here can deliver a pending client
+     * timer expiry to SIG_DFL even though stop_itimer() disabled the timer.
+     * Leave the exit mask intact: no pending signal is consumed or reclassified.
+     */
+    if (!dynamo_exited || doing_detach || standalone_library
+        IF_APP_EXPORTS(|| dr_api_exit))
+        sigprocmask_syscall(SIG_SETMASK, &init_sigmask, NULL, sizeof(init_sigmask));
     /* app_sigblocked is filled in when signal_swap_mask() is called. */
     DOLOG(2, LOG_ASYNCH, {
         LOG(THREAD, LOG_ASYNCH, 2, "initial app signal mask:\n");
