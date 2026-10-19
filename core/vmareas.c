@@ -370,7 +370,9 @@ typedef struct _deletion_lists_t {
     fragment_t *lazy_delete_tail;
     /* stores the length of the lazy list */
     uint lazy_delete_count;
-    /* ensure only one thread tries to move to pending deletion list */
+    /* Owns a mover request, not a reservation of the lazy list: deletion may
+     * drain the list before the mover reacquires its locks.
+     */
     bool move_pending;
 } deletion_lists_t;
 
@@ -9270,35 +9272,45 @@ move_lazy_list_to_pending_delete(dcontext_t *dcontext)
     d_r_mutex_lock(&shared_delete_lock);
     d_r_mutex_lock(&lazy_delete_lock);
     if (todelete->move_pending) {
-        /* it's possible for remove_from_lazy_deletion_list to drop the count */
+        /* enter_nolinking can retire lazy entries through check_flush_queue;
+         * a concurrent flusher can also drain them while our locks are released.
+         * Complete this request even if nothing remains, but do not create an
+         * empty pending entry or advance flushtime without a transfer.  Keep the
+         * request owned until here so appenders cannot start a second mover.
+         */
+        if (todelete->lazy_delete_list != NULL) {
 #ifdef X86
-        DODEBUG({
-            fragment_t *f; /* Raise SIGILL if a deleted fragment gets executed again */
-            for (f = todelete->lazy_delete_list; f != NULL; f = f->next_vmarea) {
-                *(ushort *)vmcode_get_writable_addr(f->start_pc) = RAW_OPCODE_SIGILL;
-            }
-        });
+            DODEBUG({
+                fragment_t *f; /* Raise SIGILL if a deleted fragment gets executed again */
+                for (f = todelete->lazy_delete_list; f != NULL; f = f->next_vmarea) {
+                    *(ushort *)vmcode_get_writable_addr(f->start_pc) = RAW_OPCODE_SIGILL;
+                }
+            });
 #endif
-        DODEBUG({
-            if (todelete->lazy_delete_count <= DYNAMO_OPTION(lazy_deletion_max_pending)) {
-                SYSLOG_INTERNAL_WARNING_ONCE("lazy_delete_count dropped below "
-                                             "threshold before move to pending");
-            }
-        });
-        LOG(THREAD, LOG_VMAREAS, 3, "moving lazy list to a pending deletion entry\n");
-        STATS_INC(num_lazy_del_to_pending);
-        STATS_ADD(num_lazy_del_frags_to_pending, todelete->lazy_delete_count);
-        /* ensure all threads in ref count will actually check the queue */
-        increment_global_flushtime();
-        add_to_pending_list(dcontext, todelete->lazy_delete_list,
-                            /* we do count this thread, as we aren't checking the
-                             * pending list here or inc-ing our flushtime
-                             */
-                            d_r_get_num_threads(),
-                            flushtime_global _IF_DEBUG(NULL) _IF_DEBUG(NULL));
-        todelete->lazy_delete_list = NULL;
-        todelete->lazy_delete_tail = NULL;
-        todelete->lazy_delete_count = 0;
+            DODEBUG({
+                if (todelete->lazy_delete_count <= DYNAMO_OPTION(lazy_deletion_max_pending)) {
+                    SYSLOG_INTERNAL_WARNING_ONCE("lazy_delete_count dropped below "
+                                                 "threshold before move to pending");
+                }
+            });
+            LOG(THREAD, LOG_VMAREAS, 3, "moving lazy list to a pending deletion entry\n");
+            STATS_INC(num_lazy_del_to_pending);
+            STATS_ADD(num_lazy_del_frags_to_pending, todelete->lazy_delete_count);
+            /* ensure all threads in ref count will actually check the queue */
+            increment_global_flushtime();
+            add_to_pending_list(dcontext, todelete->lazy_delete_list,
+                                /* we do count this thread, as we aren't checking the
+                                 * pending list here or inc-ing our flushtime
+                                 */
+                                d_r_get_num_threads(),
+                                flushtime_global _IF_DEBUG(NULL) _IF_DEBUG(NULL));
+            todelete->lazy_delete_list = NULL;
+            todelete->lazy_delete_tail = NULL;
+            todelete->lazy_delete_count = 0;
+        } else {
+            ASSERT(todelete->lazy_delete_tail == NULL);
+            ASSERT(todelete->lazy_delete_count == 0);
+        }
         todelete->move_pending = false;
     } else /* should not happen */
         ASSERT(false && "race in move_lazy_list_to_pending_delete");
