@@ -5672,6 +5672,9 @@ ignorable_system_call_normalized(int num)
     /* Timed waits we restart after our suspend signal interrupts them
      * (os_syscall_restart_args()).
      */
+#    ifdef SYS_epoll_wait
+    case SYS_epoll_wait:
+#    endif
 #    ifdef SYS_nanosleep
     case SYS_nanosleep:
 #    endif
@@ -5863,6 +5866,9 @@ os_syscall_restart_pre(dcontext_t *dcontext)
             sys_param(dcontext, 3) != 0;
         ts_param = 3;
         break;
+#    ifdef SYS_epoll_wait
+    case SYS_epoll_wait:
+#    endif
     case SYS_epoll_pwait: relative = (int)sys_param(dcontext, 3) > 0; break;
 #    ifdef SYS_epoll_pwait2
     case SYS_epoll_pwait2:
@@ -5960,6 +5966,9 @@ os_syscall_is_unbounded_wait(dcontext_t *dcontext)
         return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
             sys_param(dcontext, 3) == 0;
     }
+#    ifdef SYS_epoll_wait
+    case SYS_epoll_wait: return (int)sys_param(dcontext, 3) < 0;
+#    endif
     case SYS_epoll_pwait: return sys_param(dcontext, 4) == 0 && (int)sys_param(dcontext, 3) < 0;
 #    ifdef SYS_epoll_pwait2
     case SYS_epoll_pwait2: return sys_param(dcontext, 4) == 0 && sys_param(dcontext, 3) == 0;
@@ -6012,6 +6021,9 @@ os_syscall_restart_args(dcontext_t *dcontext, reg_t *x0, int *param, reg_t *valu
          * XXX: an IORING_ENTER_EXT_ARG timeout starts over.
          */
         return true;
+#    endif
+#    ifdef SYS_epoll_wait
+    case SYS_epoll_wait:
 #    endif
     case SYS_epoll_pwait: {
         int ms = (int)sys_param(dcontext, 3);
