@@ -4157,6 +4157,7 @@ signal_find_vdso_sigreturn(void)
 #endif
 
 /* Where an app signal handler returns. */
+#ifdef AARCHXX
 static reg_t
 app_sigreturn_target(thread_sig_info_t *info, int sig)
 {
@@ -4170,6 +4171,7 @@ app_sigreturn_target(thread_sig_info_t *info, int sig)
 #endif
     return (reg_t)dynamorio_sigreturn;
 }
+#endif /* AARCHXX */
 #endif
 
 /* Returns the size of the frame for delivering to the app.

@@ -2553,7 +2553,7 @@ get_register_name(reg_id_t reg)
 {
     bool is_global_isa_mode_synthetic =
         dr_get_isa_mode(get_thread_private_dcontext()) == DR_ISA_REGDEPS;
-    if (reg >= DR_REG_AFTER_LAST_VALID_ENUM)
+    if (reg > DR_REG_LAST_ENUM)
         return "<invalid>";
     if (is_global_isa_mode_synthetic)
         return d_r_reg_virtual_names[reg];
