@@ -507,22 +507,16 @@ start_itimer(dcontext_t *dcontext);
 void
 stop_itimer(dcontext_t *dcontext);
 
-/* handle app itimer syscalls */
-void
-handle_pre_setitimer(dcontext_t *dcontext, int which, const struct itimerval *new_timer,
-                     struct itimerval *prev_timer);
-void
-handle_post_setitimer(dcontext_t *dcontext, bool success, int which,
-                      const struct itimerval *new_timer, struct itimerval *prev_timer);
-void
-handle_post_getitimer(dcontext_t *dcontext, bool success, int which,
-                      struct itimerval *cur_timer);
-
-void
-handle_pre_alarm(dcontext_t *dcontext, unsigned int sec);
-
-void
-handle_post_alarm(dcontext_t *dcontext, bool success, unsigned int sec);
+/* Complete app timer syscalls before returning to the dispatcher. */
+int
+handle_setitimer(dcontext_t *dcontext, int which, const struct itimerval *new_timer,
+                 struct itimerval *prev_timer);
+int
+handle_getitimer(dcontext_t *dcontext, int which, struct itimerval *cur_timer);
+#if defined(LINUX) && defined(X86)
+unsigned int
+handle_alarm_syscall(dcontext_t *dcontext, unsigned int sec);
+#endif
 
 /* not exported beyond unix/ unlike rest of clone record routines */
 void

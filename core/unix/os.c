@@ -8529,21 +8529,28 @@ pre_system_call(dcontext_t *dcontext)
     }
 #endif
     case SYS_setitimer: /* 104 */
-        dcontext->sys_param0 = sys_param(dcontext, 0);
-        dcontext->sys_param1 = sys_param(dcontext, 1);
-        dcontext->sys_param2 = sys_param(dcontext, 2);
-        handle_pre_setitimer(dcontext, (int)sys_param(dcontext, 0),
-                             (const struct itimerval *)sys_param(dcontext, 1),
-                             (struct itimerval *)sys_param(dcontext, 2));
+    case SYS_getitimer: { /* 105 */
+        int res;
+        if (dcontext->sys_num == SYS_setitimer) {
+            res = handle_setitimer(dcontext, (int)sys_param(dcontext, 0),
+                                  (const struct itimerval *)sys_param(dcontext, 1),
+                                  (struct itimerval *)sys_param(dcontext, 2));
+        } else {
+            res = handle_getitimer(dcontext, (int)sys_param(dcontext, 0),
+                                  (struct itimerval *)sys_param(dcontext, 1));
+        }
+        if (res == 0)
+            set_success_return_val(dcontext, 0);
+        else
+            set_failure_return_val(dcontext, -res);
+        execute_syscall = false;
         break;
-    case SYS_getitimer: /* 105 */
-        dcontext->sys_param0 = sys_param(dcontext, 0);
-        dcontext->sys_param1 = sys_param(dcontext, 1);
-        break;
+    }
 #if defined(LINUX) && defined(X86)
     case SYS_alarm: /* 27 on x86 and 37 on x64 */
-        dcontext->sys_param0 = sys_param(dcontext, 0);
-        handle_pre_alarm(dcontext, (unsigned int)dcontext->sys_param0);
+        set_success_return_val(
+            dcontext, handle_alarm_syscall(dcontext, (unsigned int)sys_param(dcontext, 0)));
+        execute_syscall = false;
         break;
 #endif
 #if 0
@@ -10010,20 +10017,6 @@ post_system_call(dcontext_t *dcontext)
         success = true;
         break;
 
-    case SYS_setitimer: /* 104 */
-        handle_post_setitimer(dcontext, success, (int)dcontext->sys_param0,
-                              (const struct itimerval *)dcontext->sys_param1,
-                              (struct itimerval *)dcontext->sys_param2);
-        break;
-    case SYS_getitimer: /* 105 */
-        handle_post_getitimer(dcontext, success, (int)dcontext->sys_param0,
-                              (struct itimerval *)dcontext->sys_param1);
-        break;
-#if defined(LINUX) && defined(X86)
-    case SYS_alarm: /* 27 on x86 and 37 on x64 */
-        handle_post_alarm(dcontext, success, (unsigned int)dcontext->sys_param0);
-        break;
-#endif
 #if defined(LINUX) && defined(X86) && defined(X64)
     case SYS_arch_prctl: {
         if (success && INTERNAL_OPTION(mangle_app_seg)) {

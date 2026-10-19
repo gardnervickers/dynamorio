@@ -384,7 +384,6 @@ typedef struct _thread_itimer_info_t {
      */
     recursive_lock_t lock;
     itimer_info_t app;
-    itimer_info_t app_saved;
     itimer_info_t dr;
     itimer_info_t actual;
     void (*cb)(dcontext_t *, priv_mcontext_t *);

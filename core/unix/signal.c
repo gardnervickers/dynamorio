@@ -9176,6 +9176,35 @@ init_itimer(dcontext_t *dcontext, bool first)
     }
 }
 
+/* Timer state and kernel installation form one transaction.  In particular an
+ * alarm on another thread must not bypass the lock while a syscall is installing
+ * a timer.  Block asynchronous signals (including suspension) while holding it:
+ * a signal handler waiting for this lock can have interrupted a synchronizer
+ * that would otherwise suspend the owner before inspecting/resuming it.
+ * Never wait with those signals blocked, and never invoke a client or access
+ * application memory while holding the lock.  SIGSEGV/SIGBUS remain available
+ * for DR's fault handling.  Private timers need the mask too, for reentrancy.
+ */
+static void
+itimer_lock(thread_sig_info_t *info, int which, kernel_sigset_t *prior_mask)
+{
+    for (;;) {
+        block_all_noncrash_signals_except(prior_mask, 0);
+        if (!info->shared_itimer || try_recursive_lock(&(*info->itimer)[which].lock))
+            return;
+        sigprocmask_syscall(SIG_SETMASK, prior_mask, NULL, sizeof(*prior_mask));
+        os_thread_yield();
+    }
+}
+
+static void
+itimer_unlock(thread_sig_info_t *info, int which, kernel_sigset_t *prior_mask)
+{
+    if (info->shared_itimer)
+        release_recursive_lock(&(*info->itimer)[which].lock);
+    sigprocmask_syscall(SIG_SETMASK, prior_mask, NULL, sizeof(*prior_mask));
+}
+
 /* Up to caller to hold lock for shared itimers */
 static bool
 set_actual_itimer(dcontext_t *dcontext, int which, thread_sig_info_t *info, bool enable)
@@ -9281,8 +9310,8 @@ set_itimer_callback(dcontext_t *dcontext, int which, uint millisec,
         return false;
     }
     ASSERT(info != NULL && info->itimer != NULL);
-    if (info->shared_itimer)
-        acquire_recursive_lock(&(*info->itimer)[which].lock);
+    kernel_sigset_t prior_mask;
+    itimer_lock(info, which, &prior_mask);
     if (millisec != 0)
         dr_uses_alarm_itimers = true;
     (*info->itimer)[which].dr.interval = ((uint64)millisec) * 1000;
@@ -9298,8 +9327,7 @@ set_itimer_callback(dcontext_t *dcontext, int which, uint millisec,
         rc = true;
     } else
         rc = itimer_new_settings(dcontext, which, false /*us*/);
-    if (info->shared_itimer)
-        release_recursive_lock(&(*info->itimer)[which].lock);
+    itimer_unlock(info, which, &prior_mask);
     return rc;
 }
 
@@ -9313,11 +9341,10 @@ get_itimer_frequency(dcontext_t *dcontext, int which)
         return 0;
     }
     ASSERT(info != NULL && info->itimer != NULL);
-    if (info->shared_itimer)
-        acquire_recursive_lock(&(*info->itimer)[which].lock);
+    kernel_sigset_t prior_mask;
+    itimer_lock(info, which, &prior_mask);
     ms = (*info->itimer)[which].dr.interval / 1000;
-    if (info->shared_itimer)
-        release_recursive_lock(&(*info->itimer)[which].lock);
+    itimer_unlock(info, which, &prior_mask);
     return ms;
 }
 
@@ -9346,13 +9373,12 @@ alarm_signal_has_DR_only_itimer(dcontext_t *dcontext, int signal)
     }
 #endif
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    if (info->shared_itimer)
-        acquire_recursive_lock(&(*info->itimer)[which].lock);
+    kernel_sigset_t prior_mask;
+    itimer_lock(info, which, &prior_mask);
     bool DR_only =
         ((*info->itimer)[which].dr.value > 0 || (*info->itimer)[which].dr.interval > 0) &&
         (*info->itimer)[which].app.value == 0 && (*info->itimer)[which].app.interval == 0;
-    if (info->shared_itimer)
-        release_recursive_lock(&(*info->itimer)[which].lock);
+    itimer_unlock(info, which, &prior_mask);
     return DR_only;
 }
 
@@ -9381,7 +9407,6 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
     ASSERT(info != NULL && info->itimer != NULL);
     int which = 0;
     bool invoke_cb = false, pass_to_app = false, reset_timer_manually = false;
-    bool should_release_lock = false;
 
     /* i#471: suppress alarms coming in after exit */
     if (dynamo_exited)
@@ -9392,58 +9417,15 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
     LOG(THREAD, LOG_ASYNCH, 2, "received alarm %d @" PFX "\n", which,
         SIGCXT_FROM_UCXT(ucxt)->SC_XIP);
 
-    /* This alarm could have interrupted an app thread making an itimer syscall,
-     * which is why we don't want to block on a lock here.
-     * It can't interrupt this same thread handling a prior alarm (b/c we block
-     * the signal in our handler).  It could arrive in thread B while thread A
-     * is still handling a prior alarm if the alarm frequency is high and the
-     * processing is slow, which is why we split the locks to be per-itimer-type.
-     * We also avoid new thread setup code acquiring these itimer locks by using
-     * atomic increments instead for the refcounts.  Xref i#2993.
+#ifdef DEADLOCK_AVOIDANCE
+    /* Preserve the existing diagnostic-path exception: no timer lock may be
+     * acquired while the innermost diagnostic lock is held.
      */
-    if (info->shared_itimer) {
-#ifdef DEADLOCK_AVOIDANCE
-        /* i#2061: in debug build we can get an alarm while in deadlock handling
-         * code that holds innermost_lock.  We just drop such alarms.
-         */
-        if (OWN_MUTEX(&innermost_lock))
-            return pass_to_app;
+    if (info->shared_itimer && OWN_MUTEX(&innermost_lock))
+        return pass_to_app;
 #endif
-        bool own_itimer_mutex = false;
-#ifdef DEADLOCK_AVOIDANCE
-        /* Interrupted while holding an itimer lock of another type, or while
-         * acquiring or releasing this one (the mutex is ours but the recursive
-         * lock's owner is not yet or no longer): the per-type locks share a rank,
-         * so trying this one trips the rank order check.
-         */
-        for (int t = 0; t < NUM_ITIMERS; t++) {
-            if (OWN_MUTEX(&(*info->itimer)[t].lock.lock))
-                own_itimer_mutex = true;
-        }
-#endif
-        if (self_owns_recursive_lock(&(*info->itimer)[which].lock) || own_itimer_mutex) {
-            /* What can we do?  We just go ahead and hope conflicting writes work out.
-             * We don't re-acquire in case app was in middle of acquiring.
-             */
-        } else {
-#define ALARM_LOCK_MAX_TRIES 4
-            int i;
-            for (i = 0; i < ALARM_LOCK_MAX_TRIES; ++i) {
-                if (try_recursive_lock(&(*info->itimer)[which].lock)) {
-                    should_release_lock = true;
-                    break;
-                }
-                os_thread_yield();
-            }
-            if (!should_release_lock) {
-                /* Heuristic: if fail N times then assume interrupted lock routine
-                 * while processing an app syscall (see above: we ruled out other
-                 * scenarios).  What can we do?  Just continue and hope conflicting
-                 * writes work out.
-                 */
-            }
-        }
-    }
+    kernel_sigset_t prior_mask;
+    itimer_lock(info, which, &prior_mask);
     if ((*info->itimer)[which].app.value > 0) {
         /* Alarm could have been on its way when app value changed */
         if ((*info->itimer)[which].app.value >= (*info->itimer)[which].actual.value) {
@@ -9500,29 +9482,22 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
     } else
         (*info->itimer)[which].actual.value = (*info->itimer)[which].actual.interval;
 
+    void (*cb)(dcontext_t *, priv_mcontext_t *) = (*info->itimer)[which].cb;
+    void (*cb_api)(dcontext_t *, dr_mcontext_t *) = (*info->itimer)[which].cb_api;
+    itimer_unlock(info, which, &prior_mask);
     if (invoke_cb) {
-        /* invoke after setting new itimer value */
-        /* we save stack space by allocating superset dr_mcontext_t */
+        /* Keep the original interrupted context and signal-handler invocation,
+         * but no timer lock or transaction mask across arbitrary client code.
+         */
         dr_mcontext_t dmc;
         dr_mcontext_init(&dmc);
         priv_mcontext_t *mc = dr_mcontext_as_priv_mcontext(&dmc);
         ucontext_to_mcontext(mc, ucxt);
-        void (*cb)(dcontext_t *, priv_mcontext_t *) = (*info->itimer)[which].cb;
-        void (*cb_api)(dcontext_t *, dr_mcontext_t *) = (*info->itimer)[which].cb_api;
-
-        if (which == ITIMER_VIRTUAL && info->shared_itimer && should_release_lock) {
-            release_recursive_lock(&(*info->itimer)[which].lock);
-            should_release_lock = false;
-        }
-
-        if (cb != NULL) {
+        if (cb != NULL)
             cb(dcontext, mc);
-        } else {
+        else
             cb_api(dcontext, &dmc);
-        }
     }
-    if (info->shared_itimer && should_release_lock)
-        release_recursive_lock(&(*info->itimer)[which].lock);
     return pass_to_app;
 }
 
@@ -9553,15 +9528,14 @@ start_itimer(dcontext_t *dcontext)
         LOG(THREAD, LOG_ASYNCH, 2, "starting DR itimers from thread " TIDFMT "\n",
             d_r_get_thread_id());
         for (which = 0; which < NUM_ITIMERS; which++) {
-            if (info->shared_itimer)
-                acquire_recursive_lock(&(*info->itimer)[which].lock);
+            kernel_sigset_t prior_mask;
+            itimer_lock(info, which, &prior_mask);
             /* May have already been set up with the start delayed (i#2907). */
             if ((*info->itimer)[which].dr.interval > 0) {
                 (*info->itimer)[which].dr.value = (*info->itimer)[which].dr.interval;
                 itimer_new_settings(dcontext, which, false /*!app*/);
             }
-            if (info->shared_itimer)
-                release_recursive_lock(&(*info->itimer)[which].lock);
+            itimer_unlock(info, which, &prior_mask);
         }
     }
 }
@@ -9591,8 +9565,8 @@ stop_itimer(dcontext_t *dcontext)
         LOG(THREAD, LOG_ASYNCH, 2, "stopping DR itimers from thread " TIDFMT "\n",
             d_r_get_thread_id());
         for (which = 0; which < NUM_ITIMERS; which++) {
-            if (info->shared_itimer)
-                acquire_recursive_lock(&(*info->itimer)[which].lock);
+            kernel_sigset_t prior_mask;
+            itimer_lock(info, which, &prior_mask);
             if ((*info->itimer)[which].dr.value > 0) {
                 (*info->itimer)[which].dr.value = 0;
                 if ((*info->itimer)[which].app.value > 0) {
@@ -9601,187 +9575,135 @@ stop_itimer(dcontext_t *dcontext)
                 } else
                     set_actual_itimer(dcontext, which, info, false /*disable*/);
             }
-            if (info->shared_itimer)
-                release_recursive_lock(&(*info->itimer)[which].lock);
+            itimer_unlock(info, which, &prior_mask);
         }
     }
 }
 
-/* Reports to the app, in cur_timer as the kernel just wrote it, the remaining
- * time of the app's timer app rather than of the actual one we gave the kernel.
- * Caller should hold the lock.
+/* Project a kernel snapshot onto the application's timer.  Both the snapshot
+ * and output are DR-local, and the caller holds the timer lock.
  */
 static void
 report_app_itimer(thread_sig_info_t *info, int which, const itimer_info_t *app,
                   struct itimerval *cur_timer)
 {
-    struct timeval val;
-    DEBUG_DECLARE(bool ok;)
-    ASSERT(cur_timer != NULL);
-    usec_to_timeval(app->interval, &val);
-    IF_DEBUG(ok =)
-    safe_write_ex(&cur_timer->it_interval, sizeof(val), &val, NULL);
-    ASSERT(ok);
+    usec_to_timeval(app->interval, &cur_timer->it_interval);
     if (app->value == 0) {
-        IF_DEBUG(ok =)
-        safe_write_ex(&cur_timer->it_value, sizeof(val), &val, NULL);
-        ASSERT(ok);
-    } else if ((*info->itimer)[which].dr.value == 0 &&
-               (*info->itimer)[which].dr.interval == 0) {
-        /* The kernel's timer is the app's: its value is the answer. */
-    } else if (d_r_safe_read(&cur_timer->it_value, sizeof(val), &val)) {
-        /* Subtract the difference between last-asked-for value
-         * and current value to reflect elapsed time.  The kernel can report
-         * no elapsed time, or a little more than was asked for (it samples the
-         * CPU-time timers at ticks): never report its value, which is our own
-         * timer's then.  An app timer about to expire is still armed.
-         */
-        uint64 cur = timeval_to_usec(&val);
+        usec_to_timeval(0, &cur_timer->it_value);
+    } else if ((*info->itimer)[which].dr.value > 0 ||
+               (*info->itimer)[which].dr.interval > 0) {
+        uint64 cur = timeval_to_usec(&cur_timer->it_value);
         uint64 elapsed = (*info->itimer)[which].actual.value > cur
             ? (*info->itimer)[which].actual.value - cur
             : 0;
         uint64 left = app->value > elapsed ? app->value - elapsed : 1;
-        usec_to_timeval(left, &val);
-        IF_DEBUG(ok =)
-        safe_write_ex(&cur_timer->it_value, sizeof(val), &val, NULL);
-        ASSERT(ok);
-    } else
-        ASSERT_NOT_REACHED();
-}
-
-/* The app's setitimer (or alarm) has just set the kernel's timer to the app's new
- * values, replacing whatever we had set: record that, and if we have a timer of our
- * own of this type, set the kernel to the sooner of the two.  Caller should hold
- * the lock.
- */
-static void
-itimer_app_installed(dcontext_t *dcontext, thread_sig_info_t *info, int which)
-{
-    (*info->itimer)[which].actual = (*info->itimer)[which].app;
-    if ((*info->itimer)[which].dr.value > 0 || (*info->itimer)[which].dr.interval > 0) {
-        (*info->itimer)[which].actual.value = 0;
-        itimer_new_settings(dcontext, which, true /*app*/);
+        usec_to_timeval(left, &cur_timer->it_value);
     }
 }
 
-/* handle app itimer syscalls */
-/* handle_pre_alarm also calls this function and passes NULL as prev_timer */
-void
-handle_pre_setitimer(dcontext_t *dcontext, int which, const struct itimerval *new_timer,
-                     struct itimerval *prev_timer)
+/* Install a captured application request and return a DR-local old value.  The
+ * kernel validates the timevals before changing anything.  Passing only local
+ * buffers separates installation failure from an eventual app copyout EFAULT.
+ */
+static int
+set_app_itimer(dcontext_t *dcontext, int which, struct itimerval *val,
+               struct itimerval *old)
 {
-    if (new_timer == NULL || which < 0 || which >= NUM_ITIMERS)
-        return;
+    if (which < 0 || which >= NUM_ITIMERS)
+        return -EINVAL;
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    ASSERT(info != NULL && info->itimer != NULL);
-    struct itimerval val;
-    if (d_r_safe_read(new_timer, sizeof(val), &val)) {
-        if (info->shared_itimer)
-            acquire_recursive_lock(&(*info->itimer)[which].lock);
-        /* With a timer of our own, the syscall replaces the kernel's timer while it
-         * may be counting down for us: charge the time it has run to both timers
-         * first, so ours keeps its schedule when itimer_app_installed() re-merges
-         * it rather than restarting its full value from now.
+    kernel_sigset_t prior_mask;
+    itimer_lock(info, which, &prior_mask);
+    int res = setitimer_syscall(which, val, old);
+    if (res == SUCCESS) {
+        /* The syscall's old value is sampled at replacement, not at an earlier
+         * getitimer. Charge that elapsed time before merging our pending timer.
          */
+        uint64 left = timeval_to_usec(&old->it_value);
+        report_app_itimer(info, which, &(*info->itimer)[which].app, old);
         if (((*info->itimer)[which].dr.value > 0 ||
              (*info->itimer)[which].dr.interval > 0) &&
-            (*info->itimer)[which].actual.value > 0) {
-            struct itimerval now;
-            if (getitimer_syscall(which, &now) == SUCCESS) {
-                uint64 left = timeval_to_usec(&now.it_value);
-                if (left > 0 && left <= (*info->itimer)[which].actual.value) {
-                    itimer_charge_elapsed(info, which,
-                                          (*info->itimer)[which].actual.value - left);
-                    (*info->itimer)[which].actual.value = left;
-                }
-            }
+            left > 0 && left <= (*info->itimer)[which].actual.value) {
+            itimer_charge_elapsed(info, which,
+                                  (*info->itimer)[which].actual.value - left);
         }
-        /* Save a copy in case the syscall fails, and to report the prior timer.
-         * The syscall itself sets the kernel's timer to the app's values:
-         * handle_post_setitimer() accounts for that.
-         */
-        (*info->itimer)[which].app_saved = (*info->itimer)[which].app;
-        (*info->itimer)[which].app.interval = timeval_to_usec(&val.it_interval);
-        (*info->itimer)[which].app.value = timeval_to_usec(&val.it_value);
-        LOG(THREAD, LOG_ASYNCH, 2,
-            "app setitimer type=%d interval=" SZFMT " value=" SZFMT "\n", which,
-            (*info->itimer)[which].app.interval, (*info->itimer)[which].app.value);
-        if (info->shared_itimer)
-            release_recursive_lock(&(*info->itimer)[which].lock);
-    }
-}
-
-void
-handle_post_setitimer(dcontext_t *dcontext, bool success, int which,
-                      const struct itimerval *new_timer, struct itimerval *prev_timer)
-{
-    if (new_timer == NULL || which < 0 || which >= NUM_ITIMERS) {
-        ASSERT(new_timer == NULL || !success);
-        return;
-    }
-    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    ASSERT(info != NULL && info->itimer != NULL);
-    ASSERT(which >= 0 && which < NUM_ITIMERS);
-    if (info->shared_itimer)
-        acquire_recursive_lock(&(*info->itimer)[which].lock);
-    if (!success) {
-        /* restore saved pre-syscall settings: the kernel's timer is unchanged */
-        (*info->itimer)[which].app = (*info->itimer)[which].app_saved;
-    } else {
-        /* The kernel reported the prior actual timer: report the app's. */
-        if (prev_timer != NULL) {
-            report_app_itimer(info, which, &(*info->itimer)[which].app_saved, prev_timer);
+        (*info->itimer)[which].app.interval = timeval_to_usec(&val->it_interval);
+        (*info->itimer)[which].app.value = timeval_to_usec(&val->it_value);
+#ifdef LINUX
+        /* Linux clears REAL's interval when disarming; CPU timers retain it. */
+        if (which == ITIMER_REAL && (*info->itimer)[which].app.value == 0)
+            (*info->itimer)[which].app.interval = 0;
+#endif
+        (*info->itimer)[which].actual = (*info->itimer)[which].app;
+        if ((*info->itimer)[which].dr.value > 0 ||
+            (*info->itimer)[which].dr.interval > 0) {
+            (*info->itimer)[which].actual.value = 0;
+            itimer_new_settings(dcontext, which, true /*app*/);
         }
-        itimer_app_installed(dcontext, info, which);
     }
-    if (info->shared_itimer)
-        release_recursive_lock(&(*info->itimer)[which].lock);
+    itimer_unlock(info, which, &prior_mask);
+    return res;
 }
 
-void
-handle_post_getitimer(dcontext_t *dcontext, bool success, int which,
-                      struct itimerval *cur_timer)
+/* Return a kernel-style result. These operations complete inside pre_system_call:
+ * no timer lock, saved rollback state, or substituted arguments cross cache entry.
+ */
+int
+handle_setitimer(dcontext_t *dcontext, int which, const struct itimerval *new_timer,
+                 struct itimerval *prev_timer)
 {
+    struct itimerval val, old;
+    if (new_timer == NULL)
+        memset(&val, 0, sizeof(val));
+    else if (!d_r_safe_read(new_timer, sizeof(val), &val))
+        return -EFAULT; /* Input copying precedes even invalid-which rejection. */
+    int res = set_app_itimer(dcontext, which, &val, &old);
+    if (res == SUCCESS && prev_timer != NULL &&
+        !safe_write_ex(prev_timer, sizeof(old), &old, NULL))
+        return -EFAULT; /* The new timer remains installed, just as in Linux. */
+    return res;
+}
+
+int
+handle_getitimer(dcontext_t *dcontext, int which, struct itimerval *cur_timer)
+{
+    if (which < 0 || which >= NUM_ITIMERS)
+        return -EINVAL;
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    ASSERT(info != NULL && info->itimer != NULL);
-    if (success) {
-        /* write succeeded for kernel but we're user and can have races */
-        ASSERT(which >= 0 && which < NUM_ITIMERS);
-        ASSERT(cur_timer != NULL);
-        if (info->shared_itimer)
-            acquire_recursive_lock(&(*info->itimer)[which].lock);
-        report_app_itimer(info, which, &(*info->itimer)[which].app, cur_timer);
-        if (info->shared_itimer)
-            release_recursive_lock(&(*info->itimer)[which].lock);
-    }
-}
-
-/* handle app alarm syscall */
-/* alarm uses the same itimer and could be defined in terms of setitimer */
-void
-handle_pre_alarm(dcontext_t *dcontext, unsigned int sec)
-{
     struct itimerval val;
-    val.it_interval.tv_usec = 0;
-    val.it_interval.tv_sec = 0;
-    val.it_value.tv_usec = 0;
-    val.it_value.tv_sec = sec;
-    handle_pre_setitimer(dcontext, ITIMER_REAL, &val, NULL);
+    kernel_sigset_t prior_mask;
+    itimer_lock(info, which, &prior_mask);
+    int res = getitimer_syscall(which, &val);
+    if (res == SUCCESS)
+        report_app_itimer(info, which, &(*info->itimer)[which].app, &val);
+    itimer_unlock(info, which, &prior_mask);
+    if (res == SUCCESS && !safe_write_ex(cur_timer, sizeof(val), &val, NULL))
+        return -EFAULT;
+    return res;
 }
 
-void
-handle_post_alarm(dcontext_t *dcontext, bool success, unsigned int sec)
+#if defined(LINUX) && defined(X86)
+unsigned int
+handle_alarm_syscall(dcontext_t *dcontext, unsigned int sec)
 {
-    /* alarm is always successful */
-    ASSERT(success);
-    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    ASSERT(info != NULL && info->itimer != NULL);
-    if (info->shared_itimer)
-        acquire_recursive_lock(&(*info->itimer)[ITIMER_REAL].lock);
-    itimer_app_installed(dcontext, info, ITIMER_REAL);
-    if (info->shared_itimer)
-        release_recursive_lock(&(*info->itimer)[ITIMER_REAL].lock);
+    struct itimerval val, old;
+#    ifndef X64
+    if (sec > INT_MAX)
+        sec = INT_MAX;
+#    endif
+    memset(&val, 0, sizeof(val));
+    val.it_value.tv_sec = sec;
+    int res = set_app_itimer(dcontext, ITIMER_REAL, &val, &old);
+    ASSERT(res == SUCCESS);
+    if (res != SUCCESS)
+        return 0;
+    /* Match Linux alarm_setitimer's rounding, including a subsecond timer. */
+    if ((old.it_value.tv_sec == 0 && old.it_value.tv_usec != 0) ||
+        old.it_value.tv_usec >= 500000)
+        old.it_value.tv_sec++;
+    return (unsigned int)old.it_value.tv_sec;
 }
+#endif
 
 /***************************************************************************
  * Internal DR communication
