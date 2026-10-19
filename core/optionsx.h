@@ -761,12 +761,9 @@ OPTION_DEFAULT(bool, dup_stderr_on_close, true,
 OPTION_DEFAULT(bool, dup_stdin_on_close, true,
                "Duplicate stdin for DynamoRIO "
                "or client usage if app tries to close it.")
-/* Clients using drsyms can easily load dozens of files (i#879).
- * No downside to raising since we'll let the app have ours if it
- * runs out.
- */
+/* Clients using drsyms can easily load dozens of files (i#879). */
 OPTION_DEFAULT(uint, steal_fds, 96,
-               "number of fds to steal from the app outside the app's reach")
+               "preferred high fd range size for DR within the configured soft limit")
 OPTION_DEFAULT(bool, fail_on_stolen_fds, true,
                "return failure on app operations on fds preserved for DR's usage")
 

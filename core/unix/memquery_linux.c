@@ -45,6 +45,7 @@
 #include "os_private.h"
 #include "module_private.h"
 #include <sys/mman.h>
+#include <fcntl.h>
 
 #ifndef LINUX
 #    error Linux-only
@@ -163,8 +164,15 @@ memquery_iterator_start(memquery_iter_t *iter, app_pc start, bool may_alloc)
      */
     snprintf(maps_name, BUFFER_SIZE_ELEMENTS(maps_name), "/proc/%d/maps",
              d_r_get_thread_id());
-    mi->maps = os_open(maps_name, OS_OPEN_READ);
-    ASSERT(mi->maps != INVALID_FILE);
+    mi->maps = open_syscall(maps_name, O_RDONLY, 0);
+    if (mi->maps < 0) {
+        /* An empty map would corrupt memory bookkeeping.  This resource is
+         * mandatory, including after fork: report failure instead of asserting
+         * or continuing with an invalid iterator.
+         */
+        REPORT_FATAL_ERROR_AND_EXIT(FAILED_TO_OPEN_MAPS, 4, get_application_name(),
+                                    get_application_pid(), maps_name, -mi->maps);
+    }
     mi->buf[BUFSIZE - 1] = '\0'; /* permanently */
 
     mi->newline = NULL;

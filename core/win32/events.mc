@@ -724,4 +724,12 @@ Language=English
 Application %1!s! (%2!s!). Standalone mode is in progress: cannot switch to full mode.
 .
 
+MessageId =
+Severity = Error
+Facility = DRCore
+SymbolicName = MSG_FAILED_TO_OPEN_MAPS
+Language=English
+Application %1!s! (%2!s!). Unable to open required memory map %3!s!: error %4!d!.
+.
+
 ;// ADD NEW MESSAGES HERE

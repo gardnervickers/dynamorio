@@ -345,134 +345,8 @@ DR_API file_t our_stdout = STDOUT_FILENO;
 DR_API file_t our_stderr = STDERR_FILENO;
 DR_API file_t our_stdin = STDIN_FILENO;
 
-/* we steal fds from the app */
-static rlimit64_t app_rlimit_nofile; /* cur rlimit set by app */
+/* Preferred starting point for private descriptor duplication; not an app limit. */
 static int min_dr_fd;
-/* The kernel's RLIMIT_NOFILE hard limit at init, which is also our soft limit. */
-static uint64 kernel_rlimit_nofile_max;
-
-/* Whether we stole fds: then the app's RLIMIT_NOFILE is app_rlimit_nofile, which
- * we emulate, and the kernel's limits are higher.
- */
-static bool
-app_rlimit_nofile_emulated(void)
-{
-    return DYNAMO_OPTION(steal_fds) > 0 && min_dr_fd > 0;
-}
-
-/* Whether the syscall can give the app a new fd (see os_enforce_app_fd_limit()). */
-static bool
-sysnum_creates_fd(int sysnum)
-{
-    switch (sysnum) {
-#ifdef SYS_openat
-    case SYS_openat:
-#endif
-#ifdef SYS_openat2
-    case SYS_openat2:
-#endif
-#ifdef SYS_open
-    case SYS_open:
-#endif
-#ifdef SYS_creat
-    case SYS_creat:
-#endif
-#ifdef SYS_dup
-    case SYS_dup:
-#endif
-#ifdef SYS_accept
-    case SYS_accept:
-#endif
-#ifdef SYS_accept4
-    case SYS_accept4:
-#endif
-#ifdef SYS_socket
-    case SYS_socket:
-#endif
-#ifdef SYS_eventfd
-    case SYS_eventfd:
-#endif
-#ifdef SYS_eventfd2
-    case SYS_eventfd2:
-#endif
-#ifdef SYS_epoll_create
-    case SYS_epoll_create:
-#endif
-#ifdef SYS_epoll_create1
-    case SYS_epoll_create1:
-#endif
-#ifdef SYS_signalfd
-    case SYS_signalfd:
-#endif
-#ifdef SYS_signalfd4
-    case SYS_signalfd4:
-#endif
-#ifdef SYS_timerfd_create
-    case SYS_timerfd_create:
-#endif
-#ifdef SYS_inotify_init
-    case SYS_inotify_init:
-#endif
-#ifdef SYS_inotify_init1
-    case SYS_inotify_init1:
-#endif
-#ifdef SYS_fanotify_init
-    case SYS_fanotify_init:
-#endif
-#ifdef SYS_memfd_create
-    case SYS_memfd_create:
-#endif
-#ifdef SYS_memfd_secret
-    case SYS_memfd_secret:
-#endif
-#ifdef SYS_userfaultfd
-    case SYS_userfaultfd:
-#endif
-#ifdef SYS_perf_event_open
-    case SYS_perf_event_open:
-#endif
-#ifdef SYS_pidfd_open
-    case SYS_pidfd_open:
-#endif
-#ifdef SYS_pidfd_getfd
-    case SYS_pidfd_getfd:
-#endif
-#ifdef SYS_open_by_handle_at
-    case SYS_open_by_handle_at:
-#endif
-#ifdef SYS_io_uring_setup
-    case SYS_io_uring_setup:
-#endif
-#ifdef SYS_fsopen
-    case SYS_fsopen:
-#endif
-#ifdef SYS_fsmount
-    case SYS_fsmount:
-#endif
-#ifdef SYS_fspick
-    case SYS_fspick:
-#endif
-#ifdef SYS_open_tree
-    case SYS_open_tree:
-#endif
-#ifdef SYS_landlock_create_ruleset
-    case SYS_landlock_create_ruleset:
-#endif
-#ifdef SYS_mq_open
-    case SYS_mq_open:
-#endif
-#ifdef SYS_socketpair
-    case SYS_socketpair:
-#endif
-#ifdef SYS_pipe
-    case SYS_pipe:
-#endif
-    case SYS_pipe2:
-    case SYS_fcntl: /* F_DUPFD */
-        return true;
-    default: return false;
-    }
-}
 
 /* we store all DR files so we can prevent the app from changing them,
  * and so we can close them in a child of fork.
@@ -1197,44 +1071,18 @@ d_r_os_init(void)
 void
 os_file_init(void)
 {
-    /* We steal fds from the app for better transparency.  We lower the max file
-     * descriptor limit as viewed by the app, and block SYS_dup{2,3} and
-     * SYS_fcntl(F_DUPFD*) from creating a file explicitly in our space.  The
-     * app's soft limit, below our space, is emulated: a syscall that gives the
-     * app an fd at or above it fails with EMFILE (os_enforce_app_fd_limit()), and
-     * an exec'd image inherits it (os_rlimit_nofile_execve()).  We don't bother
-     * watching all syscalls that take in fds from affecting our fds.
+    /* Prefer high descriptors within the configured soft limit.  These are ordinary
+     * kernel resources: never raise the limit or hide it from the application.
+     * If relocation fails, os_open_protected retains the original descriptor.
      */
     if (DYNAMO_OPTION(steal_fds) > 0) {
         struct rlimit rlimit_nofile;
-        /* SYS_getrlimit uses an old 32-bit-field struct so we want SYS_ugetrlimit */
         if (dynamorio_syscall(
                 IF_MACOS_ELSE(SYS_getrlimit, IF_X64_ELSE(SYS_getrlimit, SYS_ugetrlimit)),
-                2, RLIMIT_NOFILE, &rlimit_nofile) != 0) {
-            /* linux default is 1024 */
-            SYSLOG_INTERNAL_WARNING("getrlimit RLIMIT_NOFILE failed"); /* can't LOG yet */
-            rlimit_nofile.rlim_cur = 1024;
-            rlimit_nofile.rlim_max = 1024;
+                2, RLIMIT_NOFILE, &rlimit_nofile) == 0 &&
+            rlimit_nofile.rlim_cur > DYNAMO_OPTION(steal_fds)) {
+            min_dr_fd = MIN(rlimit_nofile.rlim_cur, INT_MAX) - DYNAMO_OPTION(steal_fds);
         }
-        /* pretend the limit is lower and reserve the top spots for us.
-         * The kernel's soft limit must be raised to the hard limit for our
-         * F_DUPFD into the top spots; the app keeps its own soft limit.
-         */
-        if (rlimit_nofile.rlim_max > DYNAMO_OPTION(steal_fds)) {
-            int res;
-            min_dr_fd = rlimit_nofile.rlim_max - DYNAMO_OPTION(steal_fds);
-            kernel_rlimit_nofile_max = rlimit_nofile.rlim_max;
-            app_rlimit_nofile.rlim_max = min_dr_fd;
-            app_rlimit_nofile.rlim_cur = MIN(rlimit_nofile.rlim_cur, (rlim_t)min_dr_fd);
-
-            rlimit_nofile.rlim_cur = rlimit_nofile.rlim_max;
-            res = dynamorio_syscall(SYS_setrlimit, 2, RLIMIT_NOFILE, &rlimit_nofile);
-            if (res != 0) {
-                SYSLOG_INTERNAL_WARNING("unable to raise RLIMIT_NOFILE soft limit: %d",
-                                        res);
-            }
-        } else /* not fatal: we'll just end up using fds in app space */
-            SYSLOG_INTERNAL_WARNING("unable to reserve fds");
     }
 
     /* we don't have heap set up yet so we init fd_table in os_init */
@@ -4773,12 +4621,6 @@ fd_is_dr_owned(file_t fd)
     return (flags != 0);
 }
 
-static bool
-fd_is_in_private_range(file_t fd)
-{
-    return (DYNAMO_OPTION(steal_fds) > 0 && min_dr_fd > 0 && fd >= min_dr_fd);
-}
-
 file_t
 os_open_protected(const char *fname, int os_open_flags)
 {
@@ -5517,9 +5359,6 @@ os_normalized_sysnum(int num_raw, instr_t *gateway, dcontext_t *dcontext)
 static bool
 ignorable_system_call_normalized(int num)
 {
-    /* See os_enforce_app_fd_limit(). */
-    if (app_rlimit_nofile_emulated() && sysnum_creates_fd(num))
-        return false;
     switch (num) {
 #if defined(SYS_exit_group)
     case SYS_exit_group:
@@ -5625,16 +5464,6 @@ ignorable_system_call_normalized(int num)
     case SYS_fcntl_nocancel:
 #endif
     case SYS_fcntl:
-#if defined(X64) || !defined(ARM)
-    case SYS_getrlimit:
-#endif
-#if defined(LINUX) && !defined(X64)
-    case SYS_ugetrlimit:
-#endif
-    case SYS_setrlimit:
-#ifdef LINUX
-    case SYS_prlimit64:
-#endif
 #if defined(LINUX) && defined(X86)
     /* i#784: app may have behavior relying on SIGALRM */
     case SYS_alarm:
@@ -5975,23 +5804,6 @@ os_syscall_is_unbounded_wait(dcontext_t *dcontext)
 #    endif
     case SYS_ppoll: return sys_param(dcontext, 3) == 0 && sys_param(dcontext, 2) == 0;
     case SYS_pselect6: return dcontext->sys_param4 == 0 && sys_param(dcontext, 4) == 0;
-    /* Not ignorable while we emulate RLIMIT_NOFILE (see os_enforce_app_fd_limit()),
-     * and they can block indefinitely: accept, and opening a FIFO.
-     */
-#    ifdef SYS_accept
-    case SYS_accept:
-#    endif
-    case SYS_accept4:
-#    ifdef SYS_open
-    case SYS_open:
-#    endif
-#    ifdef SYS_openat2
-    case SYS_openat2:
-#    endif
-    case SYS_openat:
-    case SYS_open_by_handle_at:
-        /* Our pre-syscall handling for these only rewrites paths for -xarch_root. */
-        return IS_STRING_OPTION_EMPTY(xarch_root);
     default: return false;
     }
 }
@@ -6916,8 +6728,15 @@ handle_execve(dcontext_t *dcontext)
 #endif
 
     /* Issue 20: handle cross-architecture execve */
-    file = os_open(fname, OS_OPEN_READ);
-    if (file != INVALID_FILE) {
+    /* Inspection is required to follow exec. Resource exhaustion must not turn
+     * a successful exec into an uninstrumented child.
+     */
+    file = open_syscall(fname, O_RDONLY, 0);
+    if (file == -EMFILE || file == -ENFILE) {
+        mark_thread_execve(dcontext->thread_record, false);
+        return -file;
+    }
+    if (file >= 0) {
         if (!module_file_is_module64(file, &x64,
                                      NULL /*only care about primary==execve*/))
             expect_to_fail = true;
@@ -7234,102 +7053,6 @@ handle_close_range(dcontext_t *dcontext, uint first, uint last, uint flags)
 #endif
 
 /***************************************************************************/
-
-/* Natively, a syscall that would give the app a new fd at or above its RLIMIT_NOFILE
- * soft limit fails with EMFILE (the kernel allocates the lowest free fd below the
- * limit). We emulate that limit (see os_file_init()), so we let such a syscall run
- * under the kernel's higher limit and undo it here. For accept() the connection is
- * lost rather than left queued; fds passed with SCM_RIGHTS are not checked.
- * Returns whether the syscall now fails.
- */
-static bool
-os_enforce_app_fd_limit(dcontext_t *dcontext, int sysnum, ptr_int_t result)
-{
-    file_t fds[2] = { (file_t)result, -1 };
-    if (!sysnum_creates_fd(sysnum))
-        return false;
-    switch (sysnum) {
-#ifdef LINUX
-#    ifdef SYS_signalfd
-    case SYS_signalfd:
-#    endif
-    case SYS_signalfd4:
-        /* Only fd == -1 allocates. Updating an existing descriptor is valid even
-         * after the app lowers its soft limit below that descriptor: do not close
-         * it or replace the successful mask update with EMFILE.
-         */
-        if ((int)dcontext->sys_param0 != -1)
-            return false;
-        break;
-#endif
-    case SYS_fcntl:
-        if (dcontext->sys_param1 != F_DUPFD && dcontext->sys_param1 != F_DUPFD_CLOEXEC)
-            return false;
-        break;
-#ifdef SYS_pipe
-    case SYS_pipe:
-#endif
-    case SYS_pipe2:
-        /* The fd array, saved pre-syscall. */
-        if (!d_r_safe_read((void *)dcontext->sys_param0, sizeof(fds), fds))
-            return false;
-        break;
-    case SYS_socketpair:
-        if (!d_r_safe_read((void *)sys_param(dcontext, 3), sizeof(fds), fds))
-            return false;
-        break;
-    default: break;
-    }
-    uint64 limit = app_rlimit_nofile.rlim_cur;
-    if (!((fds[0] >= 0 && (uint64)fds[0] >= limit) ||
-          (fds[1] >= 0 && (uint64)fds[1] >= limit)))
-        return false;
-    LOG(THREAD, LOG_SYSCALLS, 2, "syscall %d: fd %d/%d over the app's limit %d\n", sysnum,
-        fds[0], fds[1], (int)limit);
-    for (int i = 0; i < 2; i++) {
-        if (fds[i] >= 0) {
-#ifdef LINUX
-            signal_handle_close(dcontext, fds[i]);
-#endif
-            close_syscall(fds[i]);
-        }
-    }
-    set_failure_return_val(dcontext, EMFILE);
-    DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-    return true;
-}
-
-/* An exec'd image inherits the app's RLIMIT_NOFILE: give the kernel the app's limits
- * for the execve, leaving the new image's DR -steal_fds above the app's hard
- * limit, as we found them. Undone by os_rlimit_nofile_execve_failed().
- */
-static void
-os_rlimit_nofile_execve(void)
-{
-    if (!app_rlimit_nofile_emulated())
-        return;
-    struct rlimit rlim;
-    rlim.rlim_cur = app_rlimit_nofile.rlim_cur;
-    rlim.rlim_max = MIN(app_rlimit_nofile.rlim_max + DYNAMO_OPTION(steal_fds),
-                        kernel_rlimit_nofile_max);
-    if (dynamorio_syscall(SYS_setrlimit, 2, RLIMIT_NOFILE, &rlim) != 0)
-        SYSLOG_INTERNAL_WARNING_ONCE("unable to pass RLIMIT_NOFILE to execve");
-}
-
-static void
-os_rlimit_nofile_execve_failed(void)
-{
-    if (!app_rlimit_nofile_emulated())
-        return;
-    /* Lowering the hard limit is permanent without CAP_SYS_RESOURCE, but it only
-     * changed if the app had lowered its own.
-     */
-    struct rlimit rlim;
-    if (dynamorio_syscall(SYS_getrlimit, 2, RLIMIT_NOFILE, &rlim) != 0)
-        return;
-    rlim.rlim_cur = rlim.rlim_max;
-    dynamorio_syscall(SYS_setrlimit, 2, RLIMIT_NOFILE, &rlim);
-}
 
 /* Used to obtain the pc of the syscall instr itself when the dcontext dc
  * is currently in a syscall handler.
@@ -8527,7 +8250,6 @@ pre_system_call(dcontext_t *dcontext)
             set_failure_return_val(dcontext, ret);
         } else {
             signal_exec_mask(dcontext);
-            os_rlimit_nofile_execve();
         }
         break;
     }
@@ -9103,18 +8825,7 @@ pre_system_call(dcontext_t *dcontext)
 #    endif
     {
         file_t newfd = (file_t)sys_param(dcontext, 1);
-        if (app_rlimit_nofile_emulated() && newfd >= 0 &&
-            (uint64)newfd >= app_rlimit_nofile.rlim_cur
-#    ifdef SYS_dup2
-            /* dup2(fd, fd) only checks that fd is open. */
-            && !(dcontext->sys_num == SYS_dup2 && (file_t)sys_param(dcontext, 0) == newfd)
-#    endif
-        ) {
-            /* The kernel's check against the app's soft limit. */
-            set_failure_return_val(dcontext, EBADF);
-            DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            execute_syscall = false;
-        } else if (fd_is_dr_owned(newfd) || fd_is_in_private_range(newfd)) {
+        if (fd_is_dr_owned(newfd)) {
             SYSLOG_INTERNAL_WARNING_ONCE("app trying to dup-close DR file(s)");
             LOG(THREAD, LOG_TOP | LOG_SYSCALLS, 1,
                 "WARNING: app trying to dup2/dup3 to %d.  Disallowing.\n", newfd);
@@ -9134,25 +8845,8 @@ pre_system_call(dcontext_t *dcontext)
 #endif
     case SYS_fcntl: {
         int cmd = (int)sys_param(dcontext, 1);
-        long arg = (long)sys_param(dcontext, 2);
-        /* we only check for asking for min in private space: not min below
-         * but actual will be above (see notes in os_file_init())
-         */
-        if ((cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) &&
-            (fd_is_in_private_range(arg) ||
-             /* The kernel's check against the app's soft limit. */
-             (app_rlimit_nofile_emulated() && arg >= 0 &&
-              (uint64)arg >= app_rlimit_nofile.rlim_cur))) {
-            SYSLOG_INTERNAL_WARNING_ONCE("app trying to open private fd(s)");
-            LOG(THREAD, LOG_TOP | LOG_SYSCALLS, 1,
-                "WARNING: app trying to dup to >= %d.  Disallowing.\n", arg);
-            set_failure_return_val(dcontext, EINVAL);
-            DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            execute_syscall = false;
-        } else {
-            dcontext->sys_param0 = sys_param(dcontext, 0);
-            dcontext->sys_param1 = cmd;
-        }
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = cmd;
         break;
     }
 
@@ -9162,123 +8856,6 @@ pre_system_call(dcontext_t *dcontext)
         dcontext->sys_param0 = sys_param(dcontext, 0);
         dcontext->sys_param1 = sys_param(dcontext, 1);
         dcontext->sys_param2 = sys_param(dcontext, 2);
-        break;
-#endif
-
-#ifdef SYS_pipe
-    case SYS_pipe:
-#endif
-    case SYS_pipe2:
-        /* The fd array for os_enforce_app_fd_limit(). */
-        dcontext->sys_param0 = sys_param(dcontext, 0);
-        break;
-
-#if defined(X64) || !defined(ARM) || defined(MACOS)
-    case SYS_getrlimit:
-#endif
-#if defined(LINUX) && !defined(X64)
-    case SYS_ugetrlimit:
-#endif
-        /* save for post */
-        dcontext->sys_param0 = sys_param(dcontext, 0); /* resource */
-        dcontext->sys_param1 = sys_param(dcontext, 1); /* rlimit */
-        break;
-
-    case SYS_setrlimit: {
-        int resource = (int)sys_param(dcontext, 0);
-        if (resource == RLIMIT_NOFILE && app_rlimit_nofile_emulated()) {
-#if !defined(ARM) && !defined(X64) && !defined(MACOS)
-            struct compat_rlimit rlim;
-#else
-            struct rlimit rlim;
-#endif
-            if (!d_r_safe_read((void *)sys_param(dcontext, 1), sizeof(rlim), &rlim)) {
-                LOG(THREAD, LOG_SYSCALLS, 2, "\treturning EFAULT to app for prlimit64\n");
-                set_failure_return_val(dcontext, EFAULT);
-                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            } else if (rlim.rlim_cur > rlim.rlim_max) {
-                LOG(THREAD, LOG_SYSCALLS, 2, "\treturning EINVAL for prlimit64\n");
-                set_failure_return_val(dcontext, EINVAL);
-                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            } else if (rlim.rlim_max <= min_dr_fd &&
-                       /* Can't raise hard unless have CAP_SYS_RESOURCE capability.
-                        * XXX i#2980: should query for that capability.
-                        */
-                       rlim.rlim_max <= app_rlimit_nofile.rlim_max) {
-                /* if the new rlimit is lower, pretend succeed */
-                app_rlimit_nofile.rlim_cur = rlim.rlim_cur;
-                app_rlimit_nofile.rlim_max = rlim.rlim_max;
-                set_success_return_val(dcontext, 0);
-            } else {
-                LOG(THREAD, LOG_SYSCALLS, 2, "\treturning EPERM to app for setrlimit\n");
-                /* don't let app raise limits as that would mess up our fd space */
-                set_failure_return_val(dcontext, EPERM);
-                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            }
-            execute_syscall = false;
-        }
-        break;
-    }
-
-#ifdef LINUX
-    case SYS_prlimit64:
-        /* save for post */
-        dcontext->sys_param0 = sys_param(dcontext, 0); /* pid */
-        dcontext->sys_param1 = sys_param(dcontext, 1); /* resource */
-        dcontext->sys_param2 = sys_param(dcontext, 2); /* new rlimit */
-        dcontext->sys_param3 = sys_param(dcontext, 3); /* old rlimit */
-        if (/* XXX: how do we handle the case of setting rlimit.nofile on another
-             * process that is running with DynamoRIO?
-             */
-            /* XXX: CLONE_FILES allows different processes to share the same file
-             * descriptor table, and different threads of the same process have
-             * separate file descriptor tables.  POSIX specifies that rlimits are
-             * per-process, not per-thread, and Linux follows suit, so the threads
-             * with different descriptors will not matter, and the pids sharing
-             * descriptors turns into the hard-to-solve IPC problem.
-             */
-            (dcontext->sys_param0 == 0 || dcontext->sys_param0 == get_process_id()) &&
-            dcontext->sys_param1 == RLIMIT_NOFILE &&
-            dcontext->sys_param2 != (reg_t)NULL && app_rlimit_nofile_emulated()) {
-            rlimit64_t rlim;
-            if (!d_r_safe_read((void *)(dcontext->sys_param2), sizeof(rlim), &rlim)) {
-                LOG(THREAD, LOG_SYSCALLS, 2, "\treturning EFAULT to app for prlimit64\n");
-                set_failure_return_val(dcontext, EFAULT);
-                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-            } else {
-                LOG(THREAD, LOG_SYSCALLS, 2,
-                    "syscall: prlimit64 soft=" INT64_FORMAT_STRING
-                    " hard=" INT64_FORMAT_STRING " vs DR %d\n",
-                    rlim.rlim_cur, rlim.rlim_max, min_dr_fd);
-                if (rlim.rlim_cur > rlim.rlim_max) {
-                    LOG(THREAD, LOG_SYSCALLS, 2, "\treturning EINVAL for prlimit64\n");
-                    set_failure_return_val(dcontext, EINVAL);
-                    DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-                } else if (rlim.rlim_max <= min_dr_fd &&
-                           /* Can't raise hard unless have CAP_SYS_RESOURCE capability.
-                            * XXX i#2980: should query for that capability.
-                            */
-                           rlim.rlim_max <= app_rlimit_nofile.rlim_max) {
-                    /* if the new rlimit is lower, pretend succeed */
-                    rlimit64_t old = app_rlimit_nofile;
-                    app_rlimit_nofile.rlim_cur = rlim.rlim_cur;
-                    app_rlimit_nofile.rlim_max = rlim.rlim_max;
-                    set_success_return_val(dcontext, 0);
-                    /* set old rlimit if necessary */
-                    if (dcontext->sys_param3 != (reg_t)NULL) {
-                        safe_write_ex((void *)(dcontext->sys_param3), sizeof(old), &old,
-                                      NULL);
-                    }
-                } else {
-                    /* don't let app raise limits as that would mess up our fd space */
-                    LOG(THREAD, LOG_SYSCALLS, 2,
-                        "\treturning EPERM to app for prlimit64\n");
-                    set_failure_return_val(dcontext, EPERM);
-                    DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
-                }
-            }
-            execute_syscall = false;
-        }
         break;
 #endif
 
@@ -9946,12 +9523,6 @@ post_system_call(dcontext_t *dcontext)
     LOG(THREAD, LOG_SYSCALLS, 2, "post syscall: sysnum=" PFX ", result=" PFX " (%d)\n",
         sysnum, MCXT_SYSCALL_RES(mc), (int)MCXT_SYSCALL_RES(mc));
 
-    if (success && app_rlimit_nofile_emulated() &&
-        os_enforce_app_fd_limit(dcontext, sysnum, result)) {
-        success = false;
-        result = (ptr_int_t)MCXT_SYSCALL_RES(mc);
-    }
-
     switch (sysnum) {
 
         /****************************************************************************/
@@ -10350,7 +9921,6 @@ post_system_call(dcontext_t *dcontext)
         ASSERT(result < 0);
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: execve failed\n");
         handle_execve_post(dcontext);
-        os_rlimit_nofile_execve_failed();
         signal_sync_kernel_mask(dcontext);
         /* Don't 'break' as we have an ASSERT(success) just below
          * the switch(). */
@@ -10533,47 +10103,6 @@ post_system_call(dcontext_t *dcontext)
         break;
 #endif
     }
-
-    case IF_MACOS_ELSE(SYS_getrlimit, IF_X64_ELSE(SYS_getrlimit, SYS_ugetrlimit)): {
-        int resource = dcontext->sys_param0;
-        if (success && resource == RLIMIT_NOFILE && app_rlimit_nofile_emulated()) {
-            /* we stole some space: hide it from app */
-            struct rlimit *rlim = (struct rlimit *)dcontext->sys_param1;
-            safe_write_ex(&rlim->rlim_cur, sizeof(rlim->rlim_cur),
-                          &app_rlimit_nofile.rlim_cur, NULL);
-            safe_write_ex(&rlim->rlim_max, sizeof(rlim->rlim_max),
-                          &app_rlimit_nofile.rlim_max, NULL);
-        }
-        break;
-    }
-#if !defined(ARM) && !defined(X64) && !defined(MACOS)
-    /* Old struct w/ smaller fields */
-    case SYS_getrlimit: {
-        int resource = dcontext->sys_param0;
-        if (success && resource == RLIMIT_NOFILE && app_rlimit_nofile_emulated()) {
-            struct compat_rlimit *rlim = (struct compat_rlimit *)dcontext->sys_param1;
-            safe_write_ex(&rlim->rlim_cur, sizeof(rlim->rlim_cur),
-                          &app_rlimit_nofile.rlim_cur, NULL);
-            safe_write_ex(&rlim->rlim_max, sizeof(rlim->rlim_max),
-                          &app_rlimit_nofile.rlim_max, NULL);
-        }
-        break;
-    }
-#endif
-
-#ifdef LINUX
-    case SYS_prlimit64: {
-        int resource = dcontext->sys_param1;
-        rlimit64_t *rlim = (rlimit64_t *)dcontext->sys_param3;
-        if (success && resource == RLIMIT_NOFILE && rlim != NULL &&
-            app_rlimit_nofile_emulated() &&
-            /* XXX: xref pid discussion in pre_system_call SYS_prlimit64 */
-            (dcontext->sys_param0 == 0 || dcontext->sys_param0 == get_process_id())) {
-            safe_write_ex(rlim, sizeof(*rlim), &app_rlimit_nofile, NULL);
-        }
-        break;
-    }
-#endif
 
 #ifdef LINUX
 #    ifdef SYS_readlink
