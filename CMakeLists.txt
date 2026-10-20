@@ -486,7 +486,7 @@ foreach (config ${CMAKE_BUILD_TYPE} ${CMAKE_CONFIGURATION_TYPES})
     set(${var} " ") # if "" defaults come back
   endforeach ()
 endforeach ()
-foreach (var CMAKE_C_FLAGS;CMAKE_CXX_FLAGS)
+foreach (var CMAKE_CXX_FLAGS)
   set(${var} " ") # if "" defaults come back
 endforeach ()
 
