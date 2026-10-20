@@ -7,6 +7,41 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int
+check_flagm_reserved_encodings(void *dc)
+{
+    static const struct {
+        uint32_t valid;
+        uint32_t reserved;
+        int opcode;
+    } cases[] = {
+        { 0xd500401f, 0xd5004f1f, OP_cfinv },
+        { 0xd500405f, 0xd5004f5f, OP_axflag },
+        { 0xd500403f, 0xd5004f3f, OP_xaflag },
+    };
+    int failures = 0;
+    byte *pc = (byte *)(uintptr_t)0x10000000;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        instr_t ins;
+        instr_init(dc, &ins);
+        byte *next = decode_from_copy(dc, (byte *)&cases[i].valid, pc, &ins);
+        int valid_ok = next == (byte *)&cases[i].valid + 4 &&
+            instr_get_opcode(&ins) == cases[i].opcode;
+        instr_reset(dc, &ins);
+        next = decode_from_copy(dc, (byte *)&cases[i].reserved, pc, &ins);
+        int reserved_ok = next == (byte *)&cases[i].reserved + 4 &&
+            instr_get_opcode(&ins) == OP_xx;
+        instr_free(dc, &ins);
+        if (!valid_ok || !reserved_ok) {
+            fprintf(stderr, "FlagM valid=%08x reserved=%08x valid-ok=%d reserved-ok=%d\n",
+                    cases[i].valid, cases[i].reserved, valid_ok, reserved_ok);
+            failures++;
+        }
+    }
+    printf("FlagM-reserved-encodings: %s\n", failures == 0 ? "PASS" : "FAIL");
+    return failures;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
@@ -60,5 +95,6 @@ int main(int argc, char **argv)
     free(line);
     fclose(f);
     if (count != 5079) { fprintf(stderr, "expected 5079 source rows, got %zu\n", count); return 1; }
+    failures += check_flagm_reserved_encodings(dc);
     return failures ? 1 : 0;
 }

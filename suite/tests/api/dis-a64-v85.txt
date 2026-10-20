@@ -33,7 +33,7 @@
 
 # Tests:
 # AXFLAG   (AXFLAG--flags)
-d5004f5f : axflag                                    : axflag
+d500405f : axflag                                    : axflag
 
 d503241f : bti #0                         : bti    $0x00
 d503245f : bti #1                         : bti    $0x01
@@ -852,5 +852,5 @@ d1b7f77a : subg x26, x27, #0x370, #0xd               : subg   %x27 $0x0370 $0x0d
 d1bfffff : subg sp, sp, #0x3f0, #0xf                 : subg   %sp $0x03f0 $0x0f -> %sp
 
 # XAFLAG   (XAFLAG--flags)
-d5004f3f : xaflag                                    : xaflag
+d500403f : xaflag                                    : xaflag
 

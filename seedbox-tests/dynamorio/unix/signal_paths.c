@@ -107,7 +107,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "signal_rng.h"
-static uint64_t code_lo,code_hi;
+static uint64_t code_lo, code_hi, udf_lo, udf_hi;
 static int g_instr_on;
 static int g_cleancall_all;
 static volatile uint64_t g_dyn_count;
@@ -158,7 +158,9 @@ event_insert(void *dc, void *tag, instrlist_t *bb, instr_t *inst, bool for_trace
     if (!instr_is_app(inst))
         return DR_EMIT_DEFAULT;
     uint64_t pc = (uint64_t)(uintptr_t)instr_get_app_pc(inst);
-    if (pc < code_lo || pc >= code_hi)
+    /* Exercise spills and clobbers at scenario instructions, including the
+     * out-of-line fault, without expanding runner/capture harness blocks. */
+    if ((pc < code_lo || pc >= code_hi) && (pc < udf_lo || pc >= udf_hi))
         return DR_EMIT_DEFAULT;
     /* Deterministic per pc, so translation re-creates identical code. */
     rng_t r = { g_instr_seed ^ (pc * 0x9e3779b97f4a7c15ULL) };
@@ -208,9 +210,11 @@ client_exit(void)
 DR_EXPORT void dr_client_main(client_id_t id,int argc,const char *argv[]) {
     (void)id;g_cleancall_all=argc>1 && !strcmp(argv[1],"all");
     module_data_t *app=dr_get_main_module();DR_ASSERT(app!=NULL);
-    code_lo=(uint64_t)(uintptr_t)dr_get_proc_address(app->handle,"a64ps_code_lo");
-    code_hi=(uint64_t)(uintptr_t)dr_get_proc_address(app->handle,"a64ps_code_hi");
-    dr_free_module_data(app);DR_ASSERT(code_lo && code_hi>code_lo);
+    code_lo=(uint64_t)(uintptr_t)dr_get_proc_address(app->handle,"a64ps_instr_lo");
+    code_hi=(uint64_t)(uintptr_t)dr_get_proc_address(app->handle,"a64ps_instr_hi");
+    udf_lo=(uint64_t)(uintptr_t)dr_get_proc_address(app->handle,"a64ps_udf");
+    udf_hi=(uint64_t)(uintptr_t)dr_get_proc_address(app->handle,"a64ps_udf_end");
+    dr_free_module_data(app);DR_ASSERT(code_lo && code_hi>code_lo && udf_lo && udf_hi>udf_lo);
     drreg_options_t ops={sizeof ops,3,true};
     DR_ASSERT(drmgr_init() && drreg_init(&ops)==DRREG_SUCCESS && drx_init());
     DR_ASSERT(drmgr_register_bb_instrumentation_event(NULL,event_insert,NULL));

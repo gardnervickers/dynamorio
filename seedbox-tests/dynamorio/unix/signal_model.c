@@ -310,6 +310,12 @@ __asm__(".text\n"
         /* Synchronous: UDF / guard-page load / BRK at a labelled pc.  The
          * continuations record which way the body left in out_cont (x17).
          */
+        /* Public-client instrumentation starts at the scenario bodies.  The
+         * runner and final-state capture are harness machinery with long
+         * straight-line blocks, not signal interruption targets.
+         */
+        ".global a64ps_instr_lo\n"
+        "a64ps_instr_lo:\n"
         "a64ps_body_udf:\n" PRELUDE
         /* Keep the heavily instrumented prelude out of the UDF block.  The
          * otherwise-unreachable second branch preserves every following
@@ -467,6 +473,8 @@ __asm__(".text\n"
         "  svc #0\n"
         "  str x0, [x28, #" SGS(O_RESULT) "]\n"
         "  b a64ps_next\n"
+        ".global a64ps_instr_hi\n"
+        "a64ps_instr_hi:\n"
         /* Called from a handler: tgkill(x0, x1, x2), then wait (at most x4
          * iterations) for *x3 to become nonzero.  Returns {*x3, x5}: a nested
          * handler sets x5 in this context.
@@ -498,6 +506,8 @@ __asm__(".text\n"
         "a64ps_udf:\n"
         "  .inst 0x00000051\n" /* udf #0x51 */
         "  b a64ps_next\n"
+        ".global a64ps_udf_end\n"
+        "a64ps_udf_end:\n"
         ".global a64ps_code_hi\n"
         "a64ps_code_hi:\n"
         ".section .data\n"
@@ -510,8 +520,9 @@ __asm__(".text\n"
         ".text\n");
 /* clang-format on */
 
-extern const char a64ps_code_lo[], a64ps_code_hi[], a64ps_udf[], a64ps_brk[],
-    a64ps_segv[], a64ps_next[], a64ps_cont1[], a64ps_cont2[], a64ps_self_after[],
+extern const char a64ps_code_lo[], a64ps_code_hi[], a64ps_instr_lo[],
+    a64ps_instr_hi[], a64ps_udf[], a64ps_udf_end[], a64ps_brk[], a64ps_segv[],
+    a64ps_next[], a64ps_cont1[], a64ps_cont2[], a64ps_self_after[],
     a64ps_spin[], a64ps_ispin[], a64ps_ispin_ret[], a64ps_ispin_end[], a64ps_tgt0[],
     a64ps_tgt1[], a64ps_tgt2[], a64ps_tgt3[], a64ps_mask_spin[], a64ps_alt_spin1[],
     a64ps_alt_spin2[], a64ps_rt_spin[], a64ps_pipe_svc[], a64ps_rw_after[],

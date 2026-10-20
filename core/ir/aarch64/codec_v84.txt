@@ -36,7 +36,7 @@
 
 # Instruction definitions:
 
-11010101000000000100^^^^00011111  rw  1023 FlagM    cfinv         :
+11010101000000000100000000011111  rw  1023 FlagM    cfinv         :
 1x011001010xxxxxxxxx00xxxxxxxxxx  n   1014 LRCPC2   ldapur  wx0_30 : mem9
 00011001010xxxxxxxxx00xxxxxxxxxx  n   1015 LRCPC2  ldapurb      w0 : mem9
 01011001010xxxxxxxxx00xxxxxxxxxx  n   1016 LRCPC2  ldapurh      w0 : mem9

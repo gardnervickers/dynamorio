@@ -33,7 +33,7 @@
 
 # Tests:
 # CFINV    (CFINV--flags)
-d5004f1f : cfinv                                     : cfinv
+d500401f : cfinv                                     : cfinv
 
 # LDAPUR    <Wt>, [<Xn|SP>{, #<simm>}]
 99500020 : ldapur w0, [x1, #-256]                    : ldapur -0x0100(%x1)[4byte] -> %w0
