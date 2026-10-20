@@ -30,6 +30,12 @@ configure_DynamoRIO_static(unix_lifecycle)
 target_link_options(unix_lifecycle PRIVATE -rdynamic)
 target_link_libraries(unix_lifecycle pthread dl rt)
 install(TARGETS unix_lifecycle RUNTIME DESTINATION bin)
+
+add_executable(unix_rseq_attach rseq_attach.c)
+set_target_properties(unix_rseq_attach PROPERTIES OUTPUT_NAME unix-rseq_attach)
+configure_DynamoRIO_static(unix_rseq_attach)
+install(TARGETS unix_rseq_attach RUNTIME DESTINATION bin)
+
 add_executable(unix_supervisor supervisor.c)
 set_target_properties(unix_supervisor PROPERTIES OUTPUT_NAME unix-supervisor)
 install(TARGETS unix_supervisor RUNTIME DESTINATION bin)

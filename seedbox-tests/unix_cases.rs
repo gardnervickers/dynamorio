@@ -338,6 +338,13 @@ fn real_public_attach_detach_with_live_handler_and_ordered_pipe() {
         .stdout
         .contains("12 transitions, 24 ordered operations, 12 live handlers"));
 }
+
+#[test]
+fn public_attach_supports_extended_rseq_registration_length() {
+    let attached = checked("rseq_attach", &[], Profile::Native, 0);
+    assert_eq!(attached.stdout, "OK rseq64 attach and detach\n");
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn source_aarch64_signal_frames_vectors_rewrite_and_deep_nesting() {
