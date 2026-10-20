@@ -655,16 +655,30 @@ static bool
 try_struct_rseq(void *try_addr)
 {
     static const int RSEQ_RARE_SIGNATURE = 42;
-    int res = dynamorio_syscall(SYS_rseq, 4, try_addr, sizeof(struct rseq),
+    /* The kernel requires the unregister length to match the registration
+     * length. glibc can register the extended area advertised by the kernel,
+     * while sizeof(struct rseq) remains the original 32 bytes. Probe the
+     * original and current extended lengths at each candidate TLS address.
+     */
+    static const uint lengths[] = { sizeof(struct rseq), 40, 64 };
+    int res = -EINVAL;
+    uint length = 0;
+    for (uint i = 0; i < BUFFER_SIZE_ELEMENTS(lengths); ++i) {
+        length = lengths[i];
+        res = dynamorio_syscall(SYS_rseq, 4, try_addr, length,
                                 RSEQ_FLAG_UNREGISTER, RSEQ_RARE_SIGNATURE);
-    LOG(GLOBAL, LOG_LOADER, 3, "Tried rseq @ " PFX " => %d\n", try_addr, res);
+        LOG(GLOBAL, LOG_LOADER, 3, "Tried rseq @ " PFX " len %u => %d\n", try_addr,
+            length, res);
+        if (res != -EINVAL)
+            break;
+    }
     if (res == -EINVAL) /* Our struct != registered struct. */
         return false;
     /* We expect -EPERM on a signature mismatch.  On the small chance the app
      * actually used 42 for its signature we'll have to re-register it.
      */
     if (res == 0) {
-        int res = dynamorio_syscall(SYS_rseq, 4, try_addr, sizeof(struct rseq), 0,
+        int res = dynamorio_syscall(SYS_rseq, 4, try_addr, length, 0,
                                     RSEQ_RARE_SIGNATURE);
         ASSERT(res == 0);
         res = -EPERM;
