@@ -345,6 +345,12 @@ fn public_attach_supports_extended_rseq_registration_length() {
     assert_eq!(attached.stdout, "OK rseq64 attach and detach\n");
 }
 
+#[test]
+fn public_attach_uses_glibc_registered_rseq_area() {
+    let attached = checked("rseq_glibc_attach", &[], Profile::Native, 0);
+    assert_eq!(attached.stdout, "OK glibc rseq attach and detach\n");
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn source_aarch64_signal_frames_vectors_rewrite_and_deep_nesting() {

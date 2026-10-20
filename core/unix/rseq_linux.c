@@ -690,6 +690,40 @@ try_struct_rseq(void *try_addr)
     return false;
 }
 
+/* Glibc exports the exact process-wide offset of its rseq area.  This used to
+ * point inside struct pthread, but newer glibc places the area in a separate
+ * extra-TLS block which is not necessarily in the memory interval containing
+ * the thread pointer.  Prefer the exported ABI over the bounded fallback scan.
+ * Still probe the resulting address: an application can replace glibc's
+ * registration with its own static-TLS area.
+ */
+static int
+rseq_locate_glibc_tls_offset(byte *seg_base)
+{
+    int offset = 0;
+    module_iterator_t *iter = module_iterator_start();
+    while (module_iterator_hasnext(iter)) {
+        module_area_t *ma = module_iterator_next(iter);
+        app_pc symbol = get_proc_address_from_os_data(
+            &ma->os_data, ma->start - ma->os_data.base_address, "__rseq_offset", NULL);
+        ptrdiff_t exported_offset;
+        if (symbol != NULL &&
+            d_r_safe_read(symbol, sizeof(exported_offset), &exported_offset) &&
+            exported_offset >= INT_MIN && exported_offset <= INT_MAX &&
+            exported_offset != 0 && try_struct_rseq(seg_base + exported_offset)) {
+            offset = (int)exported_offset;
+            LOG(GLOBAL, LOG_LOADER, 2,
+                "Found glibc struct rseq from __rseq_offset @ " PFX
+                " for thread => %s:%s0x%x\n",
+                seg_base + offset, get_register_name(LIB_SEG_TLS),
+                (offset < 0 ? "-" : ""), ABS(offset));
+            break;
+        }
+    }
+    module_iterator_stop(iter);
+    return offset;
+}
+
 /* If we did not observe the app invoke SYS_rseq (because we attached mid-run)
  * we must search for its TLS location.
  */
@@ -708,6 +742,9 @@ rseq_locate_tls_offset(void)
     int offset = 0;
     byte *addr = get_app_segment_base(LIB_SEG_TLS);
     if (addr > 0) {
+        offset = rseq_locate_glibc_tls_offset(addr);
+        if (offset != 0)
+            return offset;
         byte *try_glibc_addr = addr + GLIBC_RSEQ_OFFSET;
         if (try_struct_rseq(try_glibc_addr)) {
             LOG(GLOBAL, LOG_LOADER, 2,

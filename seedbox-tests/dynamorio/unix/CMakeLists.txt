@@ -36,6 +36,11 @@ set_target_properties(unix_rseq_attach PROPERTIES OUTPUT_NAME unix-rseq_attach)
 configure_DynamoRIO_static(unix_rseq_attach)
 install(TARGETS unix_rseq_attach RUNTIME DESTINATION bin)
 
+add_executable(unix_rseq_glibc_attach rseq_glibc_attach.c)
+set_target_properties(unix_rseq_glibc_attach PROPERTIES OUTPUT_NAME unix-rseq_glibc_attach)
+configure_DynamoRIO_static(unix_rseq_glibc_attach)
+install(TARGETS unix_rseq_glibc_attach RUNTIME DESTINATION bin)
+
 add_executable(unix_supervisor supervisor.c)
 set_target_properties(unix_supervisor PROPERTIES OUTPUT_NAME unix-supervisor)
 install(TARGETS unix_supervisor RUNTIME DESTINATION bin)
