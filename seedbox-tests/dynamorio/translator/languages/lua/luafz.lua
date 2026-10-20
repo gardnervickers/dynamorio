@@ -200,7 +200,11 @@ local function ffi_suite(sd, sc)
   for i = 1, 10000 * sc do
     ffi.fill(buf, 64, 0)
     ffi.copy(buf, "seed" .. (i * 7919 % 100000))
-    lh = mix(lh, tonumber(ffi.C.strlen(buf)) + ffi.C.memcmp(buf, "seed1", 5))
+    -- memcmp promises only the sign: libc paths can return different magnitudes
+    -- for identical bytes at different addresses, even in the same process.
+    local cmp = ffi.C.memcmp(buf, "seed1", 5)
+    local order = cmp < 0 and -1 or (cmp > 0 and 1 or 0)
+    lh = mix(lh, tonumber(ffi.C.strlen(buf)) + order)
     lh = mix(lh, #ffi.string(buf, 6))
     tick(i)
   end

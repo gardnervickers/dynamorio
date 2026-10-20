@@ -508,8 +508,8 @@
     "source": "tools/jvm-fuzz/probes/lua/luafz.lua",
     "commit": "f32472b7fe470367b7eddecde1ac53ad299f3a3e",
     "source_sha256": "ebf0947bd485f66c4d05f4129fd3c6e5611ac42c97a4aa0883dc831e73899b2d",
-    "ported_sha256": "ebf0947bd485f66c4d05f4129fd3c6e5611ac42c97a4aa0883dc831e73899b2d",
-    "adaptation": "Unchanged"
+    "ported_sha256": "629254ba10a4b2a5a23ccc54fd7a7f28e1e2ed2bd685ed67cd87be95b512ab83",
+    "adaptation": "Hash the specified sign of memcmp, not its implementation-dependent magnitude, which can vary with buffer address within one native process. Retain all populations, seeds, JIT modes, FFI calls and interpreter/JIT result equality."
   },
   {
     "file": "languages/erl/beamfz.erl",
