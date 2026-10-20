@@ -76,6 +76,9 @@ static uint points_per_block;
 static reg_id_t tls_seg;
 static uint tls_offs;
 static uint64 refills;
+/* Opt-in, one-line evidence for the dedicated budget-1 context probe only. */
+static bool diagnose_first_redirect;
+static uint first_redirect_reported;
 
 /* Instructions left in this thread's window; negative once a charge crosses
  * the budget, and the refill carries the overshoot.
@@ -99,6 +102,15 @@ refill_and_resume(app_pc resume, ptr_int_t charged)
     dr_mcontext_t mc = { sizeof(mc), DR_MC_ALL };
     DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(), &mc));
     mc.pc = resume;
+    if (diagnose_first_redirect &&
+        __atomic_exchange_n(&first_redirect_reported, 1, __ATOMIC_RELAXED) == 0) {
+        dr_fprintf(STDERR,
+                   "a64_progress_like: first redirect pc=%p charged=%lld refills=%llu "
+                   "r0=%p sp=%p lr=%p nzcv=%#x\n",
+                   resume, (long long)charged,
+                   (unsigned long long)__atomic_load_n(&refills, __ATOMIC_RELAXED),
+                   (void *)mc.r0, (void *)mc.sp, (void *)mc.lr, mc.nzcv);
+    }
     dr_redirect_execution(&mc);
     DR_ASSERT_MSG(false, "dr_redirect_execution returned");
 }
@@ -243,6 +255,8 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
             budget = parse_long(argv[++i]);
         else if (strcmp(argv[i], "--progress-points-per-block") == 0 && i + 1 < argc)
             points = parse_long(argv[++i]);
+        else if (strcmp(argv[i], "--diagnose-first-redirect") == 0)
+            diagnose_first_redirect = true;
         else if (argv[i][0] != '-' && positional < 2) {
             if (positional++ == 0)
                 budget = parse_long(argv[i]);

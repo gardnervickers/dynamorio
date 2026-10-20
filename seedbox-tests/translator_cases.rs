@@ -207,7 +207,11 @@ fn a64_progress_redirect_preserves_application_context() {
         translated(
             "translator_progress_context",
             Some("libtranslator_progress.so"),
-            &["--instructions-per-progress-call", "1"],
+            &[
+                "--instructions-per-progress-call",
+                "1",
+                "--diagnose-first-redirect",
+            ],
         ),
         "progress context redirect",
         expected,
