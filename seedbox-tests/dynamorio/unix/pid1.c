@@ -11,12 +11,12 @@
 static volatile sig_atomic_t got;
 static void caught(int sig) { got=sig; }
 int main(int argc,char **argv) {
-    int outside=argc==2 && !strcmp(argv[1],"non-init-default");
+    int outside=argc==2 && (!strcmp(argv[1],"non-init-default") || !strcmp(argv[1],"non-init-trap"));
     if(argc!=2 || (outside ? getpid()==1 : getpid()!=1)) { fputs("PID1 fixture must be actual namespace init\n",stderr);return 2; }
     struct rlimit core={0,0};if(setrlimit(RLIMIT_CORE,&core))return 2;
     sigset_t all,one;sigfillset(&all);sigprocmask(SIG_BLOCK,&all,NULL);
     sigemptyset(&one);
-    if(outside || !strcmp(argv[1],"self-default")) {
+    if(!strcmp(argv[1],"non-init-default") || !strcmp(argv[1],"self-default")) {
         signal(SIGSEGV,SIG_DFL);sigaddset(&one,SIGSEGV);sigprocmask(SIG_UNBLOCK,&one,NULL);
         if(raise(SIGSEGV))return 2;if(outside)return 1;puts("OK pid1: still alive after raise(SIGSEGV)");return 0;
     }
@@ -34,7 +34,7 @@ int main(int argc,char **argv) {
 #else
         asm volatile("ud2");
 #endif
-    } else if(!strcmp(argv[1],"trap")) {
+    } else if(!strcmp(argv[1],"trap") || !strcmp(argv[1],"non-init-trap")) {
 #if defined(__aarch64__)
         asm volatile("brk #0");
 #else

@@ -8386,10 +8386,16 @@ execute_default_action(dcontext_t *dcontext, int sig, sigframe_rt_t *frame,
             /* N.B.: we don't have to restore our handler because the
              * default action is for the process (entire thread group for NPTL) to die!
              */
+            /* x86 traps save the PC after the trapping instruction. Returning
+             * there would skip the fatal breakpoint instead of re-raising it.
+             * Use the signal path, including its PID-namespace-init handling.
+             */
             if (from_dispatch || can_always_delay[sig] || forged ||
+                IF_X86(sig == SIGTRAP ||)
                 is_sys_kill(dcontext, pc, (byte *)sc->SC_XSP, &frame->info)) {
-                /* This must have come from SYS_kill rather than raised by
-                 * a faulting instruction.  Thus we can't go re-execute the
+                /* A trap's saved PC cannot re-execute its instruction. Other
+                 * cases came from SYS_kill rather than a faulting instruction.
+                 * Thus we can't go re-execute the
                  * instr in order to re-raise the signal (if from_dispatch,
                  * we delayed and can't re-execute anyway).  Instead we
                  * re-generate via SYS_kill.  An alternative, if we don't

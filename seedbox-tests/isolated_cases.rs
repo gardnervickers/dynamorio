@@ -32,18 +32,15 @@ fn namespace_init_default_signal_and_real_fault_lifecycle() {
             image_executed(&out.stderr);
         }
     }
-    for (mode, sig) in [
-        ("segv", libc::SIGSEGV),
-        ("ill", libc::SIGILL),
-        ("trap", libc::SIGTRAP),
-    ] {
+    for (mode, sig) in [("segv", libc::SIGSEGV), ("ill", libc::SIGILL)] {
         for profile in [Profile::Native, Profile::Plain, Profile::Client] {
             let client = matches!(profile, Profile::Client);
             let out = run("pid1", &[mode], profile, Some(&["pid1"]));
             assert_eq!(
                 out.code,
                 128 + sig,
-                "{mode}: {}\n{}",
+                "{mode} profile={}: {}\n{}",
+                out.profile,
                 out.stdout,
                 out.stderr
             );
@@ -61,6 +58,34 @@ fn namespace_init_default_signal_and_real_fault_lifecycle() {
             out.stdout,
             out.stderr
         );
+    }
+}
+#[test]
+fn default_breakpoint_fault_preserves_sigtrap_with_and_without_namespace_init() {
+    // Keep the original PID1 trap oracle independently selectable. Also cover
+    // ordinary processes, which use the same fatal-default runtime branch.
+    for isolate in [Some(["pid1"].as_slice()), None] {
+        for profile in [Profile::Native, Profile::Plain, Profile::Client] {
+            let client = matches!(profile, Profile::Client);
+            let mode = if isolate.is_some() {
+                "trap"
+            } else {
+                "non-init-trap"
+            };
+            let out = run("pid1", &[mode], profile, isolate);
+            assert_eq!(
+                out.code,
+                128 + libc::SIGTRAP,
+                "trap profile={} namespace_init={}: {}\n{}",
+                out.profile,
+                isolate.is_some(),
+                out.stdout,
+                out.stderr
+            );
+            if client {
+                image_executed(&out.stderr);
+            }
+        }
     }
 }
 #[test]
