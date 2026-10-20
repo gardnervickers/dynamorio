@@ -76,9 +76,19 @@ static uint points_per_block;
 static reg_id_t tls_seg;
 static uint tls_offs;
 static uint64 refills;
-/* Opt-in, one-line evidence for the dedicated budget-1 context probe only. */
-static bool diagnose_first_redirect;
-static uint first_redirect_reported;
+/* Opt-in, bounded evidence for the dedicated budget-1 context probe only. */
+static bool diagnose_redirect_roundtrip;
+static int diagnostic_tls_idx = -1;
+static uint64 diagnostic_redirects;
+static uint64 diagnostic_matches;
+static uint diagnostic_mismatch_reported;
+
+typedef struct {
+    dr_mcontext_t expected;
+    app_pc resume;
+    uint64 ordinal;
+    bool pending;
+} redirect_diagnostic_t;
 
 /* Instructions left in this thread's window; negative once a charge crosses
  * the budget, and the refill carries the overshoot.
@@ -87,6 +97,89 @@ static ptr_int_t *
 budget_slot(void)
 {
     return (ptr_int_t *)((byte *)dr_get_dr_segment_base(tls_seg) + tls_offs);
+}
+
+static void
+report_roundtrip_mismatch(redirect_diagnostic_t *diagnostic, const char *field,
+                          uint64 expected, uint64 actual)
+{
+    if (__atomic_exchange_n(&diagnostic_mismatch_reported, 1, __ATOMIC_RELAXED) != 0)
+        return;
+    module_data_t *module = dr_lookup_module(diagnostic->resume);
+    dr_fprintf(STDERR,
+               "a64_progress_like: redirect roundtrip mismatch ordinal=%llu module=%s "
+               "offset=%#llx field=%s expected=%#llx actual=%#llx\n",
+               (unsigned long long)diagnostic->ordinal,
+               module == NULL || module->full_path == NULL ? "<untracked>"
+                                                           : module->full_path,
+               module == NULL
+                   ? 0ULL
+                   : (unsigned long long)((ptr_uint_t)diagnostic->resume -
+                                          (ptr_uint_t)module->start),
+               field, (unsigned long long)expected, (unsigned long long)actual);
+    if (module != NULL)
+        dr_free_module_data(module);
+}
+
+static void
+verify_redirect_roundtrip(void)
+{
+    void *drcontext = dr_get_current_drcontext();
+    redirect_diagnostic_t *diagnostic =
+        drmgr_get_tls_field(drcontext, diagnostic_tls_idx);
+    if (diagnostic == NULL || !diagnostic->pending)
+        return;
+    diagnostic->pending = false;
+
+    /* Only integer and control fields are documented as valid here. The original
+     * application oracle separately checks SIMD registers, FPCR and FPSR.
+     */
+    dr_mcontext_t actual = { sizeof(actual), DR_MC_INTEGER | DR_MC_CONTROL };
+    DR_ASSERT(dr_get_mcontext(drcontext, &actual));
+#define COMPARE_CONTEXT_FIELD(member, label)                                            \
+    do {                                                                                \
+        if (diagnostic->expected.member != actual.member) {                             \
+            report_roundtrip_mismatch(diagnostic, label,                               \
+                                      (uint64)diagnostic->expected.member,              \
+                                      (uint64)actual.member);                           \
+            return;                                                                     \
+        }                                                                               \
+    } while (0)
+    COMPARE_CONTEXT_FIELD(r0, "x0");
+    COMPARE_CONTEXT_FIELD(r1, "x1");
+    COMPARE_CONTEXT_FIELD(r2, "x2");
+    COMPARE_CONTEXT_FIELD(r3, "x3");
+    COMPARE_CONTEXT_FIELD(r4, "x4");
+    COMPARE_CONTEXT_FIELD(r5, "x5");
+    COMPARE_CONTEXT_FIELD(r6, "x6");
+    COMPARE_CONTEXT_FIELD(r7, "x7");
+    COMPARE_CONTEXT_FIELD(r8, "x8");
+    COMPARE_CONTEXT_FIELD(r9, "x9");
+    COMPARE_CONTEXT_FIELD(r10, "x10");
+    COMPARE_CONTEXT_FIELD(r11, "x11");
+    COMPARE_CONTEXT_FIELD(r12, "x12");
+    COMPARE_CONTEXT_FIELD(r13, "x13");
+    COMPARE_CONTEXT_FIELD(r14, "x14");
+    COMPARE_CONTEXT_FIELD(r15, "x15");
+    COMPARE_CONTEXT_FIELD(r16, "x16");
+    COMPARE_CONTEXT_FIELD(r17, "x17");
+    COMPARE_CONTEXT_FIELD(r18, "x18");
+    COMPARE_CONTEXT_FIELD(r19, "x19");
+    COMPARE_CONTEXT_FIELD(r20, "x20");
+    COMPARE_CONTEXT_FIELD(r21, "x21");
+    COMPARE_CONTEXT_FIELD(r22, "x22");
+    COMPARE_CONTEXT_FIELD(r23, "x23");
+    COMPARE_CONTEXT_FIELD(r24, "x24");
+    COMPARE_CONTEXT_FIELD(r25, "x25");
+    COMPARE_CONTEXT_FIELD(r26, "x26");
+    COMPARE_CONTEXT_FIELD(r27, "x27");
+    COMPARE_CONTEXT_FIELD(r28, "x28");
+    COMPARE_CONTEXT_FIELD(r29, "x29");
+    COMPARE_CONTEXT_FIELD(r30, "x30");
+    COMPARE_CONTEXT_FIELD(sp, "sp");
+    COMPARE_CONTEXT_FIELD(nzcv, "nzcv");
+#undef COMPARE_CONTEXT_FIELD
+    __atomic_fetch_add(&diagnostic_matches, 1, __ATOMIC_RELAXED);
 }
 
 static void
@@ -102,23 +195,15 @@ refill_and_resume(app_pc resume, ptr_int_t charged)
     dr_mcontext_t mc = { sizeof(mc), DR_MC_ALL };
     DR_ASSERT(dr_get_mcontext(dr_get_current_drcontext(), &mc));
     mc.pc = resume;
-    if (diagnose_first_redirect &&
-        __atomic_exchange_n(&first_redirect_reported, 1, __ATOMIC_RELAXED) == 0) {
-        module_data_t *module = dr_lookup_module(resume);
-        dr_fprintf(STDERR,
-                   "a64_progress_like: first redirect pc=%p charged=%lld refills=%llu "
-                   "r0=%p sp=%p lr=%p nzcv=%#x module=%s base=%p offset=%#llx\n",
-                   resume, (long long)charged,
-                   (unsigned long long)__atomic_load_n(&refills, __ATOMIC_RELAXED),
-                   (void *)mc.r0, (void *)mc.sp, (void *)mc.lr, mc.nzcv,
-                   module == NULL || module->full_path == NULL ? "<untracked>"
-                                                               : module->full_path,
-                   module == NULL ? NULL : module->start,
-                   module == NULL ? 0ULL
-                                  : (unsigned long long)((ptr_uint_t)resume -
-                                                         (ptr_uint_t)module->start));
-        if (module != NULL)
-            dr_free_module_data(module);
+    if (diagnose_redirect_roundtrip) {
+        redirect_diagnostic_t *diagnostic =
+            drmgr_get_tls_field(dr_get_current_drcontext(), diagnostic_tls_idx);
+        DR_ASSERT(diagnostic != NULL);
+        diagnostic->expected = mc;
+        diagnostic->resume = resume;
+        diagnostic->ordinal =
+            __atomic_add_fetch(&diagnostic_redirects, 1, __ATOMIC_RELAXED);
+        diagnostic->pending = true;
     }
     dr_redirect_execution(&mc);
     DR_ASSERT_MSG(false, "dr_redirect_execution returned");
@@ -128,6 +213,23 @@ static void
 event_thread_init(void *drcontext)
 {
     *budget_slot() = budget_per_refill;
+    if (diagnose_redirect_roundtrip) {
+        redirect_diagnostic_t *diagnostic =
+            dr_thread_alloc(drcontext, sizeof(*diagnostic));
+        memset(diagnostic, 0, sizeof(*diagnostic));
+        drmgr_set_tls_field(drcontext, diagnostic_tls_idx, diagnostic);
+    }
+}
+
+static void
+event_thread_exit(void *drcontext)
+{
+    if (diagnose_redirect_roundtrip) {
+        redirect_diagnostic_t *diagnostic =
+            drmgr_get_tls_field(drcontext, diagnostic_tls_idx);
+        if (diagnostic != NULL)
+            dr_thread_free(drcontext, diagnostic, sizeof(*diagnostic));
+    }
 }
 
 static void
@@ -165,6 +267,13 @@ insert_charge(void *drcontext, instrlist_t *bb, instr_t *where, uint count)
         DR_ASSERT_MSG(false, "drreg_get_app_value failed");
     if (drreg_unreserve_register(drcontext, bb, where, scratch) != DRREG_SUCCESS)
         DR_ASSERT_MSG(false, "drreg_unreserve_register failed");
+    if (diagnose_redirect_roundtrip) {
+        /* This call is after drreg has returned the scratch register to the
+         * application. It observes the resumed boundary before the app instruction.
+         */
+        dr_insert_clean_call_ex(drcontext, bb, where, (void *)verify_redirect_roundtrip,
+                                DR_CLEANCALL_READS_APP_CONTEXT, 0);
+    }
 }
 
 static dr_emit_flags_t
@@ -233,6 +342,15 @@ event_insertion(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
 static void
 event_exit(void)
 {
+    if (diagnose_redirect_roundtrip &&
+        __atomic_load_n(&diagnostic_mismatch_reported, __ATOMIC_RELAXED) == 0) {
+        dr_fprintf(STDERR,
+                   "a64_progress_like: redirect roundtrip matched %llu/%llu contexts\n",
+                   (unsigned long long)__atomic_load_n(&diagnostic_matches,
+                                                       __ATOMIC_RELAXED),
+                   (unsigned long long)__atomic_load_n(&diagnostic_redirects,
+                                                       __ATOMIC_RELAXED));
+    }
     { /* Always report executed refills: empty instrumentation cannot pass. */
         dr_fprintf(STDERR, "a64_progress_like: %llu refills\n",
                    (unsigned long long)refills);
@@ -265,7 +383,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         else if (strcmp(argv[i], "--progress-points-per-block") == 0 && i + 1 < argc)
             points = parse_long(argv[++i]);
         else if (strcmp(argv[i], "--diagnose-first-redirect") == 0)
-            diagnose_first_redirect = true;
+            diagnose_redirect_roundtrip = true;
         else if (argv[i][0] != '-' && positional < 2) {
             if (positional++ == 0)
                 budget = parse_long(argv[i]);
@@ -288,9 +406,15 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     drreg_options_t ops = { sizeof(ops), 3, true };
     if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS)
         DR_ASSERT_MSG(false, "drmgr/drreg init failed");
+    if (diagnose_redirect_roundtrip) {
+        diagnostic_tls_idx = drmgr_register_tls_field();
+        if (diagnostic_tls_idx == -1)
+            DR_ASSERT_MSG(false, "drmgr_register_tls_field failed");
+    }
     if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, 1, 0))
         DR_ASSERT_MSG(false, "dr_raw_tls_calloc failed");
     if (!drmgr_register_thread_init_event(event_thread_init) ||
+        !drmgr_register_thread_exit_event(event_thread_exit) ||
         !drmgr_register_bb_app2app_event(event_app2app, NULL) ||
         !drmgr_register_bb_instrumentation_event(event_analysis, event_insertion, NULL))
         DR_ASSERT_MSG(false, "event registration failed");

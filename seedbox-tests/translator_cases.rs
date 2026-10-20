@@ -217,6 +217,18 @@ fn a64_progress_redirect_preserves_application_context() {
         expected,
     );
     assert_eq!(client, native);
+    let (matched, redirects) = err
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("a64_progress_like: redirect roundtrip matched ")
+                .and_then(|line| line.strip_suffix(" contexts"))
+                .and_then(|line| line.split_once('/'))
+        })
+        .expect("progress redirect roundtrip receipt");
+    let matched: u64 = matched.parse().expect("numeric matched redirect count");
+    let redirects: u64 = redirects.parse().expect("numeric total redirect count");
+    assert!(matched > 0, "{err}");
+    assert_eq!(matched, redirects, "{err}");
     let refills: u64 = err
         .lines()
         .find_map(|line| line.strip_prefix("a64_progress_like: "))
