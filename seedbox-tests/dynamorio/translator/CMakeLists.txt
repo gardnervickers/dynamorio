@@ -93,4 +93,17 @@ use_DynamoRIO_extension(translator_observe drmgr)
 use_DynamoRIO_extension(translator_observe drreg)
 install(TARGETS translator_observe LIBRARY DESTINATION lib)
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+  add_executable(translator_observer_fault observer_fault.c)
+  target_compile_options(translator_observer_fault PRIVATE -Wall -Wextra -Werror)
+  target_link_options(translator_observer_fault PRIVATE -rdynamic)
+  add_library(translator_observe_fault_test SHARED observe_client.c)
+  target_compile_definitions(translator_observe_fault_test PRIVATE OBSERVER_FAULT_FIXTURE)
+  configure_DynamoRIO_client(translator_observe_fault_test)
+  use_DynamoRIO_extension(translator_observe_fault_test drmgr)
+  use_DynamoRIO_extension(translator_observe_fault_test drreg)
+  install(TARGETS translator_observer_fault translator_observe_fault_test
+    RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
+endif()
+
 add_subdirectory(replay)

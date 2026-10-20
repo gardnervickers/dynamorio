@@ -6,11 +6,82 @@
 #include "drmgr.h"
 #include "drreg.h"
 
+#include <signal.h>
+
 static const char *vm_path;
 typedef struct { app_pc lo, hi; } region_t;
 static region_t app_regions[64], vm_regions[64];
 static uint n_app, n_vm;
 static volatile uint64 app_executed, vm_executed;
+static volatile int fault_recorded;
+
+enum { APP_BYTES = 16, RAW_BYTES = 32 };
+
+static void bytes_to_hex(const byte *bytes, size_t size, char *hex)
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < size; ++i) {
+        hex[2 * i] = digits[bytes[i] >> 4];
+        hex[2 * i + 1] = digits[bytes[i] & 0xf];
+    }
+    hex[2 * size] = '\0';
+}
+
+static dr_signal_action_t signal_event(void *dc, dr_siginfo_t *info)
+{
+    if ((info->sig != SIGSEGV && info->sig != SIGBUS) || info->access_address == NULL ||
+        !info->raw_mcontext_valid || info->raw_mcontext == NULL || info->mcontext == NULL ||
+        info->fault_fragment_info.cache_start_pc == NULL ||
+        !info->fault_fragment_info.app_code_consistent)
+        return DR_SIGNAL_DELIVER;
+
+    app_pc translated_pc = info->mcontext->pc;
+    byte app_bytes[APP_BYTES];
+    size_t app_read = 0;
+    if (translated_pc == NULL ||
+        !dr_safe_read(translated_pc, sizeof(app_bytes), app_bytes, &app_read) ||
+        app_read != sizeof(app_bytes))
+        return DR_SIGNAL_DELIVER;
+
+    instr_t decoded;
+    instr_init(dc, &decoded);
+    byte *next = decode_from_copy(dc, app_bytes, translated_pc, &decoded);
+    bool interesting = next != NULL && instr_valid(&decoded) &&
+        !instr_reads_memory(&decoded) && !instr_writes_memory(&decoded);
+    instr_free(dc, &decoded);
+    if (!interesting)
+        return DR_SIGNAL_DELIVER;
+
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&fault_recorded, &expected, 1, false,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return DR_SIGNAL_DELIVER;
+
+    char app_hex[2 * APP_BYTES + 1];
+    bytes_to_hex(app_bytes, sizeof(app_bytes), app_hex);
+    app_pc raw_pc = info->raw_mcontext->pc;
+    byte raw_bytes[RAW_BYTES];
+    size_t raw_read = 0;
+    if (raw_pc != NULL &&
+        dr_safe_read(raw_pc, sizeof(raw_bytes), raw_bytes, &raw_read) &&
+        raw_read == sizeof(raw_bytes)) {
+        char raw_hex[2 * RAW_BYTES + 1];
+        bytes_to_hex(raw_bytes, sizeof(raw_bytes), raw_hex);
+        dr_fprintf(STDERR, "observer-fault: raw_valid=1 raw_pc=" PFX
+                   " cache_start=" PFX " app_pc=" PFX " tag=" PFX
+                   " access_address=" PFX " app_bytes=%s raw_bytes=%s\n",
+                   raw_pc, info->fault_fragment_info.cache_start_pc, translated_pc,
+                   info->fault_fragment_info.tag, info->access_address, app_hex, raw_hex);
+    } else {
+        dr_fprintf(STDERR, "observer-fault: raw_valid=1 raw_pc=" PFX
+                   " cache_start=" PFX " app_pc=" PFX " tag=" PFX
+                   " access_address=" PFX
+                   " app_bytes=%s raw_bytes=unavailable bytes_read=%zu\n",
+                   raw_pc, info->fault_fragment_info.cache_start_pc, translated_pc,
+                   info->fault_fragment_info.tag, info->access_address, app_hex, raw_read);
+    }
+    return DR_SIGNAL_DELIVER;
+}
 
 static bool equal(const char *a, const char *b)
 {
@@ -66,6 +137,15 @@ static dr_emit_flags_t block(void *dc, void *tag, instrlist_t *bb, instr_t *wher
             : contains(vm_regions, n, pc) ? 2 : 0;
         if (kind != 0) {
 #ifdef X86_64
+# ifdef OBSERVER_FAULT_FIXTURE
+            if (kind == 1 && instr_get_opcode(where) == OP_ud2) {
+                instr_t *fault = INSTR_CREATE_mov_st(
+                    dc, OPND_CREATE_ABSMEM((void *)1, OPSZ_4),
+                    opnd_create_reg(DR_REG_EAX));
+                instr_set_translation(fault, pc);
+                instrlist_meta_preinsert(bb, where, fault);
+            }
+# endif
             // Preserve every executed-block observation without a C call per
             // loop iteration. These are ordinary public drreg/IR APIs.
             reg_id_t scratch;
@@ -115,6 +195,7 @@ static void finish(void)
                " vm=" UINT64_FORMAT_STRING "\n", app, vm);
     DR_ASSERT(app > 0);
     if (vm_path) DR_ASSERT(vm > 0);
+    DR_ASSERT(drmgr_unregister_signal_event(signal_event));
     DR_ASSERT(drreg_exit() == DRREG_SUCCESS);
     drmgr_exit();
 }
@@ -133,6 +214,7 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[])
                module->full_path, module->start, module->end, n_app);
     dr_free_module_data(module);
     DR_ASSERT(drmgr_register_module_load_event(module_loaded));
+    DR_ASSERT(drmgr_register_signal_event(signal_event));
     DR_ASSERT(drmgr_register_bb_instrumentation_event(NULL, block, NULL));
     dr_register_exit_event(finish);
 }

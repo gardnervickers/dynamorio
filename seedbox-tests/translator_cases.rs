@@ -121,6 +121,43 @@ fn translated(binary: &str, client: Option<&str>, args: &[&str]) -> Command {
     cmd
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn public_observer_retains_raw_fault_without_changing_delivery() {
+    let (out, err) = checked(
+        translated(
+            "translator_observer_fault",
+            Some("libtranslator_observe_fault_test.so"),
+            &[],
+        ),
+        "public observer fault",
+        "observer-fault-fixture: signal-match=1 nonnull-address=1 application-pc=1",
+    );
+    assert_eq!(
+        out,
+        "observer-fault-fixture: signal-match=1 nonnull-address=1 application-pc=1\n"
+    );
+    let record = err
+        .lines()
+        .find(|line| line.starts_with("observer-fault: "))
+        .expect("bounded public signal record");
+    assert!(record.contains("raw_valid=1 raw_pc="), "{record}");
+    assert!(record.contains(" cache_start="), "{record}");
+    assert!(record.contains(" app_pc="), "{record}");
+    assert!(record.contains(" tag="), "{record}");
+    assert!(record.contains(" access_address="), "{record}");
+    assert!(record.contains(" app_bytes=0f0b"), "{record}");
+    assert!(record.contains(" raw_bytes="), "{record}");
+    assert!(!record.contains("raw_bytes=unavailable"), "{record}");
+    assert_eq!(
+        err.lines()
+            .filter(|line| line.starts_with("observer-fault: "))
+            .count(),
+        1,
+        "{err}"
+    );
+}
+
 #[test]
 fn flush_public_contracts_shared_isa() {
     checked(
