@@ -80,8 +80,17 @@ static void *executor(void *arg) {
     for (uint32_t i = n; !atomic_load(&stop); i++) {
         uint32_t slot = (i % 64) * 4;
         int (*fn)(void) = (int (*)(void))&shared_code[slot];
-        if (fn() != (int)slot) {
-            fprintf(stderr, "bad shared-code result\n");
+        int actual = fn();
+        if (actual != (int)slot) {
+            /* Preserve the first failed call: another call could conceal stale
+             * translation or register corruption. All slots are initialized
+             * before pthread_create; the writer only republishes those bytes. */
+            volatile unsigned char *bytes = (volatile unsigned char *)fn;
+            fprintf(stderr,
+                    "bad shared-code result slot=%u actual=%d pc=%p bytes="
+                    "%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                    slot, actual, (void *)fn, bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7]);
             exit(3);
         }
         if (atomic_fetch_add(&work, 1) == 0) sem_post(&ready);
