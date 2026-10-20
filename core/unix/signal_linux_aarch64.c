@@ -384,46 +384,16 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
     struct _aarch64_ctx *terminator_record = next_head;
     ASSERT(terminator_record->magic == 0);
 
-    /* The kernel also adds an SVE record on hardware with SME but no SVE, and
-     * its vector length is then SME's streaming one: DR doesn't track that
-     * state, so leave such a record exactly as the kernel wrote it.
+    /* A header-only SVE record means that the scalable registers were not live
+     * when the kernel delivered this signal.  Do not turn that into a full
+     * record: the private mcontext has no defined P/FFR values to restore, and
+     * a full record would make those values live on sigreturn.  The same applies
+     * when the kernel supplied no SVE record.  Keep full records (including
+     * their vector length and streaming mode) for genuinely live state.
      */
-    const bool sve_tracked = proc_has_feature(FEATURE_SVE) &&
-        (sve == NULL || sve->vl == proc_get_vector_length_bytes());
-
-    if (has_extra && sve != NULL &&
-        sve->head.size < SVE_SIG_CONTEXT_SIZE(sve_vecquad_from_veclen(sve->vl)))
-        sve = NULL; /* No room to grow it: leave it as the kernel wrote it. */
-    if (sve != NULL && sve_tracked) {
-        /* Check that we have a full SVE record with space for the register data.
-         * The kernel only includes space for register data if it considers the SVE state
-         * to be "live" for the current thread.
-         * See https://docs.kernel.org/arch/arm64/sve.html for more information.
-         */
-        if (sve->head.size < SVE_SIG_CONTEXT_SIZE(sve_vecquad_from_veclen(sve->vl))) {
-            /* sigcontext has an sve_context record but it doesn't contain any register
-             * data. We need to remove it and add a new larger record with space for the
-             * register data.
-             */
-            size_t sve_record_size = sve->head.size;
-
-            /* Shift the following records back on top of the SVE record. */
-            byte *dst = (void *)sve;
-            byte *src = dst + sve_record_size; /* start of the next revord  */
-            byte *end_of_records = (byte *)terminator_record + sizeof(*terminator_record);
-            size_t length = (ptr_uint_t)end_of_records - (ptr_uint_t)src;
-            memmove(dst, src, length);
-
-            /* Set sve to NULL so the code below will add a new sve_context record. */
-            sve = NULL;
-
-            /* And move next_head backwards to the new end of the list. */
-            offset -= sve_record_size;
-            next_head = GET_RECORD_AT_OFFSET(offset);
-            terminator_record = next_head;
-            ASSERT(terminator_record->magic == 0);
-        }
-    }
+    const bool sve_tracked = proc_has_feature(FEATURE_SVE) && sve != NULL &&
+        sve->vl == proc_get_vector_length_bytes() &&
+        sve->head.size >= SVE_SIG_CONTEXT_SIZE(sve_vecquad_from_veclen(sve->vl));
 
     if (fpsimd == NULL) {
         if (has_extra ||
@@ -438,39 +408,6 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         *terminator_record = null_ctx;
     }
 
-    if (sve == NULL && sve_tracked && !has_extra) {
-        sve = (struct sve_context *)terminator_record;
-        /* Set other fields of sve_context to zero. New fields may be added and
-         * unexpected values in those fields may cause problems. This is a small
-         * struct so the compiler will allocate it to a virtual register and
-         * optimise this initialisation.
-         */
-        const struct sve_context sve_zero = { 0 };
-        *sve = sve_zero;
-        sve->head.magic = SVE_MAGIC;
-        sve->vl = proc_get_vector_length_bytes();
-        const uint quads_per_vector = sve_vecquad_from_veclen(sve->vl);
-        const size_t sve_size = ALIGN_FORWARD(SVE_SIG_CONTEXT_SIZE(quads_per_vector), 16);
-        if (limit - offset < sve_size + sizeof(*terminator_record)) {
-            /* Long vectors need the kernel's extra_context area, which we don't
-             * build: leave the SVE state out rather than overrun __reserved.
-             */
-            SYSLOG_INTERNAL_WARNING("No room for a %u-byte SVE signal context record",
-                                    (uint)sve_size);
-            *terminator_record = null_ctx;
-            sve = NULL;
-        } else {
-            sve->head.size = sve_size;
-            /* We may not hold all of each vector: don't leave the rest undefined. */
-            memset((byte *)sve + sizeof(struct sve_context), 0,
-                   sve_size - sizeof(struct sve_context));
-
-            offset += sve->head.size;
-            terminator_record = GET_RECORD_AT_OFFSET(offset);
-            *terminator_record = null_ctx;
-        }
-    }
-
     fpsimd->fpsr = mc->fpsr;
     fpsimd->fpcr = mc->fpcr;
     ASSERT(sizeof(fpsimd->vregs) == (sizeof(mc->simd->q) * MCXT_NUM_SIMD_SVE_SLOTS));
@@ -479,7 +416,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
         memcpy(&fpsimd->vregs[i], &mc->simd[i].u32[0], sizeof(fpsimd->vregs[i]));
     }
 
-    if (sve != NULL && sve_tracked) {
+    if (sve_tracked) {
         const uint quads_per_vector = sve_vecquad_from_veclen(sve->vl);
         ASSERT(sve->head.size >= SVE_SIG_CONTEXT_SIZE(quads_per_vector));
         /* dr_mcontext_t holds at most 512-bit vectors: write no more than its
