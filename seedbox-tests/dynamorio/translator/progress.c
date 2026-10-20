@@ -104,12 +104,21 @@ refill_and_resume(app_pc resume, ptr_int_t charged)
     mc.pc = resume;
     if (diagnose_first_redirect &&
         __atomic_exchange_n(&first_redirect_reported, 1, __ATOMIC_RELAXED) == 0) {
+        module_data_t *module = dr_lookup_module(resume);
         dr_fprintf(STDERR,
                    "a64_progress_like: first redirect pc=%p charged=%lld refills=%llu "
-                   "r0=%p sp=%p lr=%p nzcv=%#x\n",
+                   "r0=%p sp=%p lr=%p nzcv=%#x module=%s base=%p offset=%#llx\n",
                    resume, (long long)charged,
                    (unsigned long long)__atomic_load_n(&refills, __ATOMIC_RELAXED),
-                   (void *)mc.r0, (void *)mc.sp, (void *)mc.lr, mc.nzcv);
+                   (void *)mc.r0, (void *)mc.sp, (void *)mc.lr, mc.nzcv,
+                   module == NULL || module->full_path == NULL ? "<untracked>"
+                                                               : module->full_path,
+                   module == NULL ? NULL : module->start,
+                   module == NULL ? 0ULL
+                                  : (unsigned long long)((ptr_uint_t)resume -
+                                                         (ptr_uint_t)module->start));
+        if (module != NULL)
+            dr_free_module_data(module);
     }
     dr_redirect_execution(&mc);
     DR_ASSERT_MSG(false, "dr_redirect_execution returned");
