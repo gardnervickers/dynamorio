@@ -12,6 +12,14 @@ import run
 
 
 class FailureEvidence(unittest.TestCase):
+    def test_translated_diagnostics_record_nmethod_addresses(self):
+        directory = Path("/phase/translated")
+        self.assertEqual(
+            run.hotspot_diagnostics(directory),
+            ["-XX:+UnlockDiagnosticVMOptions", "-XX:+LogCompilation",
+             "-XX:LogFile=/phase/translated/hotspot.log"],
+        )
+
     def test_retains_failure_before_cleanup_with_finite_text(self):
         with tempfile.TemporaryDirectory() as reports:
             error = RuntimeError("original failed oracle")
@@ -22,6 +30,8 @@ class FailureEvidence(unittest.TestCase):
                         directory.mkdir()
                         (directory / "jvm.log").write_bytes(
                             b"HEAD" + b"x" * (2 * run.DIAGNOSTIC_LIMIT) + b"TAIL")
+                        (directory / "hotspot.log").write_text(
+                            '<nmethod compile_id="72" address="0x7f0012345000"/>')
                         (directory / "hs_err_123.log").write_text("actual JVM crash report")
                         (directory / "command.json").write_text(json.dumps(["java", "-XX:+UseZGC"]))
                         (directory / "core.123").write_bytes(b"not text evidence")
@@ -32,12 +42,13 @@ class FailureEvidence(unittest.TestCase):
             retained, = Path(reports).iterdir()
             phase = retained / "translated"
             self.assertEqual({p.name for p in phase.iterdir()},
-                             {"jvm.log", "hs_err_123.log", "command.json"})
+                             {"jvm.log", "hotspot.log", "hs_err_123.log", "command.json"})
             log = (phase / "jvm.log").read_bytes()
             self.assertLessEqual(len(log), run.DIAGNOSTIC_LIMIT)
             self.assertTrue(log.startswith(b"HEAD") and log.endswith(b"TAIL"))
             self.assertIn(b"truncated", log)
             self.assertEqual((phase / "hs_err_123.log").read_text(), "actual JVM crash report")
+            self.assertIn("0x7f0012345000", (phase / "hotspot.log").read_text())
 
     def test_success_removes_scratch_and_retains_nothing(self):
         with tempfile.TemporaryDirectory() as reports:

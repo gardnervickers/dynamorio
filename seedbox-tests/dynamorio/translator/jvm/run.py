@@ -35,7 +35,8 @@ def retain_failure(base, case):
         count = 0
         for mode in ("native1", "native2", "xint", "translated"):
             directory = base / mode
-            paths = [directory / "command.json", directory / "jvm.log"]
+            paths = [directory / "command.json", directory / "jvm.log",
+                     directory / "hotspot.log"]
             paths += sorted(directory.glob("hs_err_*.log"))[:2]
             for path in paths:
                 if path.is_symlink() or not path.is_file():
@@ -86,6 +87,12 @@ class InsufficientStress(Exception):
     pass
 
 
+def hotspot_diagnostics(directory):
+    """Returns non-semantic HotSpot logging flags for the translated phase."""
+    return ["-XX:+UnlockDiagnosticVMOptions", "-XX:+LogCompilation",
+            "-XX:LogFile=" + str(directory / "hotspot.log")]
+
+
 def run(root, case, seed_offset=0):
     cases = {
         "deopt-shared-diagnostic": ("DeoptCycle", 1, 40000, "default", "observe"),
@@ -129,6 +136,10 @@ def run(root, case, seed_offset=0):
                       "-Djava.io.tmpdir=" + str(directory), "-Dscenario=" + scenario,
                       "-Dseed=" + str(seed), "-Dops=" + str(ops),
                       "-Dthreads=" + str(sc["threads"]), "-cp", str(jar), "JitStress"]
+            if mode == "translated":
+                # A DR-internal crash prevents HotSpot's hs_err handler from mapping
+                # the code-cache address.  Keep HotSpot's nmethod address map instead.
+                flags[0:0] = hotspot_diagnostics(directory)
             command = [str(java)] + flags
             if mode == "translated":
                 command = dr + ["--"] + command
