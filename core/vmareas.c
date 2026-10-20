@@ -8922,17 +8922,23 @@ vm_area_destroy_list(dcontext_t *dcontext, void *vmlist)
 bool
 vm_list_overlaps(dcontext_t *dcontext, void *vmlist, app_pc start, app_pc end)
 {
-    vm_area_vector_t *v = GET_VECTOR(dcontext, ((fragment_t *)vmlist)->flags);
+    fragment_t *first = (fragment_t *)vmlist;
+    /* FRAG_SHARED is stable for the fragment's lifetime, while FRAG_WAS_DELETED can
+     * be set between choosing the vector and acquiring its lock.  Derive the vector
+     * from ownership so deletion cannot invalidate also_vmarea before we inspect the
+     * deleted flag under the vector lock (case 8419).
+     */
+    vm_area_vector_t *v = &GET_DATA(dcontext, first->flags)->areas;
     fragment_t *entry;
     bool ok;
     vm_area_t *area;
     bool result = false;
     LOG(THREAD, LOG_VMAREAS, 4, "vm_list_overlaps " PFX " vs " PFX "-" PFX "\n", vmlist,
         start, end);
-    /* don't assert if can't find anything -- see usage in handle_modified_code() */
-    if (v == NULL)
-        return false;
     SHARED_VECTOR_RWLOCK(v, read, lock);
+    /* Don't assert if deletion won the race: see usage in handle_modified_code(). */
+    if (!FRAG_MULTI(first) && TEST(FRAG_WAS_DELETED, first->flags))
+        goto vm_list_overlaps_done;
     for (entry = vmlist; entry != NULL; entry = FRAG_ALSO(entry)) {
         ok = lookup_addr(v, FRAG_PC(entry), &area);
         if (!ok)
@@ -8942,6 +8948,7 @@ vm_list_overlaps(dcontext_t *dcontext, void *vmlist, app_pc start, app_pc end)
             break;
         }
     }
+vm_list_overlaps_done:
     SHARED_VECTOR_RWLOCK(v, read, unlock);
     return result;
 }
