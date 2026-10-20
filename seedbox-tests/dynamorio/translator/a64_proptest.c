@@ -1250,6 +1250,20 @@ dr_feature_present(uint32_t word, instr_t *instr)
     };
     if (sve_or_sme_space(word))
         return 0;
+    /* These MSR-immediate encodings overlap the generic PSTATE encoding.
+     * The encoding walk can consequently report BASE instead of the feature
+     * attached to the decoded opcode.  Use the architectural requirements
+     * directly so a CPU without FlagM does not execute them as BASE.
+     */
+    switch (instr_get_opcode(instr)) {
+    case OP_cfinv:
+        return (getauxval(AT_HWCAP) & (1ULL << 27)) != 0; /* FlagM */
+    case OP_axflag:
+    case OP_xaflag:
+        return (getauxval(AT_HWCAP2) & (1ULL << 7)) != 0; /* FlagM2 */
+    default:
+        break;
+    }
     const char *name =
         instr_get_isa_feature_name(instr_get_isa_feature((byte *)CODE_PC, instr));
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
