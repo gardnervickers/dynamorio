@@ -182,6 +182,44 @@ fn memcache_failed_mprotect_and_finite_concurrent_unmaps() {
     );
 }
 
+// A fast native diagnostic for context preservation by the real progress client.
+// Budget 1 forces a refill at the multi-instruction capture block, after the
+// assembly subject has initialized every GPR and SIMD register plus NZCV.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn a64_progress_redirect_preserves_application_context() {
+    let expected = "31 GPRs, SP, 32 SIMD registers, NZCV, FPCR, FPSR preserved";
+    let (native, _) = checked(
+        Command::new(fixtures().join("bin/translator_progress_context")),
+        "progress context native",
+        expected,
+    );
+    let (plain, _) = checked(
+        translated("translator_progress_context", None, &[]),
+        "progress context plain",
+        expected,
+    );
+    assert_eq!(plain, native);
+    let (client, err) = checked(
+        translated(
+            "translator_progress_context",
+            Some("libtranslator_progress.so"),
+            &["--instructions-per-progress-call", "1"],
+        ),
+        "progress context redirect",
+        expected,
+    );
+    assert_eq!(client, native);
+    let refills: u64 = err
+        .lines()
+        .find_map(|line| line.strip_prefix("a64_progress_like: "))
+        .and_then(|line| line.strip_suffix(" refills"))
+        .expect("progress client refill receipt")
+        .parse()
+        .expect("numeric refill count");
+    assert!(refills > 0, "{err}");
+}
+
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn a64_source_decoder_expectations() {
