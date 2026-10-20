@@ -932,3 +932,28 @@ fn signal_suppression_and_ignored_delivery_preserve_raw_reads() {
         );
     }
 }
+
+#[test]
+fn public_observer_delivers_signal_queued_inside_clean_call() {
+    let native = checked("clean_call_pending", &["application"], Profile::Native, 0);
+    let plain = checked("clean_call_pending", &["application"], Profile::Plain, 0);
+    let client = checked("clean_call_pending", &["client"], Profile::Client, 1);
+    assert_eq!(native.stdout, "queued signal handled 1 identityBad 0\nOK\n");
+    assert_eq!(plain.stdout, native.stdout);
+    assert_eq!(client.stdout, native.stdout);
+    for receipt in [
+        "unix-queue-probe: queued=1 inside-clean-call=1 delivered-before-return=0 kernel-pending=0",
+        "unix-queue-probe: delivered=1 after-return=1",
+    ] {
+        assert_eq!(
+            client
+                .stderr
+                .lines()
+                .filter(|line| *line == receipt)
+                .count(),
+            1,
+            "{}",
+            client.stderr
+        );
+    }
+}

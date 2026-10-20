@@ -36,6 +36,8 @@
 #include "dr_api.h"
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <signal.h>
+
 static app_pc lo[16], hi[16];
 static uint segments;
 static volatile int *timer_stage,*timer_sample;
@@ -58,6 +60,54 @@ static void post_syscall(void *dc,int nr) {
 }
 static int executed_pids[4096];
 static app_pc suspend_pc,after_suspend;
+/* Only the dedicated queued-clean-call probe exports this marker. Ordinary
+ * observer workloads keep their existing callbacks and instrumentation. */
+static app_pc queue_probe_pc;
+static uint queue_probe_visits;
+static volatile sig_atomic_t queue_probe_events,queue_probe_active;
+static dr_signal_action_t queue_probe_signal(void *dc,dr_siginfo_t *info) {
+    (void)dc;
+    if(info->sig==SIGUSR1) {
+        DR_ASSERT(!queue_probe_active && !info->blocked);
+        queue_probe_events++;
+        dr_fprintf(STDERR,"unix-queue-probe: delivered=%u after-return=1\n",queue_probe_events);
+    }
+    return DR_SIGNAL_DELIVER;
+}
+/* The observer deliberately has no libc dependency. Use the public Linux
+ * syscall ABI for this probe, not an application function or a DR private API. */
+static long queue_probe_syscall(long number,long a0,long a1,long a2,long a3) {
+#ifdef AARCH64
+    register long x0 __asm__("x0")=a0;
+    register long x1 __asm__("x1")=a1;
+    register long x2 __asm__("x2")=a2;
+    register long x3 __asm__("x3")=a3;
+    register long x8 __asm__("x8")=number;
+    __asm__ volatile("svc #0":"+r"(x0):"r"(x1),"r"(x2),"r"(x3),"r"(x8):"memory","cc");
+    return x0;
+#else
+    register long r10 __asm__("r10")=a3;
+    long result;
+    __asm__ volatile("syscall":"=a"(result):"a"(number),"D"(a0),"S"(a1),"d"(a2),"r"(r10):"rcx","r11","memory","cc");
+    return result;
+#endif
+}
+static void queue_probe(void) {
+    /* Revisit the same application loop before sending. No application syscall
+     * or new application branch follows the send until its handler runs. */
+    if(++queue_probe_visits!=4096)return;
+    siginfo_t info={0};
+    info.si_signo=SIGUSR1;info.si_code=SI_QUEUE;
+    info.si_pid=dr_get_process_id();info.si_value.sival_int=77;
+    info.si_uid=(uid_t)queue_probe_syscall(SYS_getuid,0,0,0,0);
+    queue_probe_active=true;
+    DR_ASSERT(queue_probe_syscall(SYS_rt_tgsigqueueinfo,info.si_pid,dr_get_thread_id(dr_get_current_drcontext()),SIGUSR1,(long)&info)==0);
+    uint64 pending=0;
+    DR_ASSERT(queue_probe_syscall(SYS_rt_sigpending,(long)&pending,sizeof pending,0,0)==0);
+    DR_ASSERT(queue_probe_events==0);
+    dr_fprintf(STDERR,"unix-queue-probe: queued=1 inside-clean-call=1 delivered-before-return=0 kernel-pending=%u\n",(uint)((pending>>(SIGUSR1-1))&1));
+    queue_probe_active=false;
+}
 static volatile int *waiter_tid;
 static app_pc *alias_rx_address,*alias_loop_lo_address,*alias_loop_hi_address;
 static size_t *alias_size_address;
@@ -134,6 +184,7 @@ static dr_emit_flags_t block(void *dc, void *tag, instrlist_t *bb, bool trace, b
     (void)tag; (void)trace; (void)translating;
     if (first != NULL) {
         app_pc pc = instr_get_app_pc(first);
+        if(pc==queue_probe_pc)dr_insert_clean_call(dc,bb,first,(void *)queue_probe,false,0);
         if(pc==suspend_pc)dr_insert_clean_call(dc,bb,first,(void *)suspend_target,false,0);
         for (uint i = 0; i < segments; i++) {
             if (pc >= lo[i] && pc < hi[i]) {
@@ -155,6 +206,8 @@ DR_EXPORT void dr_client_main(client_id_t id, int argc, const char *argv[]) {
         }
     }
     DR_ASSERT(segments > 0);
+    queue_probe_pc=(app_pc)dr_get_proc_address(app->handle,"unix_queue_probe");
+    if(queue_probe_pc)dr_register_signal_event(queue_probe_signal);
     suspend_pc=(app_pc)dr_get_proc_address(app->handle,"unix_request_suspend");
     after_suspend=(app_pc)dr_get_proc_address(app->handle,"unix_after_suspend");
     DR_ASSERT((suspend_pc==NULL)==(after_suspend==NULL));
