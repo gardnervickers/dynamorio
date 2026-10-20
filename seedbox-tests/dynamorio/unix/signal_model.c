@@ -311,9 +311,11 @@ __asm__(".text\n"
          * continuations record which way the body left in out_cont (x17).
          */
         "a64ps_body_udf:\n" PRELUDE
-        ".global a64ps_udf\n"
-        "a64ps_udf:\n"
-        "  .inst 0x00000051\n" /* udf #0x51 */
+        /* Keep the heavily instrumented prelude out of the UDF block.  The
+         * otherwise-unreachable second branch preserves every following
+         * instruction address (and thus the client's per-PC random stream).
+         */
+        "  b a64ps_udf\n"
         "  b a64ps_next\n"
         "a64ps_body_segv:\n" PRELUDE
         "  ldr x16, [x28, #" SGS(O_AUX2) "]\n"
@@ -489,6 +491,13 @@ __asm__(".text\n"
         "  ret\n"
         ".global a64ps_rw_end\n"
         "a64ps_rw_end:\n"
+        /* A separate two-instruction block keeps conservative drreg spills and
+         * clean-call instrumentation below AArch64's fragment-size limit.
+         */
+        ".global a64ps_udf\n"
+        "a64ps_udf:\n"
+        "  .inst 0x00000051\n" /* udf #0x51 */
+        "  b a64ps_next\n"
         ".global a64ps_code_hi\n"
         "a64ps_code_hi:\n"
         ".section .data\n"
