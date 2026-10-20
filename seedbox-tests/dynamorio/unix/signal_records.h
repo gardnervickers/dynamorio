@@ -101,7 +101,7 @@
  */
 
 /* Linux signal ABI validation extracted from a64_prop_support.c/h at
- * 356c1821045a4b5678d0813e132074324623df6e. Optional first-UDF snapshots
+ * 356c1821045a4b5678d0813e132074324623df6e. Optional first-entry snapshots
  * observe accepted fields without changing validation. No DR-internal layout. */
 struct a64p_rec_head {
     uint32_t magic, size;
@@ -156,7 +156,7 @@ a64p_find_rec(ucontext_t *uc, uint32_t magic)
 #define POE_MAGIC_ 0x504f4530
 #define GCS_MAGIC_ 0x47435300
 
-/* First-UDF diagnostics only: no addresses/padding, at most 12 record headers
+/* First-entry diagnostics only: no addresses/padding, at most 12 record headers
  * (10 distinct kinds plus two terminators) and the parser's maximum VL=256.
  * Full SVE copies at most 8736 named register bytes, plus 512 FPSIMD bytes.
  * Other optional records have metadata only. Header-only SVE has no payload.

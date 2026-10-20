@@ -610,11 +610,13 @@ typedef struct {
 } sgrun_t;
 static sgrun_t g;
 
-/* One entry-frame observation for UDF, independent of per-case run state. */
-static struct a64p_frame_snapshot first_udf_frame;
-static int first_udf_index = -1;
-static uint64_t first_udf_seed, first_udf_sp_distance;
-static int first_udf_on_alt, first_udf_expected_alt, first_udf_below_sp;
+/* One entry-frame observation per named probe, independent of run state. */
+typedef struct {
+    struct a64p_frame_snapshot frame;
+    int index, on_alt, expected_alt, below_sp;
+    uint64_t seed, sp_distance;
+} frame_probe_t;
+static frame_probe_t first_udf = { .index = -1 }, first_pipe = { .index = -1 };
 
 static int verbose;
 static int g_is_dr;
@@ -947,16 +949,27 @@ check_frame(int sig, ucontext_t *uc, int expect_alt)
     uint64_t layout;
     int sve_vl, za_vl;
     struct a64p_frame_snapshot *snapshot = NULL;
+    frame_probe_t *probe = NULL;
     if (sig == SIGILL && g.c != NULL && g.c->kind == K_UDF &&
-        uc->uc_mcontext.pc == PC(a64ps_udf) && !first_udf_frame.attempted) {
-        snapshot = &first_udf_frame;
-        first_udf_index = g.c->idx;
-        first_udf_seed = g.c->seed;
+        uc->uc_mcontext.pc == PC(a64ps_udf) && !first_udf.frame.attempted)
+        probe = &first_udf;
+    /* The first PIPE case is the failing abi/pipe comparison. Capture its
+     * first accepted interruption, before the handler edits the context. */
+    if (g.c != NULL && g.c->kind == K_PIPE && g.c->idx == K_PIPE &&
+        g.r != NULL && g.r->layout == 0 &&
+        (uc->uc_mcontext.pc == PC(a64ps_pipe_svc) ||
+         uc->uc_mcontext.pc == PC(a64ps_pipe_svc) + 4) &&
+        !first_pipe.frame.attempted)
+        probe = &first_pipe;
+    if (probe != NULL) {
+        snapshot = &probe->frame;
+        probe->index = g.c->idx;
+        probe->seed = g.c->seed;
         uintptr_t frame = (uintptr_t)uc, sp = uc->uc_mcontext.sp;
-        first_udf_on_alt = frame >= SG_ALT_LO && frame < SG_ALT_LO + SG_ALT_SIZE;
-        first_udf_expected_alt = expect_alt;
-        first_udf_below_sp = frame <= sp;
-        first_udf_sp_distance = frame <= sp ? sp - frame : frame - sp;
+        probe->on_alt = frame >= SG_ALT_LO && frame < SG_ALT_LO + SG_ALT_SIZE;
+        probe->expected_alt = expect_alt;
+        probe->below_sp = frame <= sp;
+        probe->sp_distance = frame <= sp ? sp - frame : frame - sp;
     }
     if (a64p_check_frame_records_snapshot(uc, &layout, &sve_vl, &za_vl,
                                           err, sizeof(err), snapshot) != 0) {
@@ -1932,10 +1945,11 @@ child_teardown(void)
  * an inference from the layout hash or proof the app initialized that state.
  * Streaming-mode FFR interpretation additionally depends on SME_FA64 support.
  * At most 12 headers and 9248 register bytes produce less than 24 KiB of text
- * once per UDF process. No optional-record payload besides FPSIMD/SVE is dumped.
+ * once per probed process. No optional-record payload besides FPSIMD/SVE is dumped.
  */
 static void
-dump_udf_bytes(const char *name, int reg, const uint8_t *data, size_t size)
+dump_frame_bytes(const char *label, const char *name, int reg,
+                 const uint8_t *data, size_t size)
 {
     static const char digits[] = "0123456789abcdef";
     char text[2 * A64P_SNAPSHOT_VL + 1];
@@ -1945,9 +1959,9 @@ dump_udf_bytes(const char *name, int reg, const uint8_t *data, size_t size)
     }
     text[2 * size] = '\0';
     if (reg < 0)
-        fprintf(stderr, "udf-frame: %s=%s\n", name, text);
+        fprintf(stderr, "%s-frame: %s=%s\n", label, name, text);
     else
-        fprintf(stderr, "udf-frame: %s%d=%s\n", name, reg, text);
+        fprintf(stderr, "%s-frame: %s%d=%s\n", label, name, reg, text);
 }
 
 static const char *
@@ -1970,41 +1984,41 @@ udf_record_name(uint32_t magic)
 }
 
 static void
-dump_first_udf_frame(void)
+dump_first_frame(const char *label, const frame_probe_t *probe)
 {
-    const struct a64p_frame_snapshot *s = &first_udf_frame;
-    fprintf(stderr, "udf-frame: attempted=%d valid=%d case=%d seed=%llu "
+    const struct a64p_frame_snapshot *s = &probe->frame;
+    fprintf(stderr, "%s-frame: attempted=%d valid=%d case=%d seed=%llu "
             "stage=before-effects headers=%u truncated=%d byte-order=memory\n",
-            s->attempted, s->valid, first_udf_index,
-            (unsigned long long)first_udf_seed, s->nrecords, s->metadata_truncated);
+            label, s->attempted, s->valid, probe->index,
+            (unsigned long long)probe->seed, s->nrecords, s->metadata_truncated);
     if (s->attempted)
-        fprintf(stderr, "udf-frame: frame-on-alt=%d expected-alt=%d position=%s-sp distance=%llu\n",
-                first_udf_on_alt, first_udf_expected_alt,
-                first_udf_below_sp ? "below" : "above",
-                (unsigned long long)first_udf_sp_distance);
+        fprintf(stderr, "%s-frame: frame-on-alt=%d expected-alt=%d position=%s-sp distance=%llu\n",
+                label, probe->on_alt, probe->expected_alt,
+                probe->below_sp ? "below" : "above",
+                (unsigned long long)probe->sp_distance);
     for (unsigned i = 0; i < s->nrecords; i++) {
-        fprintf(stderr, "udf-frame: record=%u region=%s offset=%zu kind=%s "
-                "magic=%08x size=%u\n", i, s->records[i].extra ? "extra" : "reserved",
+        fprintf(stderr, "%s-frame: record=%u region=%s offset=%zu kind=%s "
+                "magic=%08x size=%u\n", label, i, s->records[i].extra ? "extra" : "reserved",
                 s->records[i].offset, udf_record_name(s->records[i].magic),
                 s->records[i].magic, s->records[i].size);
     }
     if (s->extra_present)
-        fprintf(stderr, "udf-frame: extra-bytes=%u position=%s-reserved-end distance=%zu\n",
-                s->extra_size, s->extra_after_reserved ? "after" : "before",
+        fprintf(stderr, "%s-frame: extra-bytes=%u position=%s-reserved-end distance=%zu\n",
+                label, s->extra_size, s->extra_after_reserved ? "after" : "before",
                 s->extra_distance);
     if (s->fpsimd_present) {
-        fprintf(stderr, "udf-frame: fpcr=%08x fpsr=%08x\n", s->fpcr, s->fpsr);
+        fprintf(stderr, "%s-frame: fpcr=%08x fpsr=%08x\n", label, s->fpcr, s->fpsr);
         for (int i = 0; i < 32; i++)
-            dump_udf_bytes("v", i, s->v + 16 * i, 16);
+            dump_frame_bytes(label, "v", i, s->v + 16 * i, 16);
     }
-    fprintf(stderr, "udf-frame: sve-present=%d vl-bytes=%u flags=%04x payload-present=%d\n",
-            s->sve_present, s->sve_vl, s->sve_flags, s->sve_payload_present);
+    fprintf(stderr, "%s-frame: sve-present=%d vl-bytes=%u flags=%04x payload-present=%d\n",
+            label, s->sve_present, s->sve_vl, s->sve_flags, s->sve_payload_present);
     if (s->sve_payload_present) {
         for (int i = 0; i < 32; i++)
-            dump_udf_bytes("z", i, s->z + s->sve_vl * i, s->sve_vl);
+            dump_frame_bytes(label, "z", i, s->z + s->sve_vl * i, s->sve_vl);
         for (int i = 0; i < 16; i++)
-            dump_udf_bytes("p", i, s->p + s->sve_vl / 8 * i, s->sve_vl / 8);
-        dump_udf_bytes("ffr", -1, s->ffr, s->sve_vl / 8);
+            dump_frame_bytes(label, "p", i, s->p + s->sve_vl / 8 * i, s->sve_vl / 8);
+        dump_frame_bytes(label, "ffr", -1, s->ffr, s->sve_vl / 8);
     }
 }
 
@@ -2029,7 +2043,8 @@ int main(int argc,char **argv) {
         int idx=i*nk+kind;sgcase_t c;sgres_t r;
         gen_case(kind,idx,1+(uint64_t)idx,&c,paths);
         int failed=run_case(&c,&r);
-        if(i==0 && kind==K_UDF)dump_first_udf_frame();
+        if(i==0 && kind==K_UDF)dump_first_frame("udf", &first_udf);
+        if(i==0 && kind==K_PIPE)dump_first_frame("pipe", &first_pipe);
         if(failed) {print_case(stderr,&c);return 1;}
         if(i==0)fprintf(stderr,"model: raw-layout %llx frame-state %llx\n",(unsigned long long)r.layout,(unsigned long long)r.frame_state);
         printf("%d",idx);
