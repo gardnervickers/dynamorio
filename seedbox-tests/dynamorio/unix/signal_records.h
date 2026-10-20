@@ -43,7 +43,7 @@
  *     is allowed: any PC of the spin loop the scenario waits in) with exactly
  *     the modelled GPRs, SP, NZCV, DIT, V registers and FPCR, and a frame
  *     whose record list is valid by the kernel ABI (a64p_check_frame_records)
- *     and identical to the native one;
+ *     and semantically equivalent to the native one (see frame comparison below);
  *   - handler-written GPR, NZCV, DIT, V register, PC (a labelled continuation)
  *     and SP (moved within the live stack) take effect after sigreturn, and
  *     state the handler does not write is preserved (notably DIT);
@@ -434,4 +434,78 @@ a64p_check_frame_records(const ucontext_t *uc, uint64_t *layout, int *sve_vl, in
                          char *err, size_t errlen)
 {
     return a64p_check_frame_records_snapshot(uc, layout, sve_vl, za_vl, err, errlen, NULL);
+}
+
+/* Comparison for signal_model only, after successful record validation.
+ * Linux permits SVE metadata without live scalable registers (non-live P/FFR
+ * are unspecified, and Linux zeroes them on next use). The captured
+ * VL=16 non-streaming full form with Zn=Vn and zero Pn/FFR represents the same
+ * FPSIMD-only state. Normalize exactly that form, retaining the original walk's
+ * layout hash for diagnostics. All other record sizes/metadata remain exact.
+ * https://docs.kernel.org/arch/arm64/sve.html sections 3--5; Linux
+ * arch/arm64/kernel/fpsimd.c, FP_STATE_FPSIMD and do_sve_acc.
+ * Named FPSIMD and live SVE bytes are hashed too; no padding or EXTRA pointer.
+ * Volatile scalar reads avoid disturbing interrupted SIMD state.
+ */
+static uint64_t
+a64p_frame_comparison(const ucontext_t *uc)
+{
+    const uint8_t *base = (const uint8_t *)uc->uc_mcontext.__reserved;
+    const struct a64p_fpsimd_rec *fp =
+        (const struct a64p_fpsimd_rec *)a64p_find_rec((ucontext_t *)uc, FPSIMD_MAGIC_);
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    const struct a64p_extra_rec *extra = NULL;
+#define FRAME_HASH(value) (hash = (hash ^ (value)) * 0x100000001b3ULL)
+    for (int region = 0; region < 2; region++) {
+        const uint8_t *record = base;
+        for (;;) {
+            const struct a64p_rec_head *h = (const void *)record;
+            uint32_t size = h->size;
+            int fpsimd_only = 0;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            if (h->magic == SVE_MAGIC_ && size == 576 && fp != NULL &&
+                *(const uint16_t *)(record + 8) == 16 &&
+                *(const uint16_t *)(record + 10) == 0) {
+                fpsimd_only = 1;
+                const volatile uint8_t *z = record + 16;
+                const volatile uint8_t *v = (const void *)fp->v;
+                for (size_t i = 0; i < 512; i++)
+                    if (z[i] != v[i])
+                        fpsimd_only = 0;
+                /* At VL=16 the only extra state is 16 predicates and FFR. */
+                for (size_t i = 512; i < 546; i++)
+                    if (z[i] != 0)
+                        fpsimd_only = 0;
+            }
+#endif
+            FRAME_HASH(h->magic);
+            FRAME_HASH(fpsimd_only ? 16 : size);
+            if (h->magic == 0)
+                break;
+            if (h->magic == FPSIMD_MAGIC_) {
+                const volatile uint8_t *p = record + 8;
+                for (size_t i = 0; i < sizeof(*fp) - 8; i++)
+                    FRAME_HASH(p[i]); /* FPSR, FPCR and all V registers */
+            } else if (h->magic == SVE_MAGIC_) {
+                unsigned vl = *(const uint16_t *)(record + 8);
+                unsigned flags = *(const uint16_t *)(record + 10);
+                FRAME_HASH((uint64_t)vl << 16 | flags);
+                if (size != 16 && !fpsimd_only) {
+                    const volatile uint8_t *p = record + 16;
+                    for (size_t i = 0; i < 32 * vl + 17 * (vl / 8); i++)
+                        FRAME_HASH(p[i]); /* Zn, Pn and FFR, excluding padding */
+                }
+            } else if (h->magic == ZA_MAGIC_) {
+                FRAME_HASH(*(const uint16_t *)(record + 8));
+            } else if (h->magic == EXTRA_MAGIC_) {
+                extra = (const void *)record;
+            }
+            record += size;
+        }
+        if (region != 0 || extra == NULL)
+            break;
+        base = (const uint8_t *)(uintptr_t)extra->datap;
+    }
+#undef FRAME_HASH
+    return hash;
 }

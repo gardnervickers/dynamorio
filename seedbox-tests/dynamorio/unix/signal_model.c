@@ -578,7 +578,8 @@ typedef struct {
     int conclusive;
     uint64_t out_x[31], out_sp, out_nzcv, out_dit, out_cont;
     __uint128_t out_v[32];
-    uint64_t layout; /* record layout of the first handler frame */
+    uint64_t layout; /* raw record layout of the first handler frame */
+    uint64_t frame_state; /* validated layout plus semantic FPSIMD/SVE state */
     int nobs;
     uint64_t obs[NOBS];
     int nlog;
@@ -965,8 +966,10 @@ check_frame(int sig, ucontext_t *uc, int expect_alt)
     if (g.native_za_vl > 0 && za_vl != g.native_za_vl)
         hfail("signal %d: ZA record vl %d, PR_SME_GET_VL %ld", sig, za_vl,
               g.native_za_vl);
-    if (g.r != NULL && g.r->layout == 0)
+    if (g.r != NULL && g.r->layout == 0) {
         g.r->layout = layout;
+        g.r->frame_state = a64p_frame_comparison(uc);
+    }
     g.sve_vl = sve_vl;
     g.za_vl = za_vl;
     uint64_t f = (uint64_t)(uintptr_t)uc;
@@ -1853,7 +1856,7 @@ cmp_res(const sgcase_t *c, const sgres_t *n, const sgres_t *d)
     RC(out_nzcv);
     RC(out_dit);
     RC(out_cont);
-    RC(layout);
+    RC(frame_state);
     RC(nobs);
     RC(nlog);
 #undef RC
@@ -2028,9 +2031,10 @@ int main(int argc,char **argv) {
         int failed=run_case(&c,&r);
         if(i==0 && kind==K_UDF)dump_first_udf_frame();
         if(failed) {print_case(stderr,&c);return 1;}
+        if(i==0)fprintf(stderr,"model: raw-layout %llx frame-state %llx\n",(unsigned long long)r.layout,(unsigned long long)r.frame_state);
         printf("%d",idx);
         for(int j=0;j<31;j++)if(j!=16 && !(kind==K_ISPIN && j==30))printf(" %llx",(unsigned long long)r.out_x[j]);
-        printf(" %llx %llx %llx %llx %llx %d %d",(unsigned long long)r.out_sp,(unsigned long long)r.out_nzcv,(unsigned long long)r.out_dit,(unsigned long long)r.out_cont,(unsigned long long)r.layout,r.nobs,r.nlog);
+        printf(" %llx %llx %llx %llx %llx %d %d",(unsigned long long)r.out_sp,(unsigned long long)r.out_nzcv,(unsigned long long)r.out_dit,(unsigned long long)r.out_cont,(unsigned long long)r.frame_state,r.nobs,r.nlog);
         for(int j=0;j<32;j++)printf(" %016llx%016llx",(unsigned long long)(r.out_v[j]>>64),(unsigned long long)r.out_v[j]);
         for(int j=0;j<r.nobs;j++)printf(" %llx",(unsigned long long)r.obs[j]);
         if(kind==K_RT && c.rt_masked)for(int j=0;j<r.nlog;j++)printf(" %llx",(unsigned long long)r.log[j]);
