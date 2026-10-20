@@ -1595,6 +1595,20 @@ redirect___gnu_Unwind_Find_exidx(void *pc, int *count)
 #    endif /* ARM && !ANDROID */
 #endif     /* LINUX */
 
+/* i#7630: glibc's fortified spelling includes the leading underscores.
+ * Keep its destination-size check when serving a client without private libc.
+ */
+static void *
+redirect___memcpy_chk(void *dst, const void *src, size_t len, size_t dst_len)
+{
+    if (len > dst_len) {
+        print_file(STDERR, "ERROR: __memcpy_chk destination buffer too small\n");
+        os_terminate(NULL, TERMINATE_PROCESS);
+        return NULL;
+    }
+    return memcpy(dst, src, len);
+}
+
 typedef struct _redirect_import_t {
     const char *name;
     app_pc func;
@@ -1653,6 +1667,7 @@ static const redirect_import_t redirect_imports[] = {
     { "strcasecmp", (app_pc)strcasecmp },
     /* Also redirect the _chk versions (i#1747, i#46) */
     { "memcpy_chk", (app_pc)memcpy },
+    { "__memcpy_chk", (app_pc)redirect___memcpy_chk },
     { "memset_chk", (app_pc)memset },
     { "memmove_chk", (app_pc)memmove },
     { "strncpy_chk", (app_pc)strncpy },
