@@ -798,6 +798,11 @@ function (_DR_set_compile_flags target is_client extra_flags static_DR)
 
     if (NOT DynamoRIO_USE_LIBC AND NOT tgt_cxx AND is_client)
       set(extra_flags "${extra_flags} -nostdlib")
+      if (AARCH64)
+        # Outlined atomics call libgcc helpers, which -nostdlib does not link.
+        # Keep C atomics inline for clients that do not use the C runtime.
+        set(extra_flags "${extra_flags} -mno-outline-atomics")
+      endif ()
       if (APPLE)
         # Avoid errors about missing the _chk versions of memcpy, etc.
         set(tgt_link_flags "${tgt_link_flags} -undefined dynamic_lookup")
