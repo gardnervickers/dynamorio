@@ -55,7 +55,7 @@ add_custom_command(OUTPUT "${jvm_dir}/jitstress.jar"
   COMMAND "${Java_JAR_EXECUTABLE}" cfm "${jvm_dir}/jitstress.jar" "${CMAKE_CURRENT_SOURCE_DIR}/jvm/manifest.txt" -C "${jvm_dir}/classes" .
   DEPENDS jvm/JitStress.java jvm/manifest.txt VERBATIM)
 add_custom_target(translator_jvm ALL DEPENDS "${jvm_dir}/jitstress.jar")
-install(FILES "${jvm_dir}/jitstress.jar" jvm/run.py jvm/source_oracle.py DESTINATION share/translator/jvm)
+install(FILES "${jvm_dir}/jitstress.jar" jvm/run.py jvm/source_oracle.py jvm/test_run.py DESTINATION share/translator/jvm)
 install(FILES phase.py codec_vectors.tsv origins.json DESTINATION share/translator)
 install(DIRECTORY vectors saved licenses DESTINATION share/translator)
 find_program(TRANSLATOR_GO go REQUIRED)

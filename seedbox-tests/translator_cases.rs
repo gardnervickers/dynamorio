@@ -77,6 +77,9 @@ fn checked(command: Command, label: &str, expected: &str) -> (String, String) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(reports) = std::env::var_os("SEEDBOX_TEST_REPORT_DIR") {
+        supervisor.env("SEEDBOX_TEST_REPORT_DIR", reports);
+    }
     let mut child = Running {
         child: supervisor
             .guarded_spawn()
@@ -268,6 +271,11 @@ fn node_jit_with_debug_runtime_and_public_observer() {
         .arg(&root)
         .args(["js", "jit", "--debug"]);
     checked(cmd, "Debug js/jit", "SB-runtime:Js.jit: PASS");
+}
+
+#[test]
+fn jvm_failure_diagnostics_survive_scratch_cleanup() {
+    python_case("jvm/test_run.py", &["failure-diagnostics"]);
 }
 
 #[test]

@@ -4,6 +4,8 @@ No compilation, download, affinity setting, cached references, or generic-client
 substitution for the ARM progress client occurs here. Each JVM is a fresh process.
 """
 import argparse
+from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import platform
@@ -17,7 +19,59 @@ from phase import execute as execute_phase
 from source_oracle import BASE_JVM, SCENARIOS, FLOORS, XLOG, count_log
 
 
+# The checker already owns a retained report directory and a bounded artifact
+# collector. Preserve only JVM text evidence before TemporaryDirectory removes
+# the failing phase, including exceptions/timeouts and failed stress floors.
+DIAGNOSTIC_LIMIT = 1024 * 1024
+
+
+def retain_failure(base, case):
+    report = os.environ.get("SEEDBOX_TEST_REPORT_DIR")
+    if not report:
+        print("jvm diagnostics unavailable: SEEDBOX_TEST_REPORT_DIR is unset", file=sys.stderr)
+        return
+    try:
+        destination = Path(tempfile.mkdtemp(prefix="jvm-" + case + "-", dir=report))
+        count = 0
+        for mode in ("native1", "native2", "xint", "translated"):
+            directory = base / mode
+            paths = [directory / "command.json", directory / "jvm.log"]
+            paths += sorted(directory.glob("hs_err_*.log"))[:2]
+            for path in paths:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                with path.open("rb") as source:
+                    size = os.fstat(source.fileno()).st_size
+                    data = source.read(DIAGNOSTIC_LIMIT)
+                    if size > DIAGNOSTIC_LIMIT:
+                        marker = b"\n[JVM diagnostic truncated: head and tail]\n"
+                        half = (DIAGNOSTIC_LIMIT - len(marker)) // 2
+                        source.seek(-half, os.SEEK_END)
+                        data = data[:half] + marker + source.read(half)
+                target = destination / mode / path.name
+                target.parent.mkdir(exist_ok=True)
+                target.write_bytes(data)
+                count += 1
+                print(f"jvm diagnostic {mode}/{path.name}: {len(data)}/{size} bytes", flush=True)
+        print(f"jvm failure diagnostics: {destination} ({count} files)", flush=True)
+    except OSError as error:
+        # Failure to publish evidence must not replace the original failure.
+        print(f"jvm diagnostic retention failed: {error}", file=sys.stderr)
+
+
+@contextmanager
+def working_directory(case):
+    with tempfile.TemporaryDirectory(prefix="dr-jvm-") as temporary:
+        base = Path(temporary)
+        try:
+            yield base
+        except BaseException:
+            retain_failure(base, case)
+            raise
+
+
 def execute(root, command, directory):
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
     env = {"DYNAMORIO_CONFIGDIR": str(directory), "HOME": str(directory)}
     status, stdout, stderr = execute_phase(root, command, directory, env)
     assert status == 0, (command, status, stdout, stderr)
@@ -64,8 +118,7 @@ def run(root, case, seed_offset=0):
         dr += ["-c", str(root / "lib/libtranslator_progress.so"),
                "--instructions-per-progress-call", "50000"]
     sc = SCENARIOS[scenario]
-    with tempfile.TemporaryDirectory(prefix="dr-jvm-") as temporary:
-        base = Path(temporary)
+    with working_directory(case) as base:
         results = []
         for mode in ("native1", "native2", "xint", "translated"):
             directory = base / mode
