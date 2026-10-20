@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/signalfd.h>
@@ -103,6 +104,35 @@ static int new_pid_namespace(void)
     /* Only the next child enters the new PID namespace. There is no init
      * shim: that child execs drrun or the native application directly. */
     return unshare(CLONE_NEWPID);
+}
+
+static int private_proc(void)
+{
+    /* procfs records the PID namespace of its mounting task. Mount only in
+     * the actual init child, before dropping mount capabilities. A private
+     * mount namespace and recursive private propagation keep both the host
+     * and the outside controller's /proc unchanged. */
+    if (unshare(CLONE_NEWNS) < 0 ||
+        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0 ||
+        mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) < 0)
+        return -1;
+    return 0;
+}
+
+static int own_proc(void)
+{
+    struct stat self, init;
+    if (getpid() != 1) { errno = EPROTO; return -1; }
+    if (stat("/proc/self", &self) < 0 || stat("/proc/1", &init) < 0) return -1;
+    if (self.st_dev != init.st_dev || self.st_ino != init.st_ino) {
+        errno = EPROTO;
+        return -1;
+    }
+    /* Check access using the same credentials that will execute the app. */
+    int maps = open("/proc/1/maps", O_RDONLY | O_CLOEXEC);
+    if (maps < 0) return -1;
+    close(maps);
+    return 0;
 }
 
 static unsigned long long limit_hits(void)
@@ -253,6 +283,10 @@ int main(int argc, char **argv)
         char ready;
         if (read(gate[0], &ready, 1) != 1) _exit(125);
         close(gate[0]);
+        if (pid1 && private_proc() < 0) {
+            dprintf(STDERR_FILENO, "isolate: setup private PID1 procfs: %s\n", strerror(errno));
+            _exit(125);
+        }
         if (privileged && (setgroups(0, NULL) < 0 || setgid(run_gid) < 0 ||
                            setuid(run_uid) < 0 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0))
             _exit(125);
@@ -263,6 +297,10 @@ int main(int argc, char **argv)
         struct pollfd controller_state = { .fd = controller_handle, .events = POLLIN };
         if (poll(&controller_state, 1, 0) != 0) _exit(125);
         close(controller_handle);
+        if (pid1 && own_proc() < 0) {
+            dprintf(STDERR_FILENO, "isolate: setup own PID1 maps: %s\n", strerror(errno));
+            _exit(125);
+        }
         if (sigaction(SIGPIPE, &original_pipe, NULL) < 0) _exit(125);
         sigprocmask(SIG_SETMASK, &original_mask, NULL);
         if (preflight) _exit(!pid1 || getpid() == 1 ? 0 : 125);

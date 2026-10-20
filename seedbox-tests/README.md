@@ -34,6 +34,11 @@ and its checker/CI for suite selection. Seedbox's time policy scans this directo
 (including Rust helpers and C syscall subjects), not upstream DR tests. The
 narrow subject-timer marker has its existing per-call bound/invariant contract.
 
+The PID1 launcher mounts procfs from the actual namespace-init child in a private
+mount namespace before dropping privileged credentials. Both launch paths check
+that `/proc/1` is that child's own process and its maps are readable with the
+application credentials; the outside controller keeps its original procfs view.
+
 Seedbox machine, backend, guest/PV/TCG and application integration tests and
 general shared test support remain in Seedbox. These cases use public process
 and SDK behavior and do not validate private DR internals or the guest epoch ABI.

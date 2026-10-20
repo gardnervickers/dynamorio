@@ -24,7 +24,7 @@ sudo = shutil.which("sudo", path="/run/wrappers/bin:/usr/bin:/bin")
 if not sudo:
     sys.stderr.buffer.write(probe.stderr)
     sys.exit("isolate: setup PID namespace denied; scoped sudo launcher unavailable")
-# The immutable Nix-store helper creates only the PID namespace; before exec,
+# The immutable Nix-store helper creates private PID/mount namespaces and procfs; before exec,
 # its child drops every supplementary group and the requested normal uid/gid.
 os.execv(sudo, [sudo, "-n", "--preserve-env=DYNAMORIO_CONFIGDIR", launcher, *prefix, "--as-user", str(os.getuid()),
                str(os.getgid()), *suffix])
