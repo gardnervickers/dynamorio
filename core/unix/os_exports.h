@@ -674,7 +674,7 @@ rseq_insert_start_label(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist);
 void signal_cache_exit(dcontext_t *dcontext);
 bool signal_holds_shared_fragment(dcontext_t *dcontext);
 
-#if defined(X86) && defined(LINUX)
+#if defined(LINUX) && (defined(X86) || defined(AARCH64))
 /* Called from a clean-call return slow path after client code has returned. */
 void
 signal_clean_call_return(void);

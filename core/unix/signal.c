@@ -5338,7 +5338,7 @@ signal_holds_shared_fragment(dcontext_t *dcontext)
         TEST(FRAG_SHARED, info->interrupted->flags);
 }
 
-#if defined(X86) && defined(LINUX)
+#if defined(LINUX) && (defined(X86) || defined(AARCH64))
 void
 signal_clean_call_return(void)
 {
