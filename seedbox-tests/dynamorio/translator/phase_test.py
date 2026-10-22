@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -83,7 +84,10 @@ signal.pause()
                 poll.register(identity[0], select.POLLIN)
                 events = poll.poll(30000)
                 self.assertTrue(events)
-                self.assertTrue(events[0][1] & select.POLLHUP)
+                self.assertTrue(events[0][1] & select.POLLIN)
+                # Zombies still accept signal zero; a reaped task does not.
+                with self.assertRaises(ProcessLookupError):
+                    signal.pidfd_send_signal(identity[0], 0)
             finally:
                 for fd in identity:
                     os.close(fd)
