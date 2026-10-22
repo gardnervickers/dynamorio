@@ -482,6 +482,31 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
     return copy_pc + 4;
 }
 
+/* Returns the word to emit for instr, which was decoded from app memory where word
+ * is now: word if it still holds instr, else instr's encoding.
+ */
+static uint
+app_word_to_emit(dcontext_t *dcontext, instr_t *instr, uint word, byte *final_pc)
+{
+    decode_info_t di;
+    di.check_reachable = false;
+    uint enc = encode_common(final_pc, instr, &di);
+    if (enc != ENCFAIL && enc != word) {
+        /* The encoder may choose another encoding of the same instruction. */
+        instr_t now;
+        instr_init(dcontext, &now);
+        if (decode_from_copy(dcontext, (byte *)&word, instr->bytes, &now) == NULL ||
+            !instr_same(&now, instr)) {
+            LOG(THREAD, LOG_EMIT, 2,
+                "app instr " PFX " changed after decode: emitting 0x%08x not 0x%08x\n",
+                instr->bytes, enc, word);
+            word = enc;
+        }
+        instr_free(dcontext, &now);
+    }
+    return word;
+}
+
 byte *
 copy_and_re_relativize_raw_instr(dcontext_t *dcontext, instr_t *instr, byte *dst_pc,
                                  byte *final_pc)
@@ -504,22 +529,18 @@ copy_and_re_relativize_raw_instr(dcontext_t *dcontext, instr_t *instr, byte *dst
          * thread could have executed had it run before the patch.
          */
         uint word = *(volatile uint *)instr->bytes;
-        decode_info_t di;
-        di.check_reachable = false;
-        uint enc = encode_common(final_pc, instr, &di);
-        if (enc != ENCFAIL && enc != word) {
-            /* The encoder may choose another encoding of the same instruction. */
-            instr_t now;
-            instr_init(dcontext, &now);
-            if (decode_from_copy(dcontext, (byte *)&word, instr->bytes, &now) == NULL ||
-                !instr_same(&now, instr)) {
-                LOG(THREAD, LOG_EMIT, 2,
-                    "app instr " PFX " changed after decode: emitting 0x%08x not 0x%08x\n",
-                    instr->bytes, enc, word);
-                word = enc;
-            }
-            instr_free(dcontext, &now);
-        }
+#ifndef NOT_DYNAMORIO_CORE_PROPER
+        uint decoded;
+        if (bb_build_decoded_word(dcontext, instr, &decoded) && decoded == word) {
+            /* The usual case: bb building decoded instr from its copy of this word,
+             * so the bytes still hold instr, and we need not encode it to check.
+             */
+            DOCHECK(1, {
+                ASSERT(app_word_to_emit(dcontext, instr, word, final_pc) == word);
+            });
+        } else
+#endif
+            word = app_word_to_emit(dcontext, instr, word, final_pc);
         *(uint *)dst_pc = word;
         return dst_pc + AARCH64_INSTR_SIZE;
     }

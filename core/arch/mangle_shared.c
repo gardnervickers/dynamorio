@@ -190,46 +190,38 @@ prepare_for_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_t
 
     instr_t *start_label = INSTR_CREATE_label(dcontext);
     instr_set_note(start_label, (void *)DR_NOTE_CALL_SEQUENCE_START);
-    PRE(ilist, instr, start_label);
 
     if (cci == NULL)
         cci = &default_clean_call_info;
+#ifdef AARCH64
+    /* An out-of-line call site starts the region after clean_call_save has
+     * returned: see insert_out_of_line_context_switch().
+     */
+    if (!cci->out_of_line_swap)
+#endif
+        PRE(ilist, instr, start_label);
 
     /* Swap stacks.  For thread-shared, we need to get the dcontext
      * dynamically rather than use the constant passed in here.  Save
      * away xax in a TLS slot and then load the dcontext there.
      */
+#ifdef AARCH64
+    /* The out-of-line clean_call_save routine swaps stacks itself. */
+    if (!cci->out_of_line_swap)
+        insert_clean_call_stack_swap(dcontext, ilist, instr, true /*to dstack*/);
+#else
     if (SCRATCH_ALWAYS_TLS()) {
         PRE(ilist, instr,
             instr_create_save_to_tls(dcontext, SCRATCH_REG0, TLS_REG0_SLOT));
         insert_get_mcontext_base(dcontext, ilist, instr, SCRATCH_REG0);
-#ifdef AARCH64
-        /* We need an addtional scratch register for saving the SP.
-         * TLS_REG1_SLOT is not safe since it may be used by clients.
-         * Instead we save it to dcontext.mcontext.x0, which is not
-         * used by dr_save_reg (see definition of SPILL_SLOT_MC_REG).
-         */
-        PRE(ilist, instr,
-            XINST_CREATE_store(dcontext, OPND_CREATE_MEMPTR(SCRATCH_REG0, 0),
-                               opnd_create_reg(SCRATCH_REG1)));
-        PRE(ilist, instr,
-            XINST_CREATE_move(dcontext, opnd_create_reg(SCRATCH_REG1),
-                              opnd_create_reg(DR_REG_XSP)));
-        PRE(ilist, instr,
-            XINST_CREATE_store(dcontext,
-                               opnd_create_dcontext_field_via_reg_sz(
-                                   dcontext, SCRATCH_REG0, XSP_OFFSET, OPSZ_PTR),
-                               opnd_create_reg(SCRATCH_REG1)));
-#else
         PRE(ilist, instr,
             instr_create_save_to_dc_via_reg(dcontext, SCRATCH_REG0, REG_XSP, XSP_OFFSET));
-#endif
         /* DSTACK_OFFSET isn't within the upcontext so if it's separate this won't
          * work right.  FIXME - the dcontext accessing routines are a mess of shared
          * vs. no shared support, separate context vs. no separate context support etc. */
         ASSERT_NOT_IMPLEMENTED(!TEST(SELFPROT_DCONTEXT, dynamo_options.protect_mask));
 
-#ifdef WINDOWS
+#    ifdef WINDOWS
         /* i#249: swap PEB pointers while we have dcxt in reg.  We risk "silent
          * death" by using xsp as scratch but don't have simple alternative.
          * We don't support non-SCRATCH_ALWAYS_TLS.
@@ -241,39 +233,25 @@ prepare_for_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_t
             preinsert_swap_peb(dcontext, ilist, instr, !SCRATCH_ALWAYS_TLS(),
                                REG_XAX /*dc*/, REG_XSP /*scratch*/, true /*to priv*/);
         }
-#endif
-#ifdef AARCH64
-        PRE(ilist, instr,
-            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
-                              opnd_create_dcontext_field_via_reg_sz(
-                                  dcontext, SCRATCH_REG0, DSTACK_OFFSET, OPSZ_PTR)));
-        PRE(ilist, instr,
-            XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_XSP),
-                              opnd_create_reg(SCRATCH_REG1)));
-        /* Restore scratch_reg from dcontext.mcontext.x0. */
-        PRE(ilist, instr,
-            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
-                              OPND_CREATE_MEMPTR(SCRATCH_REG0, 0)));
-#else
+#    endif
         PRE(ilist, instr,
             instr_create_restore_from_dc_via_reg(dcontext, SCRATCH_REG0, REG_XSP,
                                                  DSTACK_OFFSET));
-#endif
         /* Restore SCRATCH_REG0 before pushing the context on the dstack. */
         PRE(ilist, instr,
             instr_create_restore_from_tls(dcontext, SCRATCH_REG0, TLS_REG0_SLOT));
     } else {
-        IF_AARCH64(ASSERT_NOT_REACHED());
         IF_RISCV64(ASSERT_NOT_REACHED());
         PRE(ilist, instr, instr_create_save_to_dcontext(dcontext, REG_XSP, XSP_OFFSET));
-#ifdef WINDOWS
+#    ifdef WINDOWS
         if (!cci->out_of_line_swap) {
             preinsert_swap_peb(dcontext, ilist, instr, !SCRATCH_ALWAYS_TLS(),
                                REG_XAX /*unused*/, REG_XSP /*scratch*/, true /*to priv*/);
         }
-#endif
+#    endif
         PRE(ilist, instr, instr_create_restore_dynamo_stack(dcontext));
     }
+#endif
 
     /* Save flags and all registers, in priv_mcontext_t order.
      * We're at base of dstack so should be nicely aligned.
@@ -289,6 +267,15 @@ prepare_for_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_t
     if (cci->out_of_line_swap) {
         dstack_offs +=
             insert_out_of_line_context_switch(dcontext, ilist, instr, true, encode_pc);
+#ifdef AARCH64
+        PRE(ilist, instr, start_label);
+        /* x30 holds clean_call_save's return address. */
+        if (cci->args_read_lr) {
+            PRE(ilist, instr,
+                INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X30),
+                                 OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30))));
+        }
+#endif
     } else {
         dstack_offs += insert_push_all_registers(dcontext, cci, ilist, instr,
                                                  (uint)PAGE_SIZE, OPND_CREATE_INT32(0),
@@ -379,13 +366,18 @@ cleanup_after_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instrlist
     /* Swap stacks back.  For thread-shared, we need to get the dcontext
      * dynamically.  Save xax in TLS so we can use it as scratch.
      */
+#ifdef AARCH64
+    /* The out-of-line clean_call_restore routine swaps stacks itself. */
+    if (!cci->out_of_line_swap)
+        insert_clean_call_stack_swap(dcontext, ilist, instr, false /*to app*/);
+#else
     if (SCRATCH_ALWAYS_TLS()) {
         PRE(ilist, instr,
             instr_create_save_to_tls(dcontext, SCRATCH_REG0, TLS_REG0_SLOT));
 
         insert_get_mcontext_base(dcontext, ilist, instr, SCRATCH_REG0);
 
-#ifdef WINDOWS
+#    ifdef WINDOWS
         /* i#249: swap PEB pointers while we have dcxt in reg.  We risk "silent
          * death" by using xsp as scratch but don't have simple alternative.
          * We don't support non-SCRATCH_ALWAYS_TLS.
@@ -394,47 +386,36 @@ cleanup_after_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instrlist
             preinsert_swap_peb(dcontext, ilist, instr, !SCRATCH_ALWAYS_TLS(),
                                REG_XAX /*dc*/, REG_XSP /*scratch*/, false /*to app*/);
         }
-#endif
+#    endif
 
-#ifdef AARCH64
-        /* TLS_REG1_SLOT is not safe since it may be used by clients.
-         * We save it to dcontext.mcontext.x0.
-         */
-        PRE(ilist, instr,
-            XINST_CREATE_store(dcontext, OPND_CREATE_MEMPTR(SCRATCH_REG0, 0),
-                               opnd_create_reg(SCRATCH_REG1)));
-        PRE(ilist, instr,
-            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
-                              opnd_create_dcontext_field_via_reg_sz(
-                                  dcontext, SCRATCH_REG0, XSP_OFFSET, OPSZ_PTR)));
-        PRE(ilist, instr,
-            XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_XSP),
-                              opnd_create_reg(SCRATCH_REG1)));
-        /* Restore scratch_reg from dcontext.mcontext.x0. */
-        PRE(ilist, instr,
-            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
-                              OPND_CREATE_MEMPTR(SCRATCH_REG0, 0)));
-#else
         PRE(ilist, instr,
             instr_create_restore_from_dc_via_reg(dcontext, SCRATCH_REG0, REG_XSP,
                                                  XSP_OFFSET));
-#endif
         PRE(ilist, instr,
             instr_create_restore_from_tls(dcontext, SCRATCH_REG0, TLS_REG0_SLOT));
     } else {
-        IF_AARCH64(ASSERT_NOT_REACHED());
-#ifdef WINDOWS
+#    ifdef WINDOWS
         if (!cci->out_of_line_swap) {
             preinsert_swap_peb(dcontext, ilist, instr, !SCRATCH_ALWAYS_TLS(),
                                REG_XAX /*unused*/, REG_XSP /*scratch*/, false /*to app*/);
         }
-#endif
+#    endif
         PRE(ilist, instr,
             instr_create_restore_from_dcontext(dcontext, REG_XSP, XSP_OFFSET));
     }
+#endif
     instr_t *end_label = INSTR_CREATE_label(dcontext);
     instr_set_note(end_label, (void *)DR_NOTE_CALL_SEQUENCE_END);
     PRE(ilist, instr, end_label);
+#ifdef AARCH64
+    /* The rest of an out-of-line call site is outside the region: see
+     * insert_out_of_line_context_switch().
+     */
+    if (cci->out_of_line_swap) {
+        PRE(ilist, instr,
+            instr_create_restore_from_tls(dcontext, DR_REG_X30, TLS_CLEAN_CALL_X30_SLOT));
+    }
+#endif
 }
 
 bool
@@ -2655,6 +2636,9 @@ clean_call_info_init(clean_call_info_t *cci, void *callee, bool save_fpstate,
     cci->save_all_regs = true;
     cci->should_align = true;
     cci->callee_info = &default_callee_info;
+#ifdef AARCH64
+    cci->args_read_lr = true;
+#endif
 }
 
 void

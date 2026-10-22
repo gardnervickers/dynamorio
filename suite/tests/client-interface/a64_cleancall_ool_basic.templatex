@@ -1,0 +1,2 @@
+basic: runs [0-9]+, callee contexts and arguments checked [0-9]+, faults [0-9]+
+basic: all properties hold

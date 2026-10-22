@@ -333,6 +333,46 @@ dump_thread_kstats(dcontext_t *dcontext)
     print_file(dcontext->thread_kstats->outfile_kstats, "} KSTATS\n");
 }
 
+/* Not an API, nor exported from libdynamorio: a hook for benchmarks linked with
+ * static DR that time DR's phases between two points of a run
+ * (api.a64_codegen_build's scaling mode), which find it with a weak reference, as
+ * it exists only in KSTATS builds.  Reports the calling thread's totals for the
+ * kstat called name: how many times it ran, its ticks including its sub-nodes',
+ * and the ticks per millisecond.  Returns false if the thread has no kstats
+ * (-kstats is off) or there is no kstat called name.  The sums (KSTAT_SUM) are
+ * computed only when kstats are reported, so they are not found either.  Only
+ * the totals of nodes that are not running are complete: a caller running app
+ * code has none running but thread_measured.
+ */
+bool
+dr_kstat_get(void *drcontext, const char *name, uint64 *count, uint64 *ticks,
+             uint64 *ticks_per_ms)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    kstat_variable_t *kv = NULL;
+    if (dcontext == NULL || dcontext->thread_kstats == NULL || name == NULL)
+        return false;
+#    undef KSTAT_SUM
+#    define KSTAT_SUM(desc, kname, var1, var2) /* not kept up to date */
+#    define KSTAT_DEF(desc, kname)     \
+        if (strcmp(name, #kname) == 0) \
+            kv = &dcontext->thread_kstats->vars_kstats.kname;
+#    include "kstatsx.h"
+#    undef KSTAT_DEF
+#    undef KSTAT_SUM
+    /* As at the top of this file, for the rest of it. */
+#    define KSTAT_SUM(desc, name, var1, var2) KSTAT_DEF(desc, name)
+    if (kv == NULL)
+        return false;
+    if (count != NULL)
+        *count = kv->num_self;
+    if (ticks != NULL)
+        *ticks = kv->total_self + kv->total_sub;
+    if (ticks_per_ms != NULL)
+        *ticks_per_ms = kstat_frequency_per_msec;
+    return true;
+}
+
 #    ifdef DEBUG
 /* We don't keep the variable name, but instead we lookup by addr when necessary */
 /* Too convoluted solution but since not common case, we don't bother

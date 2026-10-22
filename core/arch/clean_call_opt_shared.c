@@ -725,6 +725,13 @@ analyze_clean_call(dcontext_t *dcontext, clean_call_info_t *cci, instr_t *where,
     CLIENT_ASSERT(callee != NULL, "Clean call target is NULL");
     /* 1. init clean_call_info */
     clean_call_info_init(cci, callee, save_fpstate, num_args);
+#ifdef AARCH64
+    cci->args_read_lr = false;
+    for (uint i = 0; i < num_args; i++) {
+        if (opnd_uses_reg(args[i], DR_REG_LR))
+            cci->args_read_lr = true;
+    }
+#endif
     /* 2. check runtime optimization options */
     if (INTERNAL_OPTION(opt_cleancall) > 0) {
         /* 3. search if callee was analyzed before */

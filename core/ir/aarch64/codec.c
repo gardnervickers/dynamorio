@@ -9677,14 +9677,25 @@ decode_opnd_memlit(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
 }
 
 static inline bool
-encode_opnd_memlit(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+encode_opnd_memlit(uint enc, int opcode, byte *pc, opnd_t opnd, decode_info_t *di,
+                   OUT uint *enc_out)
 {
     ptr_uint_t off;
     if (!opnd_is_rel_addr(opnd) || opnd_get_size(opnd) != memlit_size(enc))
         return false;
     off = (byte *)opnd_get_addr(opnd) - pc;
-    if ((off & 3) != 0 || off + (1U << 20) >= 1U << 21)
+    if ((off & 3) != 0)
         return false;
+    if (off + (1U << 20) >= 1U << 21) {
+        /* As in encode_pc_off(), if !di->check_reachable an unreachable target is
+         * encoded as offset 0, but it must still be aligned.  This is what
+         * instr_get_eflags() and instr_get_isa_feature() need when they encode a
+         * new instruction to a buffer, where a literal is usually out of range.
+         */
+        if (di->check_reachable)
+            return false;
+        off = 0;
+    }
     *enc_out = (off >> 2 & 0x7ffff) << 5;
     return true;
 }
@@ -10204,6 +10215,47 @@ decode_category(uint encoding, instr_t *instr)
 #include "isa_feature_gen_v82.h"
 #include "isa_feature_gen_v81.h"
 #include "isa_feature_gen_v80.h"
+#include "opcode_eflags.h"
+
+/* The flags usage of mrs and msr ("er" and "ew" in codec.txt), which depends on
+ * the system register.
+ */
+static uint
+sysreg_eflags(instr_t *instr, int opc)
+{
+    uint eflags = 0;
+    if (opc == OP_mrs && instr_num_srcs(instr) == 1 &&
+        opnd_is_reg(instr_get_src(instr, 0)) &&
+        opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_NZCV) {
+        eflags |= EFLAGS_READ_NZCV;
+    }
+    if (opc == OP_mrs && instr_num_srcs(instr) == 1 &&
+        opnd_is_reg(instr_get_src(instr, 0)) &&
+        (opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_RNDR ||
+         opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_RNDRRS)) {
+        eflags |= EFLAGS_WRITE_NZCV;
+    }
+    if (opc == OP_msr && instr_num_dsts(instr) == 1 &&
+        opnd_is_reg(instr_get_dst(instr, 0)) &&
+        opnd_get_reg(instr_get_dst(instr, 0)) == DR_REG_NZCV) {
+        eflags |= EFLAGS_WRITE_NZCV;
+    }
+    return eflags;
+}
+
+bool
+instr_eflags_from_opcode(instr_t *instr, OUT uint *usage)
+{
+    int opc = instr_get_opcode(instr);
+    /* Not OP_xx, whose word may decode as a known opcode, OP_ldstex, which holds
+     * several instructions, or the pseudo-opcodes.
+     */
+    if (opc <= OP_ldstex || opc > OP_LAST)
+        return false;
+    ASSERT(opc < BUFFER_SIZE_ELEMENTS(opcode_eflags));
+    *usage = opcode_eflags[opc] | sysreg_eflags(instr, opc);
+    return true;
+}
 
 /******************************************************************************/
 
@@ -10272,22 +10324,7 @@ decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
      * flags register.
      */
     opc = instr_get_opcode(instr);
-    if (opc == OP_mrs && instr_num_srcs(instr) == 1 &&
-        opnd_is_reg(instr_get_src(instr, 0)) &&
-        opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_NZCV) {
-        eflags |= EFLAGS_READ_NZCV;
-    }
-    if (opc == OP_mrs && instr_num_srcs(instr) == 1 &&
-        opnd_is_reg(instr_get_src(instr, 0)) &&
-        (opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_RNDR ||
-         opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_RNDRRS)) {
-        eflags |= EFLAGS_WRITE_NZCV;
-    }
-    if (opc == OP_msr && instr_num_dsts(instr) == 1 &&
-        opnd_is_reg(instr_get_dst(instr, 0)) &&
-        opnd_get_reg(instr_get_dst(instr, 0)) == DR_REG_NZCV) {
-        eflags |= EFLAGS_WRITE_NZCV;
-    }
+    eflags |= sysreg_eflags(instr, opc);
 
     /* XXX i#2626: Until the decoder for AArch64 covers all the instructions that
      * read/write aflags, as a workaround conservatively assume that all OP_xx

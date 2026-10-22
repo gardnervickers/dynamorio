@@ -136,6 +136,8 @@ instr_clone(void *drcontext, instr_t *orig)
     memcpy((void *)instr, (void *)orig, sizeof(instr_t));
     instr->next = NULL;
     instr->prev = NULL;
+    /* The clone is not the instr that bb building decoded. */
+    instr->flags &= ~INSTR_BB_DECODED;
 
     /* PR 214962: clients can see some of our mangling
      * (dr_insert_mbr_instrumentation(), traces), but don't let the flag
@@ -921,8 +923,29 @@ instr_get_predicate(instr_t *instr)
 instr_t *
 instr_set_predicate(instr_t *instr, dr_pred_type_t pred)
 {
-    instr->prefixes = ((instr->prefixes & ~PREFIX_PRED_MASK) |
-                       ((pred << PREFIX_PRED_BITPOS) & PREFIX_PRED_MASK));
+    uint prefixes = ((instr->prefixes & ~PREFIX_PRED_MASK) |
+                     ((pred << PREFIX_PRED_BITPOS) & PREFIX_PRED_MASK));
+    if (prefixes != instr->prefixes) {
+#ifdef AARCHXX
+        /* On ARM and AArch64 the raw bits encode the old predicate (e.g.,
+         * instr_invert_cbr() on a decoded B.cond), so do not use them to encode.
+         * Not when they are all the instr has (it was never decoded): we could not
+         * encode it.  Not instr_being_modified(): our mangling sets predicates on
+         * instrs it keeps marked as ours.  The decoders set the predicate before
+         * the raw bits.  On x86 the opcode holds the condition, and the predicate
+         * describes it.
+         * XXX: a decoded instr whose operands are no longer valid (e.g., after
+         * instr_make_persistent()) keeps its raw bits here and so still encodes
+         * the old predicate, as before we invalidated any: telling it apart from a
+         * never-decoded one would need a decode, and for Thumb its IT block.
+         */
+        if (instr_raw_bits_valid(instr) && instr_operands_valid(instr))
+            instr_set_raw_bits_valid(instr, false);
+#endif
+        /* Not the instr bb building decoded (bb_build_decoded_word()). */
+        instr->flags &= ~INSTR_BB_DECODED;
+    }
+    instr->prefixes = prefixes;
     return instr;
 }
 
@@ -1056,6 +1079,26 @@ instr_get_eflags(instr_t *instr, dr_opnd_query_flags_t flags)
         bool encoded = false;
         dcontext_t *dcontext = get_thread_private_dcontext();
         dr_isa_mode_t old_mode;
+#ifdef AARCH64
+        /* The opcode determines the flags usage of nearly every AArch64
+         * instruction, and the operands that of the rest, so a new instruction
+         * need not be encoded (to a buffer of ours, where a pc-relative target can
+         * be out of range) and decoded again (i#2374).  Debug DR still does, to
+         * check the answers agree.
+         */
+        uint usage_from_opcode;
+        bool from_opcode = instr_needs_encoding(instr) &&
+            instr_get_isa_mode(instr) == DR_ISA_ARM_A64 &&
+            instr_eflags_from_opcode(instr, &usage_from_opcode);
+#    if !defined(DEBUG) || defined(STANDALONE_DECODER)
+        if (from_opcode) {
+            instr->eflags = usage_from_opcode;
+            instr_set_eflags_valid(instr, true);
+            return instr_eflags_conditionally(instr->eflags, instr_get_predicate(instr),
+                                              flags);
+        }
+#    endif
+#endif
         /* we assume we cannot trust the opcode independently of operands */
         if (instr_needs_encoding(instr)) {
             int len;
@@ -1077,6 +1120,9 @@ instr_get_eflags(instr_t *instr, dr_opnd_query_flags_t flags)
             instr_free_raw_bits(dcontext, instr);
             CLIENT_ASSERT(!instr_raw_bits_valid(instr), "internal encoding buf error");
         }
+#if defined(AARCH64) && defined(DEBUG) && !defined(STANDALONE_DECODER)
+        ASSERT(!from_opcode || instr->eflags == usage_from_opcode);
+#endif
         /* even if decode fails, set valid to true -- ok?  FIXME */
         instr_set_eflags_valid(instr, true);
     }
@@ -1169,6 +1215,7 @@ instr_set_raw_bits(instr_t *instr, byte *addr, uint length)
     if (!instr_valid(instr))
         instr_set_opcode(instr, OP_UNDECODED);
     instr->flags |= INSTR_RAW_BITS_VALID;
+    instr->flags &= ~INSTR_BB_DECODED;
     instr->bytes = addr;
     instr->length = length;
 #ifdef X86
@@ -1185,6 +1232,7 @@ instr_shift_raw_bits(instr_t *instr, ssize_t offs)
 {
     if ((instr->flags & INSTR_RAW_BITS_VALID) != 0)
         instr->bytes += offs;
+    instr->flags &= ~INSTR_BB_DECODED;
 #ifdef X86
     instr_set_rip_rel_valid(instr, false); /* relies on original raw bits */
 #endif
@@ -1196,6 +1244,8 @@ instr_shift_raw_bits(instr_t *instr, ssize_t offs)
 void
 instr_set_raw_bits_valid(instr_t *instr, bool valid)
 {
+    /* Raw bits marked valid are not known to be what bb building decoded. */
+    instr->flags &= ~INSTR_BB_DECODED;
     if (valid)
         instr->flags |= INSTR_RAW_BITS_VALID;
     else {
@@ -1222,6 +1272,7 @@ instr_free_raw_bits(void *drcontext, instr_t *instr)
     instr->bytes = NULL;
     instr->flags &= ~INSTR_RAW_BITS_VALID;
     instr->flags &= ~INSTR_RAW_BITS_ALLOCATED;
+    instr->flags &= ~INSTR_BB_DECODED;
 }
 
 /* creates array of bytes to store raw bytes of an instr into
@@ -1263,6 +1314,7 @@ instr_allocate_raw_bits(void *drcontext, instr_t *instr, uint num_bytes)
     /* assume that the bits are now valid and the operands are not */
     instr->flags |= INSTR_RAW_BITS_VALID;
     instr->flags |= INSTR_RAW_BITS_ALLOCATED;
+    instr->flags &= ~INSTR_BB_DECODED;
     instr->flags &= ~INSTR_OPERANDS_VALID;
     instr->flags &= ~INSTR_EFLAGS_VALID;
 #ifdef X86

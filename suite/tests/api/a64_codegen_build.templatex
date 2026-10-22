@@ -1,0 +1,3 @@
+chain: [ -~]*
+((build|exec|size|note|scale) [ -~]*
+)*a64_codegen_build: done

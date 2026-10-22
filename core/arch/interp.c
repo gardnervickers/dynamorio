@@ -168,6 +168,16 @@ interp_exit()
  * B A S I C   B L O C K   B U I L D I N G
  */
 
+/* Storage for the code copy (see build_bb_t) of a bb of up to this many
+ * instructions, on the stack of build_basic_block_fragment(); a longer bb moves
+ * its copy to the heap.
+ */
+#define BB_CODE_COPY_INLINE_INSTRS 32
+typedef struct _bb_code_copy_inline_t {
+    uint words[BB_CODE_COPY_INLINE_INSTRS];
+    instr_t *instrs[BB_CODE_COPY_INLINE_INSTRS];
+} bb_code_copy_inline_t;
+
 /* we have a lot of data to pass around so we package it in this struct
  * so we can have separate routines for readability
  */
@@ -227,15 +237,21 @@ typedef struct {
     instr_t *instr;                    /* the current instr */
     int eflags;
     app_pc pretend_pc; /* selfmod only: decode from separate pc */
-    /* Building a sandboxed bb for the cache: the copy of its app code that it was
-     * decoded from, which emit stores as the copy its sandbox check compares the
-     * app code against (see bb_snapshot_selfmod_code()).
+    /* Building a bb for the cache (AArch64): the copy of its app code from start_pc
+     * that it was decoded from, and the instr_t each word of the copy was last
+     * decoded into (see bb_snapshot_code()).  Emit stores the copy of a sandboxed
+     * bb as the code its sandbox check compares the app code against, and copies
+     * the words of the app instrs into the cache without encoding them again.
      */
-    byte *selfmod_copy;
-    size_t selfmod_copy_len; /* bytes from start_pc copied so far */
-    size_t selfmod_copy_cap;
+    byte *code_copy;
+    instr_t **code_copy_instrs;
+    size_t code_copy_len; /* bytes from start_pc copied so far */
+    size_t code_copy_cap;
+    bool code_copy_on_heap;
+    bool code_copy_incomplete; /* some instr was decoded from the app code */
+    /* The caller's storage for the copy of a short bb, or NULL. */
+    bb_code_copy_inline_t *code_copy_inline;
     int selfmod_s2ro; /* -1 selects policy; 0/1 retain the emitted layout */
-    bool selfmod_copy_incomplete; /* some instr was decoded from the app code */
     /* -xl8_code_copy: the end of the code [start_pc, app_copy_end) that the fragment
      * stores a copy of, to translate from, or NULL.
      */
@@ -291,45 +307,147 @@ init_build_bb(build_bb_t *bb, app_pc start_pc, bool app_interp, bool for_cache,
 }
 
 #ifdef AARCH64
-/* A sandboxed bb checks the app code against a copy of it stored in the fragment,
- * so the copy must hold the code the bb was decoded from.  Emit used to copy the
- * app code after the bb was decoded: a write by another thread in between left a
- * bb that ran the old code but checked for the new, so it never noticed the write
- * (a patched loop never exited).  So for a sandboxed bb built for the cache we copy
- * each instruction's bytes once, before decoding it, and decode the copy; emit
- * stores that copy (bb_build_selfmod_copy()).  Returns where to decode the
- * instruction at bb->cur_pc from: the copy, or bb->cur_pc if there is no copy (and
- * then emit copies the app code).
+/* Makes room for size bytes in bb's code copy: in the caller's storage if it is
+ * enough, else on the heap.  Returns false if there is no room.
+ */
+static bool
+bb_grow_code_copy(build_bb_t *bb, size_t size)
+{
+    /* The instruction past -max_bb_instrs is decoded before the bb stops. */
+    size_t cap = (DYNAMO_OPTION(max_bb_instrs) + 1) * AARCH64_INSTR_SIZE;
+    byte *copy;
+    instr_t **instrs;
+    if (bb->code_copy == NULL && bb->code_copy_inline != NULL &&
+        size <= sizeof(bb->code_copy_inline->words)) {
+        bb->code_copy = (byte *)bb->code_copy_inline->words;
+        bb->code_copy_instrs = bb->code_copy_inline->instrs;
+        bb->code_copy_cap = sizeof(bb->code_copy_inline->words);
+        return true;
+    }
+    if (bb->code_copy_on_heap || size > cap)
+        return false;
+    copy = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, byte, cap, ACCT_FRAGMENT, PROTECTED);
+    instrs = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, instr_t *, cap / sizeof(uint),
+                              ACCT_FRAGMENT, PROTECTED);
+    if (bb->code_copy != NULL) {
+        memcpy(copy, bb->code_copy, bb->code_copy_len);
+        memcpy(instrs, bb->code_copy_instrs,
+               bb->code_copy_len / sizeof(uint) * sizeof(instr_t *));
+    }
+    bb->code_copy = copy;
+    bb->code_copy_instrs = instrs;
+    bb->code_copy_cap = cap;
+    bb->code_copy_on_heap = true;
+    return true;
+}
+
+/* The app code can change between our decode of an instruction and the emit of
+ * its bb, as a JIT patches its code or another thread writes it.  So for a bb
+ * built for the cache we copy each instruction's bytes once, before decoding it,
+ * and decode the copy:
+ * - A sandboxed bb checks the app code against a copy of it stored in the
+ *   fragment, so the copy must hold the code the bb was decoded from: emit used to
+ *   copy the app code after the decode, and a write in between left a bb that ran
+ *   the old code but checked for the new, so it never noticed the write (a patched
+ *   loop never exited).  Emit stores this copy (bb_build_selfmod_copy()).
+ * - Emit must put the instructions we decoded (and mangled) into the cache, not
+ *   new ones (see copy_and_re_relativize_raw_instr()).  The copy tells it which
+ *   word each app instr was decoded from (bb_build_decoded_word()), so it need not
+ *   encode the instr again to check the app code.
+ * Returns where to decode the instruction at bb->cur_pc from: the copy, or
+ * bb->cur_pc if there is no copy (and then emit checks or copies the app code).
  */
 static byte *
-bb_snapshot_selfmod_code(dcontext_t *dcontext, build_bb_t *bb)
+bb_snapshot_code(dcontext_t *dcontext, build_bb_t *bb)
 {
     size_t off;
-    if (!TESTANY(FRAG_SELFMOD_SANDBOXED, bb->flags) || !bb->for_cache ||
-        bb->pretend_pc != NULL ||
+    if (!bb->for_cache || bb->pretend_pc != NULL ||
         /* Decodes ahead of the instruction. */
         INTERNAL_OPTION(unsafe_build_ldstex))
         return bb->cur_pc;
-    if (bb->selfmod_copy == NULL) {
-        /* The instruction past -max_bb_instrs is decoded before the bb stops. */
-        bb->selfmod_copy_cap = (DYNAMO_OPTION(max_bb_instrs) + 1) * AARCH64_INSTR_SIZE;
-        bb->selfmod_copy = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, byte, bb->selfmod_copy_cap,
-                                            ACCT_FRAGMENT, PROTECTED);
-        bb->selfmod_copy_len = 0;
-    }
     off = bb->cur_pc - bb->start_pc;
-    if (bb->cur_pc < bb->start_pc || off > bb->selfmod_copy_len ||
+    if (bb->cur_pc < bb->start_pc || off > bb->code_copy_len ||
         !ALIGNED(bb->cur_pc, AARCH64_INSTR_SIZE) ||
-        off + AARCH64_INSTR_SIZE > bb->selfmod_copy_cap) {
-        bb->selfmod_copy_incomplete = true;
+        (off + AARCH64_INSTR_SIZE > bb->code_copy_cap &&
+         !bb_grow_code_copy(bb, off + AARCH64_INSTR_SIZE))) {
+        bb->code_copy_incomplete = true;
         return bb->cur_pc;
     }
-    if (off == bb->selfmod_copy_len) {
+    if (off == bb->code_copy_len) {
         /* A single-copy atomic read: we decode a value the app code held. */
-        *(uint *)(bb->selfmod_copy + off) = *(volatile uint *)bb->cur_pc;
-        bb->selfmod_copy_len += AARCH64_INSTR_SIZE;
+        *(uint *)(bb->code_copy + off) = *(volatile uint *)bb->cur_pc;
+        bb->code_copy_len += AARCH64_INSTR_SIZE;
     }
-    return bb->selfmod_copy + off;
+    bb->code_copy_instrs[off / AARCH64_INSTR_SIZE] = bb->instr;
+    return bb->code_copy + off;
+}
+
+/* Decodes the instruction at bb->cur_pc into bb->instr, from our copy of the app
+ * code if we keep one (bb_snapshot_code()).  Returns the pc after the instruction,
+ * or NULL if it is invalid.
+ */
+static app_pc
+bb_decode_instr(dcontext_t *dcontext, build_bb_t *bb)
+{
+    /* When recreating a selfmod fragment we decode its copy of the app code
+     * (see recreate_bb_ilist()): PC-relative operands such as literal loads
+     * and ADR must still refer to the app pc, or their mangling differs in
+     * length from the emitted fragment and every later cache pc translates
+     * to the wrong app pc.
+     */
+    byte *orig_pc = bb->pretend_pc == NULL ? bb->cur_pc
+                                           : bb->pretend_pc + (bb->cur_pc - bb->start_pc);
+    byte *decode_pc = bb_snapshot_code(dcontext, bb);
+    app_pc next_pc =
+        decode_from_copy_with_ldstex(dcontext, decode_pc, orig_pc, bb->instr);
+    if (decode_pc != bb->instr_start && next_pc != NULL) {
+        /* Decoded from our copy of the app code: leave the instr as decoding the
+         * app code would have, with its raw bits at the app pc.
+         */
+        next_pc = bb->instr_start + (next_pc - decode_pc);
+        instr_set_raw_bits(bb->instr, bb->instr_start, (uint)(next_pc - bb->instr_start));
+        instr_set_translation(bb->instr, NULL);
+        /* Until something resets, frees, clones or changes it, or its raw bits. */
+        bb->instr->flags |= INSTR_BB_DECODED;
+    }
+    /* Decoding from a copy invalidates the raw bits, but mangling (e.g.,
+     * of a syscall) expects them: keep pointing at the copy, as before.
+     */
+    if (bb->pretend_pc != NULL) {
+        instr_set_raw_bits(bb->instr, bb->instr_start, (uint)(next_pc - bb->instr_start));
+    }
+    return next_pc;
+}
+
+/* Returns whether instr is an app instr that the bb being built for the cache
+ * decoded from its copy of the app code (bb_snapshot_code()), unchanged since, with
+ * the word it decoded in *word.
+ */
+bool
+bb_build_decoded_word(dcontext_t *dcontext, instr_t *instr, uint *word DR_PARAM_OUT)
+{
+    build_bb_t *bb;
+    ptr_uint_t off;
+    if (dcontext == NULL || dcontext == GLOBAL_DCONTEXT)
+        return false;
+    bb = (build_bb_t *)dcontext->bb_build_info;
+    if (bb == NULL || !bb->for_cache || bb->code_copy == NULL)
+        return false;
+    /* The instr must be the one we decoded the word into, as we decoded it.  Its
+     * address alone does not say so: a client can reset our instr and decode the
+     * app code into it again, or destroy it and get the same memory for an instr
+     * it decodes itself, while the app code holds another word.  The flag says
+     * nothing has reset or changed the instr since we decoded it, and the address
+     * says it was in this bb, and at which word.
+     */
+    if (!TESTANY(INSTR_BB_DECODED, instr->flags))
+        return false;
+    off = (ptr_uint_t)(instr_get_raw_bits(instr) - bb->start_pc);
+    if (off >= bb->code_copy_len || !ALIGNED(off, AARCH64_INSTR_SIZE) ||
+        bb->code_copy_instrs[off / AARCH64_INSTR_SIZE] != instr)
+        return false;
+    *word = *(uint *)(bb->code_copy + off);
+    return true;
 }
 #endif
 
@@ -348,16 +466,17 @@ bb_decode_selfmod_x86(dcontext_t *dcontext, build_bb_t *bb)
                                 bb->pretend_pc + (bb->cur_pc - bb->start_pc), bb->instr);
     if (!bb->for_cache || !TEST(FRAG_SELFMOD_SANDBOXED, bb->flags))
         return decode(dcontext, bb->cur_pc, bb->instr);
-    if (bb->selfmod_copy == NULL) {
-        bb->selfmod_copy_cap = (DYNAMO_OPTION(max_bb_instrs) + 1) * MAX_INSTR_LENGTH;
-        bb->selfmod_copy = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, byte, bb->selfmod_copy_cap,
-                                            ACCT_FRAGMENT, PROTECTED);
+    if (bb->code_copy == NULL) {
+        bb->code_copy_cap = (DYNAMO_OPTION(max_bb_instrs) + 1) * MAX_INSTR_LENGTH;
+        bb->code_copy = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, byte, bb->code_copy_cap,
+                                         ACCT_FRAGMENT, PROTECTED);
+        bb->code_copy_on_heap = true;
     }
     off = bb->cur_pc - bb->start_pc;
-    ASSERT(off == bb->selfmod_copy_len);
-    ASSERT(off + MAX_INSTR_LENGTH <= bb->selfmod_copy_cap);
+    ASSERT(off == bb->code_copy_len);
+    ASSERT(off + MAX_INSTR_LENGTH <= bb->code_copy_cap);
     for (;;) {
-        byte *copy = bb->selfmod_copy + off;
+        byte *copy = bb->code_copy + off;
         /* A valid instruction can end at an unreadable page boundary.  Speculative
          * read-ahead must not turn that into an application fault.
          */
@@ -365,7 +484,7 @@ bb_decode_selfmod_x86(dcontext_t *dcontext, build_bb_t *bb)
         safe_read_ex(bb->cur_pc, MAX_INSTR_LENGTH, copy, &nread);
         next = decode_from_copy(dcontext, copy, bb->cur_pc, bb->instr);
         if (next != NULL && (size_t)(next - copy) <= nread) {
-            bb->selfmod_copy_len = off + (next - copy);
+            bb->code_copy_len = off + (next - copy);
             return bb->cur_pc + (next - copy);
         }
         if (nread == MAX_INSTR_LENGTH)
@@ -384,13 +503,20 @@ bb_decode_selfmod_x86(dcontext_t *dcontext, build_bb_t *bb)
 #endif
 
 static void
-bb_free_selfmod_copy(build_bb_t *bb)
+bb_free_code_copy(build_bb_t *bb)
 {
-    if (bb->selfmod_copy != NULL) {
-        HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, bb->selfmod_copy, byte, bb->selfmod_copy_cap,
+    if (bb->code_copy_on_heap) {
+        HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, bb->code_copy, byte, bb->code_copy_cap,
                         ACCT_FRAGMENT, PROTECTED);
-        bb->selfmod_copy = NULL;
+        if (bb->code_copy_instrs != NULL) {
+            HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, bb->code_copy_instrs, instr_t *,
+                            bb->code_copy_cap / sizeof(uint), ACCT_FRAGMENT, PROTECTED);
+        }
+        bb->code_copy_on_heap = false;
     }
+    bb->code_copy = NULL;
+    bb->code_copy_instrs = NULL;
+    bb->code_copy_cap = 0;
 }
 
 bool
@@ -409,14 +535,14 @@ byte *
 bb_build_selfmod_copy(dcontext_t *dcontext, app_pc tag, size_t *size DR_PARAM_OUT)
 {
     build_bb_t *bb = (build_bb_t *)dcontext->bb_build_info;
-    if (bb == NULL || !bb->for_cache || bb->selfmod_copy == NULL ||
-        bb->selfmod_copy_incomplete || bb->start_pc != tag ||
+    if (bb == NULL || !bb->for_cache || bb->code_copy == NULL ||
+        bb->code_copy_incomplete || bb->start_pc != tag ||
         !TESTANY(FRAG_SELFMOD_SANDBOXED, bb->flags) || bb->cur_pc <= bb->start_pc ||
-        (size_t)(bb->cur_pc - bb->start_pc) > bb->selfmod_copy_len)
+        (size_t)(bb->cur_pc - bb->start_pc) > bb->code_copy_len)
         return NULL;
     /* The range mangle_bb_ilist() passed to insert_selfmod_sandbox(). */
     *size = bb->cur_pc - bb->start_pc;
-    return bb->selfmod_copy;
+    return bb->code_copy;
 }
 
 static void
@@ -3574,8 +3700,8 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
 
     bb->cur_pc = bb->start_pc;
     /* A rebuild decodes the app code again. */
-    bb->selfmod_copy_len = 0;
-    bb->selfmod_copy_incomplete = false;
+    bb->code_copy_len = 0;
+    bb->code_copy_incomplete = false;
 
     /* for translation in case we break out of loop before decoding any
      * instructions, (i.e. check_for_stopping_point()) */
@@ -3629,59 +3755,21 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             }
 
             bb->instr_start = bb->cur_pc;
-#ifdef AARCH64
-            /* When recreating a selfmod fragment we decode its copy of the app code
-             * (see recreate_bb_ilist()): PC-relative operands such as literal loads
-             * and ADR must still refer to the app pc, or their mangling differs in
-             * length from the emitted fragment and every later cache pc translates
-             * to the wrong app pc.
-             */
-            byte *orig_pc = bb->pretend_pc == NULL
-                ? bb->cur_pc
-                : bb->pretend_pc + (bb->cur_pc - bb->start_pc);
-#endif
             if (bb->full_decode) {
-#ifdef AARCH64
-                byte *decode_pc = bb_snapshot_selfmod_code(dcontext, bb);
-#endif
                 /* only going through this do loop once! */
 #if defined(X86) && defined(UNIX)
                 bb->cur_pc = bb_decode_selfmod_x86(dcontext, bb);
 #else
-                bb->cur_pc = IF_AARCH64_ELSE(
-                    decode_from_copy_with_ldstex(dcontext, decode_pc, orig_pc, bb->instr),
-                    decode(dcontext, bb->cur_pc, bb->instr));
-#endif
-#ifdef AARCH64
-                if (decode_pc != bb->instr_start && bb->cur_pc != NULL) {
-                    /* Decoded from our copy of the app code. */
-                    bb->cur_pc = bb->instr_start + (bb->cur_pc - decode_pc);
-                    instr_set_raw_bits(bb->instr, decode_pc,
-                                       (uint)(bb->cur_pc - bb->instr_start));
-                }
-                /* Decoding from a copy invalidates the raw bits, but mangling (e.g.,
-                 * of a syscall) expects them: keep pointing at the copy, as before.
-                 */
-                if (bb->pretend_pc != NULL) {
-                    instr_set_raw_bits(bb->instr, bb->instr_start,
-                                       (uint)(bb->cur_pc - bb->instr_start));
-                }
+                bb->cur_pc = IF_AARCH64_ELSE(bb_decode_instr(dcontext, bb),
+                                             decode(dcontext, bb->cur_pc, bb->instr));
 #endif
                 if (bb->record_translation)
                     instr_set_translation(bb->instr, bb->instr_start);
             } else {
                 /* must reset, may go through loop multiple times */
                 instr_reset(dcontext, bb->instr);
-                bb->cur_pc =
-                    IF_AARCH64_ELSE(decode_from_copy_with_ldstex(dcontext, bb->cur_pc,
-                                                                 orig_pc, bb->instr),
-                                    decode_cti(dcontext, bb->cur_pc, bb->instr));
-#ifdef AARCH64
-                if (bb->pretend_pc != NULL) {
-                    instr_set_raw_bits(bb->instr, bb->instr_start,
-                                       (uint)(bb->cur_pc - bb->instr_start));
-                }
-#endif
+                bb->cur_pc = IF_AARCH64_ELSE(bb_decode_instr(dcontext, bb),
+                                             decode_cti(dcontext, bb->cur_pc, bb->instr));
 
 #if defined(ANNOTATIONS) && !(defined(X64) && defined(WINDOWS))
                 /* Quickly check whether this may be a Valgrind annotation. */
@@ -4743,7 +4831,7 @@ bb_build_abort(dcontext_t *dcontext, bool clean_vmarea, bool unlock)
             instrlist_clear_and_destroy(dcontext, bb->ilist);
             DODEBUG({ bb->ilist = NULL; });
         }
-        bb_free_selfmod_copy(bb);
+        bb_free_code_copy(bb);
         if (clean_vmarea) {
             /* Free the vmlist and any locks held (we could have been in
              * the middle of check_thread_vm_area and had a decode fault
@@ -5344,7 +5432,8 @@ at_native_exec_gateway(dcontext_t *dcontext, app_pc start,
  */
 static inline void
 init_interp_build_bb(dcontext_t *dcontext, build_bb_t *bb, app_pc start,
-                     uint initial_flags, bool for_trace, instrlist_t **unmangled_ilist)
+                     uint initial_flags, bool for_trace, instrlist_t **unmangled_ilist,
+                     bb_code_copy_inline_t *code_copy_inline)
 {
     ASSERT_OWN_MUTEX(USE_BB_BUILDING_LOCK() && !TEST(FRAG_TEMP_PRIVATE, initial_flags),
                      &bb_building_lock);
@@ -5361,6 +5450,7 @@ init_interp_build_bb(dcontext_t *dcontext, build_bb_t *bb, app_pc start,
         initial_flags |
             (INTERNAL_OPTION(store_translations) ? FRAG_HAS_TRANSLATION_INFO : 0),
         NULL /*no overlap*/);
+    bb->code_copy_inline = code_copy_inline;
     if (!TEST(FRAG_TEMP_PRIVATE, initial_flags))
         bb->has_bb_building_lock = true;
     /* We avoid races where there is no hook when we start building a
@@ -5417,7 +5507,7 @@ exit_interp_build_bb(dcontext_t *dcontext, build_bb_t *bb)
     ASSERT(dcontext->bb_build_info == (void *)bb);
     /* Caller's responsibility to clean up since bb.for_cache */
     dcontext->bb_build_info = NULL;
-    bb_free_selfmod_copy(bb);
+    bb_free_code_copy(bb);
 
     /* free the instrlist_t elements */
     instrlist_clear_and_destroy(dcontext, bb->ilist);
@@ -5437,6 +5527,9 @@ build_basic_block_fragment(dcontext_t *dcontext, app_pc start, uint initial_flag
 {
     fragment_t *f;
     build_bb_t bb;
+#ifdef AARCH64
+    bb_code_copy_inline_t code_copy;
+#endif
     dr_where_am_i_t wherewasi = dcontext->whereami;
     bool image_entry;
     KSTART(bb_building);
@@ -5450,7 +5543,8 @@ build_basic_block_fragment(dcontext_t *dcontext, app_pc start, uint initial_flag
      */
     image_entry = check_for_image_entry(start);
 
-    init_interp_build_bb(dcontext, &bb, start, initial_flags, for_trace, unmangled_ilist);
+    init_interp_build_bb(dcontext, &bb, start, initial_flags, for_trace, unmangled_ilist,
+                         IF_AARCH64_ELSE(&code_copy, NULL));
     if (at_native_exec_gateway(dcontext, start,
                                &bb.native_call _IF_DEBUG(false /*not xfer tgt*/))) {
         DODEBUG({ report_native_module(dcontext, bb.start_pc); });
@@ -5472,9 +5566,9 @@ build_basic_block_fragment(dcontext_t *dcontext, app_pc start, uint initial_flag
             instrlist_clear_and_destroy(dcontext, bb.ilist);
             vm_area_destroy_list(dcontext, bb.vmlist);
             dcontext->bb_build_info = NULL;
-            bb_free_selfmod_copy(&bb);
+            bb_free_code_copy(&bb);
             init_interp_build_bb(dcontext, &bb, start, initial_flags, for_trace,
-                                 unmangled_ilist);
+                                 unmangled_ilist, IF_AARCH64_ELSE(&code_copy, NULL));
             /* PR 232617 - build_native_exec_bb doesn't support setting
              * translation info, but it also doesn't pass the built bb to the
              * client (it contains no app code) so we don't need it. */

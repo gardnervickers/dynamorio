@@ -38,6 +38,7 @@
 # decode_gen_<version>.h
 # isa_feature_gen_<version>.h
 # opcode_names.h
+# opcode_eflags.h
 # opcode_api.h
 # opcode_opnd_pairs.h
 # isa_feature.h
@@ -291,10 +292,12 @@ def find_required(fixed, reordered, i, opndtab):
 
 def make_enc(n, reordered, f, opndtab):
     (ds, i, ot) = reordered[n]
-    instr_arg_if_required = 'instr, ' if ot == 'imm16' else ''
+    # Some operand encoders need the containing instr or the decode_info_t.
+    extra_arg_if_required = {'imm16': 'instr, ',
+                             'memlit': 'di, '}.get(opnd_stem(ot), '')
     encode_method_format_str = ('encode_opnd_%s(%s, opcode, pc, '
                                 'instr_get_%s(instr, %d), ' +
-                                instr_arg_if_required + '&%s%d)')
+                                extra_arg_if_required + '&%s%d)')
     ret_str = (encode_method_format_str %
             (opnd_stem(ot), ('0' if opndtab[ot].used == 0 else
                   'enc & 0x%08x' % opndtab[ot].used
@@ -528,6 +531,39 @@ def generate_opcode_names(patterns):
           '};',
           '',
           '#endif /* OPCODE_NAMES_H */']
+    return '\n'.join(c) + '\n'
+
+def generate_opcode_eflags(patterns, opc_props):
+    # The decoder sets the same flags usage for every pattern of an opcode
+    # (generate_decoder()), so it is a property of the opcode.
+    nzcv_eflags = {'n': '0',
+                   'r': 'EFLAGS_READ_NZCV',
+                   'w': 'EFLAGS_WRITE_NZCV',
+                   'rw': 'EFLAGS_READ_NZCV | EFLAGS_WRITE_NZCV',
+                   'wr': 'EFLAGS_READ_NZCV | EFLAGS_WRITE_NZCV',
+                   # Set from the operands in codec.c.
+                   'er': '0',
+                   'ew': '0'}
+    c = ['#ifndef OPCODE_EFLAGS_H',
+         '#define OPCODE_EFLAGS_H 1',
+         '',
+         '/* The flags usage of each opcode, as the decoder sets it. The flags usage',
+         ' * of an "er" or "ew" opcode (mrs, msr) depends on its operands, and that',
+         ' * of OP_xx is assumed: codec.c sets those.',
+         ' */',
+         'static const uint opcode_eflags[] = {']
+    pattern_d = {int(p.enum): p for p in patterns}
+    for i in range(0, max(pattern_d.keys()) + 1):
+        if i in pattern_d:
+            name = pattern_d[i].opcode
+            c.append('/*{:>4} */ {}, /* {} */'.format(
+                i, nzcv_eflags[opc_props[name].nzcv_rw], name))
+        else:
+            c.append('/*{:>4} */ 0,'.format(i))
+    c += [
+          '};',
+          '',
+          '#endif /* OPCODE_EFLAGS_H */']
     return '\n'.join(c) + '\n'
 
 # Generates pairs of opcodes and masks for their operands for all the
@@ -836,8 +872,14 @@ def main():
     opcode_names_patterns = []
     opcode_opnd_pairs_patterns = []
     isa_feature_patterns = []
+    all_opc_props = dict()
     for isa_version in isa_versions[:-1]:
         (patterns, opc_props) = read_codec_file(os.path.join(input_dir, 'codec_' + isa_version + '.txt'))
+        for name, props in opc_props.items():
+            if name in all_opc_props and all_opc_props[name].nzcv_rw != props.nzcv_rw:
+                raise Exception('Opcode %s has different flags usage in codec_%s.txt' %
+                                (name, isa_version))
+            all_opc_props[name] = props
         opcode_api_patterns += patterns
         opcode_names_patterns += patterns
         opcode_opnd_pairs_patterns += patterns
@@ -846,6 +888,9 @@ def main():
                      opcode_header + generate_opcodes(opcode_api_patterns))
     write_if_changed(os.path.join(output_dir, 'opcode_names.h'),
                      opcode_header + generate_opcode_names(opcode_names_patterns))
+    write_if_changed(os.path.join(output_dir, 'opcode_eflags.h'),
+                     opcode_header + generate_opcode_eflags(opcode_names_patterns,
+                                                            all_opc_props))
     opcode_opnd_pairs_patterns.sort(key=lambda pat: pat.opcode)
     write_if_changed(os.path.join(output_dir, 'opcode_opnd_pairs.h'),
                      opcode_header + generate_opcode_opnd_pairs(opcode_opnd_pairs_patterns))

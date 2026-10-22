@@ -197,6 +197,21 @@ typedef struct _spill_state_t {
 #    endif
 #    ifdef AARCH64
     ptr_uint_t selfmod_write_addr;
+    /* For the out-of-line clean call context switch: the clean_call_{save,restore}
+     * routines, so that a call site can load either address with one instruction,
+     * and the app's x30 on the way into and out of them (see
+     * insert_out_of_line_context_switch()).
+     */
+    byte *clean_call_save;
+    byte *clean_call_restore;
+    reg_t clean_call_x30;
+    /* Keeps sizeof(spill_state_t), and so the offset of the table_stat_state_t
+     * that follows it in local_state_extended_t, a multiple of the size of a
+     * lookup_table_access_t: with the TLS block cache-line aligned, each IBL
+     * routine's mask/table pair then lies within one cache line (the three pairs
+     * fill the first half of the line at offset 256).  Checked in arch.c.
+     */
+    reg_t pad_ibl_table_alignment;
 #    endif
     /* TODO i#1575: coarse-grain NYI on ARM */
 #elif defined(RISCV64)
@@ -292,6 +307,11 @@ typedef struct _local_state_extended_t {
 #    ifdef AARCH64
 #        define TLS_SELFMOD_WRITE_ADDR_SLOT \
             ((ushort)offsetof(spill_state_t, selfmod_write_addr))
+#        define TLS_CLEAN_CALL_SAVE_SLOT \
+            ((ushort)offsetof(spill_state_t, clean_call_save))
+#        define TLS_CLEAN_CALL_RESTORE_SLOT \
+            ((ushort)offsetof(spill_state_t, clean_call_restore))
+#        define TLS_CLEAN_CALL_X30_SLOT ((ushort)offsetof(spill_state_t, clean_call_x30))
 #    endif
 #elif defined(RISCV64)
 #    define TLS_FCACHE_RETURN_SLOT ((ushort)offsetof(spill_state_t, fcache_return))
@@ -1587,6 +1607,10 @@ bool
 bb_build_selfmod_s2ro(dcontext_t *dcontext);
 byte *
 bb_build_selfmod_copy(dcontext_t *dcontext, app_pc tag, size_t *size DR_PARAM_OUT);
+#ifdef AARCH64
+bool
+bb_build_decoded_word(dcontext_t *dcontext, instr_t *instr, uint *word DR_PARAM_OUT);
+#endif
 app_pc
 bb_code_copy_end(dcontext_t *dcontext, app_pc tag);
 bool

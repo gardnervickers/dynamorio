@@ -1,0 +1,3 @@
+stress: runs [0-9]+, callee contexts and arguments checked [0-9]+, faults [0-9]+
+stress: signals [0-9]+ \(at ool_after [0-9]+, at ool_site [0-9]+, elsewhere [0-9]+\), suspensions [0-9]+ \(at ool_after [0-9]+, at ool_site [0-9]+, elsewhere [0-9]+\)
+stress: all properties hold

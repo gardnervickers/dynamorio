@@ -68,6 +68,7 @@ set(AARCH64_CODEC_GEN_SRCS
   ${PROJECT_BINARY_DIR}/isa_feature_gen_sve.h
   ${PROJECT_BINARY_DIR}/isa_feature_gen_sve2.h
   ${PROJECT_BINARY_DIR}/opcode_names.h
+  ${PROJECT_BINARY_DIR}/opcode_eflags.h
   ${PROJECT_BINARY_DIR}/isa_features.h
   ${PROJECT_BINARY_DIR}/isa_feature_names.h
 )

@@ -676,6 +676,19 @@ far_ibl_set_targets(ibl_code_t src_ibl[], ibl_code_t tgt_ibl[])
 }
 #endif
 
+#ifdef AARCH64
+/* Every indirect branch lookup loads its table's mask and pointer: keep each pair
+ * within one cache line of the cache-line-aligned TLS block (see the padding at
+ * the end of spill_state_t).
+ */
+_Static_assert(offsetof(local_state_extended_t, table_space) %
+                       sizeof(lookup_table_access_t) ==
+                   0,
+               "IBL mask/table pairs in TLS must not straddle a cache line");
+_Static_assert(offsetof(local_state_extended_t, table_space) == sizeof(spill_state_t),
+               "the IBL tables must follow the spill slots");
+#endif
+
 /* arch-specific initializations */
 void
 d_r_arch_init(void)
@@ -1231,6 +1244,12 @@ arch_thread_init(dcontext_t *dcontext)
                 isa_mode,
                 get_ibl_routine(dcontext, IBL_UNLINKED, IBL_BB_SHARED, branch_type));
     }
+#    ifdef AARCH64
+    get_local_state_extended()->spill_space.clean_call_save =
+        get_clean_call_save(dcontext);
+    get_local_state_extended()->spill_space.clean_call_restore =
+        get_clean_call_restore(dcontext);
+#    endif
     /* Because absolute addresses are impractical on ARM, thread-private uses
      * only shared gencode, just like for 64-bit.
      */

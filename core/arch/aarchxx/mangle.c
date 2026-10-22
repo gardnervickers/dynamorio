@@ -840,63 +840,183 @@ insert_reachable_cti(dcontext_t *dcontext, instrlist_t *ilist, instr_t *where,
     return false /* an ind branch */;
 }
 
+#ifdef AARCH64
+/* Switches SP from the app stack to the base of DR's stack for a clean call
+ * (to_dstack), saving the app SP to the mcontext's xsp slot, or back from there.
+ * It uses x0 and x1 as scratch through TLS_REG0_SLOT and the mcontext's x0 slot,
+ * and preserves every other register and slot.
+ */
+void
+insert_clean_call_stack_swap(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
+                             bool to_dstack)
+{
+    ASSERT(SCRATCH_ALWAYS_TLS());
+    /* DSTACK_OFFSET isn't within the upcontext so if it's separate this won't
+     * work right.
+     */
+    ASSERT_NOT_IMPLEMENTED(!TESTANY(SELFPROT_DCONTEXT, dynamo_options.protect_mask));
+    PRE(ilist, instr, instr_create_save_to_tls(dcontext, SCRATCH_REG0, TLS_REG0_SLOT));
+    insert_get_mcontext_base(dcontext, ilist, instr, SCRATCH_REG0);
+    /* We need an additional scratch register for moving SP.
+     * TLS_REG1_SLOT is not safe since it may be used by clients.
+     * Instead we save it to dcontext.mcontext.x0, which is not
+     * used by dr_save_reg (see definition of SPILL_SLOT_MC_REG).
+     */
+    PRE(ilist, instr,
+        XINST_CREATE_store(dcontext, OPND_CREATE_MEMPTR(SCRATCH_REG0, 0),
+                           opnd_create_reg(SCRATCH_REG1)));
+    if (to_dstack) {
+        PRE(ilist, instr,
+            XINST_CREATE_move(dcontext, opnd_create_reg(SCRATCH_REG1),
+                              opnd_create_reg(DR_REG_XSP)));
+        PRE(ilist, instr,
+            XINST_CREATE_store(dcontext,
+                               opnd_create_dcontext_field_via_reg_sz(
+                                   dcontext, SCRATCH_REG0, XSP_OFFSET, OPSZ_PTR),
+                               opnd_create_reg(SCRATCH_REG1)));
+        PRE(ilist, instr,
+            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
+                              opnd_create_dcontext_field_via_reg_sz(
+                                  dcontext, SCRATCH_REG0, DSTACK_OFFSET, OPSZ_PTR)));
+    } else {
+        PRE(ilist, instr,
+            XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
+                              opnd_create_dcontext_field_via_reg_sz(
+                                  dcontext, SCRATCH_REG0, XSP_OFFSET, OPSZ_PTR)));
+    }
+    PRE(ilist, instr,
+        XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_XSP),
+                          opnd_create_reg(SCRATCH_REG1)));
+    /* Restore scratch_reg from dcontext.mcontext.x0. */
+    PRE(ilist, instr,
+        XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG1),
+                          OPND_CREATE_MEMPTR(SCRATCH_REG0, 0)));
+    PRE(ilist, instr,
+        instr_create_restore_from_tls(dcontext, SCRATCH_REG0, TLS_REG0_SLOT));
+}
+#endif
+
+/* On AArch64 the clean_call_{save,restore} routines do the whole context switch,
+ * stack swap included, so that each call site has only a few instructions:
+ *
+ *   save:    str x30, [stolen, #TLS_CLEAN_CALL_X30_SLOT]
+ *            ldr x30, [stolen, #TLS_CLEAN_CALL_SAVE_SLOT]
+ *            blr x30
+ *   restore: ldr x30, [sp, #stolen_offset]
+ *            ldr x30, [x30, #TLS_CLEAN_CALL_RESTORE_SLOT]
+ *            blr x30
+ *            ldr x30, [stolen, #TLS_CLEAN_CALL_X30_SLOT]
+ *
+ * The app's x30 passes through TLS_CLEAN_CALL_X30_SLOT, as the routines need x30
+ * for their return address throughout (a signal arriving in them finds the
+ * fragment through it: see find_next_fragment_from_gencode()).  The callee may
+ * not have preserved the stolen register, so the restore takes the TLS base from
+ * the stolen register's slot in the saved mcontext, which always holds it (see
+ * dr_set_mcontext()) and from which clean_call_restore restores the register.
+ * After the save,
+ * SP is at the priv_mcontext_t on DR's stack, as with an inline save, and x30
+ * holds the routine's return address: prepare_for_clean_call() gives x30 its app
+ * value back if an argument reads it.
+ *
+ * The DR_NOTE_CALL_SEQUENCE_START/END region, in which state translation (for a
+ * fault in an argument, or a thread synch) takes the app state from the saved
+ * priv_mcontext_t, covers only the part of the site where that frame is the
+ * app's current state: from the save's return to the restore's call.  The three
+ * instructions before it and the load after it are ordinary meta instructions,
+ * which translation refuses for a synch (it retries elsewhere), rather than
+ * taking a frame left on DR's stack by an earlier clean call (i#4219).  Inside
+ * the routines, translation fails too (they are generated code).
+ */
 int
 insert_out_of_line_context_switch(dcontext_t *dcontext, instrlist_t *ilist,
                                   instr_t *instr, bool save, byte *encode_pc)
 {
 #ifdef AARCH64
     if (save) {
-        /* Reserve stack space to push the context. We do it here instead of
-         * in insert_push_all_registers, so we can save the original value
-         * of X30 on the stack before it is changed by the BL (branch & link)
-         * to the clean call save routine in the code cache.
-         *
-         * sub sp, sp, #clean_call_switch_stack_size
-         */
         PRE(ilist, instr,
-            XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP),
-                             OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
-
-        /* str x30, [sp, #x30_offset]
-         *
-         * We have to save the original value of x30 before using BLR to jump
-         * to the save code, because BLR will modify x30. The original value of
-         * x30 is restored after the returning from the save/restore functions below.
-         */
+            instr_create_save_to_tls(dcontext, DR_REG_X30, TLS_CLEAN_CALL_X30_SLOT));
         PRE(ilist, instr,
-            INSTR_CREATE_str(dcontext,
-                             opnd_create_base_disp(DR_REG_SP, DR_REG_NULL, 0,
-                                                   REG_OFFSET(DR_REG_X30), OPSZ_8),
-                             opnd_create_reg(DR_REG_X30)));
+            instr_create_restore_from_tls(dcontext, DR_REG_X30,
+                                          TLS_CLEAN_CALL_SAVE_SLOT));
+    } else {
+        PRE(ilist, instr,
+            INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X30),
+                             OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(dr_reg_stolen))));
+        PRE(ilist, instr,
+            INSTR_CREATE_ldr(
+                dcontext, opnd_create_reg(DR_REG_X30),
+                OPND_CREATE_MEM64(DR_REG_X30,
+                                  os_tls_offset(TLS_CLEAN_CALL_RESTORE_SLOT))));
     }
-
-    insert_mov_immed_ptrsz(
-        dcontext,
-        (long)(save ? get_clean_call_save(dcontext) : get_clean_call_restore(dcontext)),
-        opnd_create_reg(DR_REG_X30), ilist, instr, NULL, NULL);
     PRE(ilist, instr, INSTR_CREATE_blr(dcontext, opnd_create_reg(DR_REG_X30)));
-
-    /* Restore original value of X30, which was changed by BLR.
-     *
-     * ldr x30, [sp, #x30_offset]
+    /* The restore's final load of x30 from TLS_CLEAN_CALL_X30_SLOT is added by
+     * cleanup_after_clean_call(), after the region's end.
      */
-    PRE(ilist, instr,
-        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X30),
-                         OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30))));
-
-    if (!save) {
-        /* add sp, sp, #clean_call_switch_stack_size */
-        PRE(ilist, instr,
-            XINST_CREATE_add(dcontext, opnd_create_reg(DR_REG_SP),
-                             OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
-    }
-
     return get_clean_call_switch_stack_size();
 #else
     ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1621: NYI on AArch32. */
     return 0;
 #endif
 }
+
+#ifdef AARCH64
+/* Appends clean_call_save's context switch, up to its return.  A call site enters
+ * the routine with its return address in x30, the app's x30 in
+ * TLS_CLEAN_CALL_X30_SLOT and every other register holding its app value: see
+ * insert_out_of_line_context_switch().
+ */
+void
+append_clean_call_save(dcontext_t *dcontext, instrlist_t *ilist)
+{
+    insert_clean_call_stack_swap(dcontext, ilist, NULL, true /*to dstack*/);
+    /* sub sp, sp, #clean_call_switch_stack_size */
+    PRE(ilist, NULL,
+        XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP),
+                         OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
+    insert_push_all_registers(dcontext, NULL, ilist, NULL, (uint)PAGE_SIZE,
+                              OPND_CREATE_INT32(0), REG_NULL, true /*out_of_line*/);
+    /* Store the app's x30, which insert_push_all_registers() leaves out. */
+    PRE(ilist, NULL,
+        instr_create_restore_from_tls(dcontext, DR_REG_X1, TLS_CLEAN_CALL_X30_SLOT));
+    PRE(ilist, NULL,
+        INSTR_CREATE_str(dcontext, OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30)),
+                         opnd_create_reg(DR_REG_X1)));
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X1),
+                         OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X1))));
+}
+
+/* Appends clean_call_restore's context switch, up to its return.  The routine
+ * returns with the app's x30 from the mcontext in TLS_CLEAN_CALL_X30_SLOT, and
+ * every other register and SP restored from the mcontext.
+ */
+void
+append_clean_call_restore(dcontext_t *dcontext, instrlist_t *ilist)
+{
+    /* x0 and x1 are scratch until insert_pop_all_registers() restores them, and
+     * the stolen register's slot holds the TLS base (the callee may have
+     * clobbered the register itself).
+     */
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X0),
+                         OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(dr_reg_stolen))));
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X1),
+                         OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30))));
+    PRE(ilist, NULL,
+        INSTR_CREATE_str(
+            dcontext,
+            OPND_CREATE_MEM64(DR_REG_X0, os_tls_offset(TLS_CLEAN_CALL_X30_SLOT)),
+            opnd_create_reg(DR_REG_X1)));
+    insert_pop_all_registers(dcontext, NULL, ilist, NULL, (uint)PAGE_SIZE,
+                             true /*out_of_line*/);
+    /* add sp, sp, #clean_call_switch_stack_size */
+    PRE(ilist, NULL,
+        XINST_CREATE_add(dcontext, opnd_create_reg(DR_REG_SP),
+                         OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
+    insert_clean_call_stack_swap(dcontext, ilist, NULL, false /*to app*/);
+}
+#endif
 
 /*###########################################################################
  *###########################################################################

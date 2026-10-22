@@ -1,0 +1,4 @@
+(bench [ -~]*
+)*(guard [a-z]+: [0-9]+ words, [0-9]+ valid, [0-9]+ OP_xx, [0-9]+ pc-relative, [0-9]+ exact, [0-9]+ aliases, 0 failures
+)*(guard predicate: 0 failures
+)?a64_codegen_ir: done

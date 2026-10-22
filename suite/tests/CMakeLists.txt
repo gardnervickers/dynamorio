@@ -3287,6 +3287,10 @@ if (AARCHXX)
   link_with_pthread(client.ldstex)
 endif ()
 
+if (AARCH64 AND LINUX)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/a64_codegen.cmake")
+endif ()
+
 if (ARM AND NOT ANDROID)
   # i#2580: DT_RUNPATH is not yet supported on android so we disable this test on
   # android
@@ -6639,3 +6643,22 @@ if (UNIX AND X86 AND CPU_AMD AND NOT DR_HOST_X64)
     code_api|tool.record_filter_bycore_multi
     code_api|tool.record_filter_bycore_uni)
 endif ()
+
+# The AArch64 codegen benchmarks and guards (a64_codegen/a64_codegen.cmake).
+foreach (a64_codegen_test ${a64_codegen_testnames})
+  set(a64_codegen_found OFF)
+  foreach (a64_codegen_prefix "" ${prior_prefixes})
+    if (TEST "${a64_codegen_prefix}${a64_codegen_test}")
+      set_property(TEST "${a64_codegen_prefix}${a64_codegen_test}" APPEND PROPERTY
+        LABELS a64_codegen)
+      if ("${a64_codegen_test}" IN_LIST a64_codegen_timing_testnames)
+        set_property(TEST "${a64_codegen_prefix}${a64_codegen_test}" APPEND PROPERTY
+          LABELS a64_codegen_timing)
+      endif ()
+      set(a64_codegen_found ON)
+    endif ()
+  endforeach ()
+  if (NOT a64_codegen_found)
+    message(WARNING "a64_codegen: no test named ${a64_codegen_test}")
+  endif ()
+endforeach ()

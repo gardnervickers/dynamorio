@@ -460,6 +460,12 @@ typedef struct _clean_call_info_t {
     bool out_of_line_swap;  /* whether we use clean_call_{save,restore} gencode */
     void *callee_info;      /* callee information */
     instrlist_t *ilist;     /* instruction list for inline optimization */
+#ifdef AARCH64
+    /* Whether an argument reads x30, which must then get its app value back after
+     * an out-of-line save (see insert_out_of_line_context_switch()).
+     */
+    bool args_read_lr;
+#endif
 } clean_call_info_t;
 
 /* flags for insert_meta_call_vargs, to indicate various properties about the call */
@@ -718,6 +724,15 @@ find_syscall_num(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr);
 int
 insert_out_of_line_context_switch(dcontext_t *dcontext, instrlist_t *ilist,
                                   instr_t *instr, bool save, byte *encode_pc);
+#ifdef AARCH64
+void
+insert_clean_call_stack_swap(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
+                             bool to_dstack);
+void
+append_clean_call_save(dcontext_t *dcontext, instrlist_t *ilist);
+void
+append_clean_call_restore(dcontext_t *dcontext, instrlist_t *ilist);
+#endif
 #ifdef X86
 #    ifdef UNIX
 /* Mangle reference of fs/gs semgents, reg must not be used in the oldop. */

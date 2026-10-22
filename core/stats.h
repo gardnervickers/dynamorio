@@ -53,6 +53,9 @@ void
 kstat_thread_stop(dcontext_t *dcontext);
 void
 dump_thread_kstats(dcontext_t *dcontext);
+bool
+dr_kstat_get(void *drcontext, const char *name, uint64 *count, uint64 *ticks,
+             uint64 *ticks_per_ms);
 
 /* for debugging only */
 #    ifdef DEBUG

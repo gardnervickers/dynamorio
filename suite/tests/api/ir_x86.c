@@ -966,6 +966,25 @@ test_rep_predicates(void *dc)
                    EFLAGS_WRITE_6 | EFLAGS_READ_DF | EFLAGS_READ_ZF);
 }
 
+/* Setting the predicate an undecoded instr's raw bits already encode must leave
+ * them valid: they are all the instr has to encode.
+ */
+static void
+test_raw_only_predicate(void *dc)
+{
+    byte raw[] = { 0x0f, 0x44, 0xc0 }; /* cmovz %eax,%eax */
+    byte out[16];
+    instr_t instr;
+    instr_init(dc, &instr);
+    instr_set_raw_bits(&instr, raw, sizeof(raw));
+    instr_set_predicate(&instr, DR_PRED_EQ);
+    ASSERT(instr_raw_bits_valid(&instr));
+    byte *end = instr_encode(dc, &instr, out);
+    ASSERT(end == out + sizeof(raw));
+    ASSERT(memcmp(out, raw, sizeof(raw)) == 0);
+    instr_free(dc, &instr);
+}
+
 static void
 test_modrm16_helper(void *dc, reg_id_t base, reg_id_t scale, uint disp, uint len)
 {
@@ -2899,6 +2918,8 @@ main(int argc, char *argv[])
     test_cti_predicates(dcontext);
 
     test_rep_predicates(dcontext);
+
+    test_raw_only_predicate(dcontext);
 
 #ifndef X64
     test_modrm16(dcontext);

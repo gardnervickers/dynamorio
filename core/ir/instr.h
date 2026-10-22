@@ -206,6 +206,17 @@ enum {
     INSTR_OUR_MANGLING = 0x40000000,
 };
 
+/* The instr holds what the bb being built for the cache decoded from its copy of
+ * the app code at the instr's raw bits, and is unchanged since: emit can copy that
+ * word without encoding the instr to check it (bb_build_decoded_word()).  Only bb
+ * building sets it, as it decodes the instr.  instr_init() clears it (and so
+ * instr_reset(), instr_reuse() and every new instr_t do), as do instr_clone() and
+ * every routine that sets, moves, frees or invalidates the raw bits, which every
+ * change to the opcode, operands, prefixes or predicate does.  A #define, as an
+ * enum value must fit in an int.
+ */
+#define INSTR_BB_DECODED 0x80000000U
+
 #define DR_TUPLE_TYPE_BITS 4
 #define DR_TUPLE_TYPE_BITPOS (32 - DR_TUPLE_TYPE_BITS)
 
@@ -541,6 +552,13 @@ instr_saves_float_pc(instr_t *instr);
 #ifdef AARCH64
 bool
 instr_is_icache_op(instr_t *instr);
+/* Sets *usage to the flags usage (EFLAGS_ constants) of an AArch64 instruction
+ * with valid operands, which its opcode and, for mrs and msr, its operands
+ * determine, without encoding it.  Returns false for opcodes it cannot tell
+ * (OP_xx, OP_ldstex and the pseudo-opcodes).
+ */
+bool
+instr_eflags_from_opcode(instr_t *instr, uint *usage /*OUT*/);
 #endif
 
 #ifdef ARM

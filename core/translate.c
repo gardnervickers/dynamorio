@@ -823,7 +823,24 @@ translate_restore_clean_call(dcontext_t *tdcontext, translate_walk_t *walk)
      */
     uint interrupted_pstate = walk->mc->nzcv;
 #endif
-    dr_get_mcontext_priv(tdcontext, NULL, walk->mc);
+    /* We read tdcontext's frame here ourselves, as the dstack case of
+     * dr_get_mcontext_priv() does, rather than call that routine: it prefers other
+     * sources, which are wrong when another thread translates this one's context
+     * (a synch, and then dr_get_mcontext() of the suspended thread).  The client's
+     * cached context of a suspended thread is, while this translation fills it,
+     * the untranslated context; and the app's stolen register value would come
+     * from the translating thread's TLS.
+     */
+    *walk->mc = *get_priv_mcontext_from_dstack(tdcontext);
+    /* The frame's SP is DR's: the stack swap saved the app's in the mcontext. */
+    walk->mc->xsp = get_mcontext(tdcontext)->xsp;
+#if defined(AARCHXX) || defined(RISCV64)
+    /* The frame's stolen register slot holds the TLS base. */
+    set_stolen_reg_val(walk->mc, tdcontext->local_state->spill_space.reg_stolen);
+#    ifdef RISCV64
+    set_tp_reg_val(walk->mc, (reg_t)os_get_app_tls_base(tdcontext, TLS_REG_LIB));
+#    endif
+#endif
 #ifdef AARCH64
     walk->mc->nzcv =
         PSTATE_WITH_BITS_OF(walk->mc->nzcv, interrupted_pstate, PSTATE_APP_STATE_BITS);

@@ -5845,9 +5845,8 @@ emit_clean_call_save(dcontext_t *dcontext, byte *pc, generated_code_t *code)
     insert_push_all_registers(dcontext, NULL, &ilist, NULL, (uint)PAGE_SIZE,
                               OPND_CREATE_INT32(0), REG_NULL);
 #elif defined(AARCH64)
-    /* save all registers */
-    insert_push_all_registers(dcontext, NULL, &ilist, NULL, (uint)PAGE_SIZE,
-                              OPND_CREATE_INT32(0), REG_NULL, true);
+    /* swap stacks and save all registers */
+    append_clean_call_save(dcontext, &ilist);
 #elif defined(RISCV64)
     /* save all registers */
     insert_push_all_registers(dcontext, NULL, &ilist, NULL, (uint)PAGE_SIZE,
@@ -5952,7 +5951,8 @@ emit_clean_call_restore(dcontext_t *dcontext, byte *pc, generated_code_t *code)
         INSTR_CREATE_ret_imm(dcontext,
                              OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
 #elif defined(AARCH64)
-    insert_pop_all_registers(dcontext, NULL, &ilist, NULL, (uint)PAGE_SIZE, true);
+    /* restore all registers and swap stacks back */
+    append_clean_call_restore(dcontext, &ilist);
 
     APP(&ilist, INSTR_CREATE_br(dcontext, opnd_create_reg(DR_REG_X30)));
 #elif defined(RISCV64)
