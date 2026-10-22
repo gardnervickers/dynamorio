@@ -239,6 +239,7 @@ proc_init_arch(void)
         LOG_FEATURE(FEATURE_BTI);
         LOG_FEATURE(FEATURE_SSBS);
         LOG_FEATURE(FEATURE_SSBS2);
+        LOG_FEATURE(FEATURE_GCS);
 
         LOG(GLOBAL, LOG_TOP, 1, "ID_AA64ISAR2_EL1 = 0x%016lx\n",
             cpu_info.features.isa_features[AA64ISAR2]);
@@ -247,6 +248,7 @@ proc_init_arch(void)
         LOG_FEATURE(FEATURE_FPACCOMBINE);
         LOG_FEATURE(FEATURE_CONSTPACFIELD);
         LOG_FEATURE(FEATURE_WFxT);
+        LOG_FEATURE(FEATURE_MOPS);
 
         LOG(GLOBAL, LOG_TOP, 1, "ID_AA64MMFR2_EL1 = 0x%016lx\n",
             cpu_info.features.isa_features[AA64MMFR2]);
@@ -308,6 +310,8 @@ enable_all_test_cpu_features()
         FEATURE_SB,
         FEATURE_XS,
         FEATURE_LS64, FEATURE_LS64V, FEATURE_LS64ACCDATA,
+        FEATURE_MOPS,
+        FEATURE_GCS,
 
     };
     /* clang-format on */

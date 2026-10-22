@@ -1,0 +1,65 @@
+# **********************************************************
+# Copyright (c) 2026 Google, Inc.  All rights reserved.
+# **********************************************************
+
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# * Redistributions of source code must retain the above copyright notice,
+#   this list of conditions and the following disclaimer.
+#
+# * Redistributions in binary form must reproduce the above copyright notice,
+#   this list of conditions and the following disclaimer in the documentation
+#   and/or other materials provided with the distribution.
+#
+# * Neither the name of Google, Inc. nor the names of its contributors may be
+#   used to endorse or promote products derived from this software without
+#   specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL GOOGLE, INC. OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+# DAMAGE.
+
+# This file defines instruction encodings for v8.8 instructions.
+
+# See header comments in codec_v80.txt and opnd_defs.txt to understand how
+# instructions are defined for the purposes of decode and encode code
+# generation.
+
+# Notes on specific instructions:
+#
+# CPY*, CPYF*, SET* (FEAT_MOPS)
+# -----------------------------
+# Each memory copy or set is a prologue (P), main (M) and epilogue (E)
+# instruction, run in that order. All three update their registers to say
+# how far the operation has got. The prologue writes NZCV with the algorithm
+# option the implementation chose, and the main and epilogue instructions read
+# it back.
+#
+# The mops_cpy and mops_set opndsets in codec.c decode the encodings with
+# overlapping registers, or with register number 31 other than as the SET*
+# data register, as OP_xx: these are CONSTRAINED UNPREDICTABLE
+# (Unpredictable_MOPSOVERLAP31) and may be UNDEFINED.
+#
+# Only the forms without options are defined here. The unprivileged (T),
+# non-temporal (N) and tag-setting (SETG*) forms still decode as OP_xx.
+
+# Instruction definitions:
+
+00011101100xxxxx000001xxxxxxxxxx  r   1233 MOPS  cpye  mops_cpy
+00011001100xxxxx000001xxxxxxxxxx  r   1234 MOPS cpyfe  mops_cpy
+00011001010xxxxx000001xxxxxxxxxx  r   1235 MOPS cpyfm  mops_cpy
+00011001000xxxxx000001xxxxxxxxxx  w   1236 MOPS cpyfp  mops_cpy
+00011101010xxxxx000001xxxxxxxxxx  r   1237 MOPS  cpym  mops_cpy
+00011101000xxxxx000001xxxxxxxxxx  w   1238 MOPS  cpyp  mops_cpy
+00011001110xxxxx100001xxxxxxxxxx  r   1239 MOPS  sete  mops_set
+00011001110xxxxx010001xxxxxxxxxx  r   1240 MOPS  setm  mops_set
+00011001110xxxxx000001xxxxxxxxxx  w   1241 MOPS  setp  mops_set

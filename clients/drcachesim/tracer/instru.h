@@ -291,6 +291,13 @@ public:
     instr_to_instr_type(instr_t *instr, bool repstr_expanded = false);
     static bool
     instr_is_flush(instr_t *instr);
+    // Returns whether instr has memory operands that the tracer records, the same
+    // way at tracing and post-processing time.  An access whose size is only known
+    // at run time (drutil_opnd_mem_size_is_variable(): the AArch64 FEAT_MOPS
+    // copies and sets) does not fit a fixed number of records of at most 64K bytes,
+    // so it is not traced.
+    static bool
+    instr_has_traced_memrefs(instr_t *instr);
     static unsigned short
     instr_to_flush_type(instr_t *instr);
     static int

@@ -3542,6 +3542,19 @@ bb_safe_to_stop(dcontext_t *dcontext, instrlist_t *ilist, instr_t *stop_after)
         return true;
     return instr_is_last_in_it_block(stop_after, NULL, NULL);
 #endif /* ARM */
+#ifdef AARCH64
+    /* Keep a FEAT_MOPS prologue, main and epilogue instruction in one block where
+     * we can.  mangle_mops_sequences() handles a block that starts after a prologue
+     * or main instruction, but at a cost.
+     */
+    if (stop_after == NULL)
+        stop_after = instrlist_last_app(ilist);
+    if (stop_after != NULL) {
+        int stage = instr_mops_stage(stop_after, NULL, NULL);
+        if (stage == 0 || stage == 1)
+            return false;
+    }
+#endif
     return true;
 }
 

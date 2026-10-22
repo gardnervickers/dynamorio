@@ -378,7 +378,12 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *wher
          */
         for (i = 0; i < instr_num_dsts(instr_operands); ++i) {
             const opnd_t dst = instr_get_dst(instr_operands, i);
-            if (opnd_is_memory_reference(dst)) {
+            /* We cannot copy a write whose size is only known at run time (the
+             * AArch64 FEAT_MOPS copies and sets), so we skip it.  handle_post_write()
+             * is then not called for it.
+             */
+            if (opnd_is_memory_reference(dst) &&
+                !drutil_opnd_mem_size_is_variable(dst, instr_operands, NULL)) {
                 if (seen_memref) {
                     DR_ASSERT_MSG(false, "Found inst with multiple memory destinations");
                     break;

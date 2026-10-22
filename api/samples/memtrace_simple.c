@@ -265,6 +265,12 @@ instrument_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t ref,
 {
     /* We need two scratch registers */
     reg_id_t reg_ptr, reg_tmp;
+    /* An access whose size is only known at run time (the AArch64 FEAT_MOPS copies
+     * and sets) does not fit an entry's 16-bit size: we skip it rather than record
+     * it as 0 bytes.
+     */
+    if (drutil_opnd_mem_size_is_variable(ref, where, NULL))
+        return;
     if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_ptr) !=
             DRREG_SUCCESS ||
         drreg_reserve_register(drcontext, ilist, where, NULL, &reg_tmp) !=

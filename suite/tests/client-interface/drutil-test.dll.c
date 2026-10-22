@@ -55,6 +55,66 @@ static dr_emit_flags_t
 event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
                 bool for_trace, bool translating, void *user_data);
 
+#ifdef AARCH64
+/* The AArch64 FEAT_MOPS copies and sets access a number of bytes only known at run
+ * time.  This checks drutil's answers on the IR alone, so it needs no FEAT_MOPS.
+ */
+static void
+test_mops_sizes(void)
+{
+    void *dc = GLOBAL_DCONTEXT;
+    opnd_t xd = opnd_create_reg(DR_REG_X0), xs = opnd_create_reg(DR_REG_X1),
+           xn = opnd_create_reg(DR_REG_X2), xv = opnd_create_reg(DR_REG_X3);
+    instr_t *mops[] = {
+        INSTR_CREATE_cpyfp(dc, xd, xs, xn), INSTR_CREATE_cpyfm(dc, xd, xs, xn),
+        INSTR_CREATE_cpyfe(dc, xd, xs, xn), INSTR_CREATE_cpyp(dc, xd, xs, xn),
+        INSTR_CREATE_cpym(dc, xd, xs, xn),  INSTR_CREATE_cpye(dc, xd, xs, xn),
+        INSTR_CREATE_setp(dc, xd, xn, xv),  INSTR_CREATE_setm(dc, xd, xn, xv),
+        INSTR_CREATE_sete(dc, xd, xn, xv),
+    };
+    for (int i = 0; i < sizeof(mops) / sizeof(mops[0]); i++) {
+        int opc = instr_get_opcode(mops[i]);
+        bool prologue = opc == OP_cpyfp || opc == OP_cpyp || opc == OP_setp;
+        int memrefs = 0;
+        for (int j = 0; j < instr_num_srcs(mops[i]) + instr_num_dsts(mops[i]); j++) {
+            bool src = j < instr_num_srcs(mops[i]);
+            opnd_t op = src ? instr_get_src(mops[i], j)
+                            : instr_get_dst(mops[i], j - instr_num_srcs(mops[i]));
+            reg_id_t size_reg = DR_REG_X30;
+            bool variable = drutil_opnd_mem_size_is_variable(op, mops[i], &size_reg);
+            if (!opnd_is_memory_reference(op)) {
+                CHECK(!variable && size_reg == DR_REG_X30,
+                      "register operand of a MOPS instr is not a variable-size access");
+                continue;
+            }
+            memrefs++;
+            CHECK(drutil_opnd_mem_size_in_bytes(op, mops[i]) == 0,
+                  "MOPS memory operand must have size 0");
+            CHECK(variable, "MOPS memory operand must be variable-size");
+            CHECK(size_reg == (prologue ? DR_REG_X2 : DR_REG_NULL),
+                  "only a MOPS prologue's size is in Xn");
+            CHECK(drutil_opnd_mem_size_is_variable(op, mops[i], NULL),
+                  "NULL size_reg must be allowed");
+            CHECK(opnd_get_base(op) == (src ? DR_REG_X1 : DR_REG_X0),
+                  "MOPS memory operand must be at Xd or Xs");
+        }
+        CHECK(memrefs == (opc == OP_setp || opc == OP_setm || opc == OP_sete ? 1 : 2),
+              "wrong number of MOPS memory operands");
+        instr_destroy(dc, mops[i]);
+    }
+    /* An ordinary load is not variable-size, and size_reg is left alone. */
+    instr_t *ldr = INSTR_CREATE_ldr(dc, xd, OPND_CREATE_MEM64(DR_REG_X1, 8));
+    reg_id_t size_reg = DR_REG_X30;
+    CHECK(!drutil_opnd_mem_size_is_variable(instr_get_src(ldr, 0), ldr, &size_reg) &&
+              size_reg == DR_REG_X30 &&
+              drutil_opnd_mem_size_in_bytes(instr_get_src(ldr, 0), ldr) == 8,
+          "ordinary load must have a fixed size");
+    CHECK(!drutil_opnd_mem_size_is_variable(instr_get_src(ldr, 0), NULL, NULL),
+          "no instr: not variable-size");
+    instr_destroy(dc, ldr);
+}
+#endif
+
 DR_EXPORT void
 dr_init(client_id_t id)
 {
@@ -64,6 +124,9 @@ dr_init(client_id_t id)
     drmgr_init();
     drutil_init();
     dr_register_exit_event(event_exit);
+#ifdef AARCH64
+    test_mops_sizes();
+#endif
 
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb_app2app, event_bb_analysis,
                                                     event_bb_insert, NULL, &priority);

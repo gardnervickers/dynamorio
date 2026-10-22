@@ -245,6 +245,35 @@ unit_test_metrics_API()
     assert(cache_sim.get_cache_metric(metric_name_t::FLUSHES, 2) == 4);
 }
 
+// A record of size 0, or one that wraps past the top of the address space, must
+// not make the simulator loop over the whole address space: a 0-byte write at
+// address 0 used to compute its last byte as UINT64_MAX, 2^58 64-byte lines.
+void
+unit_test_degenerate_sizes()
+{
+    cache_simulator_knobs_t knobs = make_test_knobs();
+    cache_simulator_t cache_sim(knobs);
+    const memref_t refs[] = {
+        make_memref(0, TRACE_TYPE_WRITE, 0),
+        make_memref(0, TRACE_TYPE_READ, 0),
+        make_memref(4096, TRACE_TYPE_WRITE, 0),
+        // The last 32 bytes plus 32 that wrap: just the top line.
+        make_memref(~static_cast<addr_t>(0) - 31, TRACE_TYPE_READ, 64),
+    };
+    for (const memref_t &ref : refs) {
+        if (!cache_sim.process_memref(ref)) {
+            std::cerr << "drcachesim unit_test_degenerate_sizes failed: "
+                      << cache_sim.get_error_string() << "\n";
+            exit(1);
+        }
+    }
+    // Each touches one line: lines 0 (twice), 64 and the top one.
+    assert(cache_sim.get_cache_metric(metric_name_t::HITS, 1, 0, cache_split_t::DATA) ==
+           1);
+    assert(cache_sim.get_cache_metric(metric_name_t::MISSES, 1, 0, cache_split_t::DATA) ==
+           3);
+}
+
 void
 unit_test_compulsory_misses()
 {
@@ -952,6 +981,7 @@ test_main(int argc, const char *argv[])
     unit_test_cache_bad_configs();
     unit_test_metrics_API();
     unit_test_compulsory_misses();
+    unit_test_degenerate_sizes();
     unit_test_warmup_fraction();
     unit_test_warmup_refs();
     unit_test_sim_refs();

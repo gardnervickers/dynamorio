@@ -47,7 +47,7 @@ Every application instruction in a block goes through the following IR work:
 - Every decodable word encodes, and the encoding is the original word or an alias that decodes to the same instruction.
 - The same instruction made anew encodes identically, has length 4, and is accepted by `instr_is_encoding_possible()`, which ignores reachability. It gives the same `instr_get_eflags()`/`instr_get_arith_flags()` answer as the decoder recorded, pc-relative instructions included.
 
-Words the decoder does not know (`OP_xx`) are counted, not checked.
+Words the decoder does not know (`OP_xx`) are counted, not checked. The libc corpus is libc's whole executable segment, which also holds its symbol and relocation tables, `.rodata` and `.eh_frame`, so almost all of its `OP_xx` words are data. The `guard libc executable sections` line counts the words and `OP_xx` words of the executable sections alone (`.plt`, `.text`), found from libc's section headers. `-list-xx` prints each `OP_xx` word there with its offset in libc, to compare with `llvm-objdump -d --mattr=+all`.
 
 The instructions are made with the drcontext of a thread DR has set up (`dr_app_setup()`), as in block building. `-standalone` uses `dr_standalone_init()` instead.
 

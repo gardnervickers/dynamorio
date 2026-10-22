@@ -6723,6 +6723,37 @@ compute_memory_target(dcontext_t *dcontext, cache_pc instr_cache_pc,
     ucontext_to_mcontext(&mc, uc);
     ASSERT(write != NULL);
 
+#if defined(LINUX) && defined(AARCH64)
+    /* A FEAT_MOPS copy or set has memory operands of size 0 at Xd and Xs, and
+     * after its prologue those registers hold an implementation-defined form, e.g.
+     * the end addresses, so neither the check below nor the protection check on
+     * the operands can find the access.  The kernel's si_addr is the address that
+     * faulted (FAR_EL1), so we take it.  The access is a write for a set; for a
+     * copy, the ESR the kernel records tells us (a data abort's WnR bit), and
+     * without it a fault on a page we can read must be a write.
+     */
+    if (instr_is_mops(&instr) && si->si_addr != NULL) {
+        target = (byte *)si->si_addr;
+        int opcode = instr_get_opcode(&instr);
+        uint64 esr;
+        if (opcode == OP_setp || opcode == OP_setm || opcode == OP_sete)
+            *write = true;
+        else if (sigcontext_get_fault_esr(sc, &esr) &&
+                 /* EC: a data abort from EL0 (0x24) or EL1 (0x25). */
+                 ((esr >> 26) & 0x3f) >= 0x24 && ((esr >> 26) & 0x3f) <= 0x25)
+            *write = TESTANY(1 << 6 /*WnR*/, esr);
+        else {
+            *write = get_memory_info_from_os(target, NULL, NULL, &prot) &&
+                TESTANY(MEMPROT_READ, prot);
+        }
+        LOG(THREAD, LOG_ALL, 2, "MOPS instr: memory target is si_addr, a %s\n",
+            *write ? "write" : "read");
+        DOLOG(2, LOG_ALL, { d_r_loginst(dcontext, 2, &instr, "\tfaulting instr"); });
+        instr_free(dcontext, &instr);
+        return target;
+    }
+#endif
+
     /* i#1009: If si_addr is plausibly one of the memory operands of the
      * faulting instruction, assume the target was si_addr.  If none of the
      * memops match, fall back to checking page protections, which can be racy.

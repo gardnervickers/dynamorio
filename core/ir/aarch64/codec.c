@@ -9968,6 +9968,116 @@ encode_opnds_logic_imm(byte *pc, instr_t *instr, uint enc, decode_info_t *di)
     }
 }
 
+/* mops_cpy and mops_set: used for the FEAT_MOPS memory copies (CPY*, CPYF*) and
+ * memory sets (SET*). Each instruction reads and writes back its destination
+ * address Xd, its size Xn and, for a copy, its source address Xs; a set's data
+ * register Xs is only read. The memory operands have no size (OPSZ_0): how many
+ * bytes each of the prologue, main and epilogue instructions accesses, and
+ * where, depends on Xn and on the algorithm option the implementation chose.
+ * Encodings with overlapping registers, or with register number 31 other than
+ * as a set's data register, are CONSTRAINED UNPREDICTABLE and are left as OP_xx.
+ */
+
+static inline bool
+encode_mops_reg(opnd_t opnd, bool zr_ok, OUT uint *num)
+{
+    if (!opnd_is_reg(opnd))
+        return false;
+    reg_id_t reg = opnd_get_reg(opnd);
+    if (reg >= DR_REG_X0 && reg <= DR_REG_X30)
+        *num = reg - DR_REG_X0;
+    else if (zr_ok && reg == DR_REG_XZR)
+        *num = 31;
+    else
+        return false;
+    return true;
+}
+
+static inline bool
+is_mops_mem(opnd_t opnd, uint num)
+{
+    uint base;
+    return is_base_imm(opnd, &base) && base == num && opnd_get_disp(opnd) == 0 &&
+        opnd_get_size(opnd) == OPSZ_0;
+}
+
+static inline bool
+decode_opnds_mops_cpy(uint enc, dcontext_t *dcontext, byte *pc, instr_t *instr,
+                      int opcode)
+{
+    uint d = extract_uint(enc, 0, 5);
+    uint n = extract_uint(enc, 5, 5);
+    uint s = extract_uint(enc, 16, 5);
+    if (d == s || d == n || s == n || d == 31 || s == 31 || n == 31)
+        return false;
+    instr_set_opcode(instr, opcode);
+    instr_set_num_opnds(dcontext, instr, 4, 4);
+    instr_set_dst(instr, 0,
+                  opnd_create_base_disp(DR_REG_X0 + d, DR_REG_NULL, 0, 0, OPSZ_0));
+    instr_set_dst(instr, 1, opnd_create_reg(DR_REG_X0 + d));
+    instr_set_dst(instr, 2, opnd_create_reg(DR_REG_X0 + s));
+    instr_set_dst(instr, 3, opnd_create_reg(DR_REG_X0 + n));
+    instr_set_src(instr, 0,
+                  opnd_create_base_disp(DR_REG_X0 + s, DR_REG_NULL, 0, 0, OPSZ_0));
+    instr_set_src(instr, 1, opnd_create_reg(DR_REG_X0 + d));
+    instr_set_src(instr, 2, opnd_create_reg(DR_REG_X0 + s));
+    instr_set_src(instr, 3, opnd_create_reg(DR_REG_X0 + n));
+    return true;
+}
+
+static inline uint
+encode_opnds_mops_cpy(byte *pc, instr_t *instr, uint enc, decode_info_t *di)
+{
+    uint d, s, n;
+    if (instr_num_dsts(instr) == 4 && instr_num_srcs(instr) == 4 &&
+        encode_mops_reg(instr_get_dst(instr, 1), false, &d) &&
+        encode_mops_reg(instr_get_dst(instr, 2), false, &s) &&
+        encode_mops_reg(instr_get_dst(instr, 3), false, &n) && d != s && d != n &&
+        s != n && is_mops_mem(instr_get_dst(instr, 0), d) &&
+        is_mops_mem(instr_get_src(instr, 0), s) &&
+        opnd_same(instr_get_src(instr, 1), instr_get_dst(instr, 1)) &&
+        opnd_same(instr_get_src(instr, 2), instr_get_dst(instr, 2)) &&
+        opnd_same(instr_get_src(instr, 3), instr_get_dst(instr, 3)))
+        return (enc | s << 16 | n << 5 | d);
+    return ENCFAIL;
+}
+
+static inline bool
+decode_opnds_mops_set(uint enc, dcontext_t *dcontext, byte *pc, instr_t *instr,
+                      int opcode)
+{
+    uint d = extract_uint(enc, 0, 5);
+    uint n = extract_uint(enc, 5, 5);
+    uint s = extract_uint(enc, 16, 5);
+    if (d == s || d == n || s == n || d == 31 || n == 31)
+        return false;
+    instr_set_opcode(instr, opcode);
+    instr_set_num_opnds(dcontext, instr, 3, 3);
+    instr_set_dst(instr, 0,
+                  opnd_create_base_disp(DR_REG_X0 + d, DR_REG_NULL, 0, 0, OPSZ_0));
+    instr_set_dst(instr, 1, opnd_create_reg(DR_REG_X0 + d));
+    instr_set_dst(instr, 2, opnd_create_reg(DR_REG_X0 + n));
+    instr_set_src(instr, 0, opnd_create_reg(DR_REG_X0 + d));
+    instr_set_src(instr, 1, opnd_create_reg(DR_REG_X0 + n));
+    instr_set_src(instr, 2, opnd_create_reg(decode_reg(s, true, false)));
+    return true;
+}
+
+static inline uint
+encode_opnds_mops_set(byte *pc, instr_t *instr, uint enc, decode_info_t *di)
+{
+    uint d, n, s;
+    if (instr_num_dsts(instr) == 3 && instr_num_srcs(instr) == 3 &&
+        encode_mops_reg(instr_get_dst(instr, 1), false, &d) &&
+        encode_mops_reg(instr_get_dst(instr, 2), false, &n) &&
+        encode_mops_reg(instr_get_src(instr, 2), true, &s) && d != n && d != s &&
+        n != s && is_mops_mem(instr_get_dst(instr, 0), d) &&
+        opnd_same(instr_get_src(instr, 0), instr_get_dst(instr, 1)) &&
+        opnd_same(instr_get_src(instr, 1), instr_get_dst(instr, 2)))
+        return (enc | s << 16 | n << 5 | d);
+    return ENCFAIL;
+}
+
 /* msr: used for MSR.
  * With MSR the destination register may or may not be one of the system registers
  * that we recognise.
@@ -10061,6 +10171,13 @@ decode_load_store_category(uint encoding)
      */
     uint op0 = BITS(encoding, 31, 28);
     uint opc = BITS(encoding, 23, 22);
+    /* FEAT_MOPS memory copy and set (sz == 00, bit 21 == 0, bits 11:10 == 01): a copy
+     * loads and stores; a set (opc == 11) only stores.
+     */
+    if ((encoding & 0xfb200c00) == 0x19000400) {
+        return opc == 0x3 ? DR_INSTR_CATEGORY_STORE
+                          : DR_INSTR_CATEGORY_LOAD | DR_INSTR_CATEGORY_STORE;
+    }
     if ((op0 & 0x3) == 0x3) { /* xx11 */
         if (BITS(encoding, 10, 10) == 1 && BITS(encoding, 21, 21) == 1)
             category = DR_INSTR_CATEGORY_LOAD;
@@ -10190,6 +10307,7 @@ decode_category(uint encoding, instr_t *instr)
 #include "isa_features.h"
 #include "decode_gen_sve2.h"
 #include "decode_gen_sve.h"
+#include "decode_gen_v88.h"
 #include "decode_gen_v87.h"
 #include "decode_gen_v85.h"
 #include "decode_gen_v84.h"
@@ -10199,6 +10317,7 @@ decode_category(uint encoding, instr_t *instr)
 #include "decode_gen_v80.h"
 #include "encode_gen_sve2.h"
 #include "encode_gen_sve.h"
+#include "encode_gen_v88.h"
 #include "encode_gen_v87.h"
 #include "encode_gen_v85.h"
 #include "encode_gen_v84.h"
@@ -10208,6 +10327,7 @@ decode_category(uint encoding, instr_t *instr)
 #include "encode_gen_v80.h"
 #include "isa_feature_gen_sve2.h"
 #include "isa_feature_gen_sve.h"
+#include "isa_feature_gen_v88.h"
 #include "isa_feature_gen_v87.h"
 #include "isa_feature_gen_v85.h"
 #include "isa_feature_gen_v84.h"

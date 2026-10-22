@@ -69,7 +69,13 @@ tlb_t::request(const memref_t &memref_in)
     // We support larger sizes to improve the IPC perf.
     // This means that one memref could touch multiple blocks.
     // We treat each block separately for statistics purposes.
-    addr_t final_addr = memref_in.data.addr + memref_in.data.size - 1 /*avoid overflow*/;
+    // A record must not have size 0, but if one does, we treat it as 1 byte rather
+    // than computing an end before its start, which for address 0 is the top of the
+    // address space: a loop over every block.  A record that wraps ends at the top.
+    addr_t final_addr = memref_in.data.addr +
+        (memref_in.data.size == 0 ? 0 : memref_in.data.size - 1 /*avoid overflow*/);
+    if (final_addr < memref_in.data.addr)
+        final_addr = ~static_cast<addr_t>(0);
     addr_t final_tag = compute_tag(final_addr);
     addr_t tag = compute_tag(memref_in.data.addr);
     memref_pid_t pid = memref_in.data.pid;

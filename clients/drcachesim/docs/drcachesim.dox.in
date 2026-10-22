@@ -2084,6 +2084,10 @@ these areas of missing functionality:
   (https://github.com/DynamoRIO/dynamorio/issues/4041).
 - Application phase marking is not yet implemented
   (https://github.com/DynamoRIO/dynamorio/issues/2478).
+- The data accesses of the AArch64 FEAT_MOPS memory copy and set instructions
+  (CPYFP/CPYFM/CPYFE, CPYP/CPYM/CPYE, SETP/SETM/SETE) are not recorded: their
+  size is only known at run time and may exceed what a record can hold (see
+  drutil_opnd_mem_size_is_variable()).  Their instruction fetches are recorded.
 
 ****************************************************************************
 \page sec_drcachesim_cmp Comparison to Other Simulators

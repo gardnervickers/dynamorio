@@ -552,6 +552,19 @@ instr_saves_float_pc(instr_t *instr);
 #ifdef AARCH64
 bool
 instr_is_icache_op(instr_t *instr);
+
+bool
+instr_is_mops(instr_t *instr);
+
+/* Returns 0, 1 or 2 if instr is a FEAT_MOPS prologue, main or epilogue
+ * instruction, and -1 otherwise.  For a MOPS instruction, sets *prologue_opcode
+ * and *main_opcode, if not NULL, to the opcodes of the prologue and main
+ * instructions of the same kind of copy or set.
+ */
+int
+instr_mops_stage(instr_t *instr, DR_PARAM_OUT int *prologue_opcode,
+                 DR_PARAM_OUT int *main_opcode);
+
 /* Sets *usage to the flags usage (EFLAGS_ constants) of an AArch64 instruction
  * with valid operands, which its opcode and, for mrs and msr, its operands
  * determine, without encoding it.  Returns false for opcodes it cannot tell

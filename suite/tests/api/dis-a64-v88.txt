@@ -1,0 +1,112 @@
+# **********************************************************
+# Copyright (c) 2026 Google, Inc.  All rights reserved.
+# **********************************************************
+
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# * Redistributions of source code must retain the above copyright notice,
+#   this list of conditions and the following disclaimer.
+#
+# * Redistributions in binary form must reproduce the above copyright notice,
+#   this list of conditions and the following disclaimer in the documentation
+#   and/or other materials provided with the distribution.
+#
+# * Neither the name of Google, Inc. nor the names of its contributors may be
+#   used to endorse or promote products derived from this software without
+#   specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL GOOGLE, INC. OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+# DAMAGE.
+
+# Test data for DynamoRIO's AArch64 v8.8 encoder, decoder and disassembler.
+# See dis-a64-sve.txt for the formatting.
+# The assembly was checked against llvm-mc 22 (-mattr=+all).
+
+# Tests:
+# CPYFP [<Xd>]!, [<Xs>]!, <Xn>!
+19010443 : cpyfp [x3]!, [x1]!, x2!          : cpyfp  (%x1) %x3 %x1 %x2 -> (%x3) %x3 %x1 %x2
+19010440 : cpyfp [x0]!, [x1]!, x2!          : cpyfp  (%x1) %x0 %x1 %x2 -> (%x0) %x0 %x1 %x2
+191d079e : cpyfp [x30]!, [x29]!, x28!       : cpyfp  (%x29) %x30 %x29 %x28 -> (%x30) %x30 %x29 %x28
+19040531 : cpyfp [x17]!, [x4]!, x9!         : cpyfp  (%x4) %x17 %x4 %x9 -> (%x17) %x17 %x4 %x9
+
+# CPYFM [<Xd>]!, [<Xs>]!, <Xn>!
+19410443 : cpyfm [x3]!, [x1]!, x2!          : cpyfm  (%x1) %x3 %x1 %x2 -> (%x3) %x3 %x1 %x2
+19410440 : cpyfm [x0]!, [x1]!, x2!          : cpyfm  (%x1) %x0 %x1 %x2 -> (%x0) %x0 %x1 %x2
+195d079e : cpyfm [x30]!, [x29]!, x28!       : cpyfm  (%x29) %x30 %x29 %x28 -> (%x30) %x30 %x29 %x28
+19440531 : cpyfm [x17]!, [x4]!, x9!         : cpyfm  (%x4) %x17 %x4 %x9 -> (%x17) %x17 %x4 %x9
+
+# CPYFE [<Xd>]!, [<Xs>]!, <Xn>!
+19810443 : cpyfe [x3]!, [x1]!, x2!          : cpyfe  (%x1) %x3 %x1 %x2 -> (%x3) %x3 %x1 %x2
+19810440 : cpyfe [x0]!, [x1]!, x2!          : cpyfe  (%x1) %x0 %x1 %x2 -> (%x0) %x0 %x1 %x2
+199d079e : cpyfe [x30]!, [x29]!, x28!       : cpyfe  (%x29) %x30 %x29 %x28 -> (%x30) %x30 %x29 %x28
+19840531 : cpyfe [x17]!, [x4]!, x9!         : cpyfe  (%x4) %x17 %x4 %x9 -> (%x17) %x17 %x4 %x9
+
+# CPYP [<Xd>]!, [<Xs>]!, <Xn>!
+1d010443 : cpyp [x3]!, [x1]!, x2!           : cpyp   (%x1) %x3 %x1 %x2 -> (%x3) %x3 %x1 %x2
+1d010440 : cpyp [x0]!, [x1]!, x2!           : cpyp   (%x1) %x0 %x1 %x2 -> (%x0) %x0 %x1 %x2
+1d1d079e : cpyp [x30]!, [x29]!, x28!        : cpyp   (%x29) %x30 %x29 %x28 -> (%x30) %x30 %x29 %x28
+1d040531 : cpyp [x17]!, [x4]!, x9!          : cpyp   (%x4) %x17 %x4 %x9 -> (%x17) %x17 %x4 %x9
+
+# CPYM [<Xd>]!, [<Xs>]!, <Xn>!
+1d410443 : cpym [x3]!, [x1]!, x2!           : cpym   (%x1) %x3 %x1 %x2 -> (%x3) %x3 %x1 %x2
+1d410440 : cpym [x0]!, [x1]!, x2!           : cpym   (%x1) %x0 %x1 %x2 -> (%x0) %x0 %x1 %x2
+1d5d079e : cpym [x30]!, [x29]!, x28!        : cpym   (%x29) %x30 %x29 %x28 -> (%x30) %x30 %x29 %x28
+1d440531 : cpym [x17]!, [x4]!, x9!          : cpym   (%x4) %x17 %x4 %x9 -> (%x17) %x17 %x4 %x9
+
+# CPYE [<Xd>]!, [<Xs>]!, <Xn>!
+1d810443 : cpye [x3]!, [x1]!, x2!           : cpye   (%x1) %x3 %x1 %x2 -> (%x3) %x3 %x1 %x2
+1d810440 : cpye [x0]!, [x1]!, x2!           : cpye   (%x1) %x0 %x1 %x2 -> (%x0) %x0 %x1 %x2
+1d9d079e : cpye [x30]!, [x29]!, x28!        : cpye   (%x29) %x30 %x29 %x28 -> (%x30) %x30 %x29 %x28
+1d840531 : cpye [x17]!, [x4]!, x9!          : cpye   (%x4) %x17 %x4 %x9 -> (%x17) %x17 %x4 %x9
+
+# SETP [<Xd>]!, <Xn>!, <Xs>
+19c10443 : setp [x3]!, x2!, x1              : setp   %x3 %x2 %x1 -> (%x3) %x3 %x2
+19c10440 : setp [x0]!, x2!, x1              : setp   %x0 %x2 %x1 -> (%x0) %x0 %x2
+19dd079e : setp [x30]!, x28!, x29           : setp   %x30 %x28 %x29 -> (%x30) %x30 %x28
+19c40531 : setp [x17]!, x9!, x4             : setp   %x17 %x9 %x4 -> (%x17) %x17 %x9
+19df04c5 : setp [x5]!, x6!, xzr             : setp   %x5 %x6 %xzr -> (%x5) %x5 %x6
+
+# SETM [<Xd>]!, <Xn>!, <Xs>
+19c14443 : setm [x3]!, x2!, x1              : setm   %x3 %x2 %x1 -> (%x3) %x3 %x2
+19c14440 : setm [x0]!, x2!, x1              : setm   %x0 %x2 %x1 -> (%x0) %x0 %x2
+19dd479e : setm [x30]!, x28!, x29           : setm   %x30 %x28 %x29 -> (%x30) %x30 %x28
+19c44531 : setm [x17]!, x9!, x4             : setm   %x17 %x9 %x4 -> (%x17) %x17 %x9
+19df44c5 : setm [x5]!, x6!, xzr             : setm   %x5 %x6 %xzr -> (%x5) %x5 %x6
+
+# SETE [<Xd>]!, <Xn>!, <Xs>
+19c18443 : sete [x3]!, x2!, x1              : sete   %x3 %x2 %x1 -> (%x3) %x3 %x2
+19c18440 : sete [x0]!, x2!, x1              : sete   %x0 %x2 %x1 -> (%x0) %x0 %x2
+19dd879e : sete [x30]!, x28!, x29           : sete   %x30 %x28 %x29 -> (%x30) %x30 %x28
+19c48531 : sete [x17]!, x9!, x4             : sete   %x17 %x9 %x4 -> (%x17) %x17 %x9
+19df84c5 : sete [x5]!, x6!, xzr             : sete   %x5 %x6 %xzr -> (%x5) %x5 %x6
+
+# CONSTRAINED UNPREDICTABLE (Unpredictable_MOPSOVERLAP31) and unallocated
+# encodings, which are left undecoded. LLVM accepts Rn == 31 (XZR), but the Arm
+# ARM makes it CONSTRAINED UNPREDICTABLE like the other register number 31 cases.
+19010441 : cpyfp (reserved by Rd == Rn)     : xx     $0x19010441 %x1 %x2 %x1 %x1 -> %x1 %x2 %x1 %x1
+19000400 : cpyfp (reserved by Rd == Rs == Rn) : xx     $0x19000400 %x0 %x0 %x1 %x0 -> %x0 %x0 %x1 %x0
+1901045f : cpyfp (reserved by Rd == 31)     : xx     $0x1901045f %sp %x2 %x1 %x1 -> %sp %x2 %x1 %x1
+191f0443 : cpyfp (reserved by Rs == 31)     : xx     $0x191f0443 %x3 %x2 %x1 %sp -> %x3 %x2 %x1 %sp
+190107e3 : cpyfp (reserved by Rn == 31)     : xx     $0x190107e3 %x3 %sp %x1 %x1 -> %x3 %sp %x1 %x1
+19c1045f : setp (reserved by Rd == 31)      : xx     $0x19c1045f %sp %x2 %x1 %x1 -> %sp %x2 %x1 %x1
+19c107e3 : setp (reserved by Rn == 31)      : xx     $0x19c107e3 %x3 %sp %x1 %x1 -> %x3 %sp %x1 %x1
+19c10441 : setp (reserved by Rd == Rs)      : xx     $0x19c10441 %x1 %x2 %x1 %x1 -> %x1 %x2 %x1 %x1
+59010443 : cpyfp (unallocated by sz == 01)  : xx     $0x59010443 %x3 %x2 %x1 %x1 -> %x3 %x2 %x1 %x1
+
+# Forms with options, and SETG*, are not yet decoded.
+19011443 : cpyfpwt [x3]!, [x1]!, x2!        : xx     $0x19011443 %x3 %x2 %x5 %x1 -> %x3 %x2 %x5 %x1
+1901f443 : cpyfptn [x3]!, [x1]!, x2!        : xx     $0x1901f443 %x3 %x2 %x29 %x1 -> %x3 %x2 %x29 %x1
+19c11443 : setpt [x3]!, x2!, x1             : xx     $0x19c11443 %x3 %x2 %x5 %x1 -> %x3 %x2 %x5 %x1
+19c13443 : setptn [x3]!, x2!, x1            : xx     $0x19c13443 %x3 %x2 %x13 %x1 -> %x3 %x2 %x13 %x1
+1dc10443 : setgp [x3]!, x2!, x1             : xx     $0x1dc10443 %x3 %x2 %x1 %x1 -> %x3 %x2 %x1 %x1
+1d012443 : cpyprt [x3]!, [x1]!, x2!         : xx     $0x1d012443 %x3 %x2 %x9 %x1 -> %x3 %x2 %x9 %x1

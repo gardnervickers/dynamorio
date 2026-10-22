@@ -130,9 +130,48 @@ DR_EXPORT
  * component (enabled/disabled by user state component mask bit 0), the SSE user
  * state component (bit 1), the AVX user state component (bit 2), the MPX user
  * state components (bit 2 and 3) and the AVX-512 user state component (bit 7).
+ *
+ * Returns 0 for a memory reference whose size is only known at run time, such as
+ * those of the AArch64 FEAT_MOPS memory copy and set instructions: see
+ * drutil_opnd_mem_size_is_variable().  A tool must not record such a reference as
+ * a 0-byte access.
  */
 uint
 drutil_opnd_mem_size_in_bytes(opnd_t memref, instr_t *inst);
+
+DR_EXPORT
+/**
+ * Returns whether the memory reference \p memref of \p inst accesses a number of
+ * bytes that is only known at run time, for which drutil_opnd_mem_size_in_bytes()
+ * returns 0.  If so and \p size_reg is not NULL, sets \p size_reg to the register
+ * that holds that number of bytes when \p inst is about to execute, or to
+ * DR_REG_NULL if no register holds it.
+ *
+ * These are the memory operands of the AArch64 FEAT_MOPS memory copy and set
+ * instructions, each a prologue, main and epilogue instruction: OP_cpyfp,
+ * OP_cpyfm and OP_cpyfe; OP_cpyp, OP_cpym and OP_cpye; OP_setp, OP_setm and
+ * OP_sete.  Before the prologue, Xd holds the destination address, Xs the source
+ * address of a copy and Xn the number of bytes (unsigned; the hardware treats a
+ * count above 2^63 - 1 as 2^63 - 1).  The prologue's memory operands therefore
+ * stand for the whole copy or set: [Xd, Xd + Xn) is written and, for a copy,
+ * [Xs, Xs + Xn) is read, with drutil_insert_get_mem_addr() giving the start
+ * address and \p size_reg set to Xn.  How the work is split between the three
+ * instructions is up to the implementation, and after the prologue the three
+ * registers hold an implementation-defined form of the remaining operation (the
+ * Arm ARM's algorithm options A and B: Xd may be the end address and Xn a
+ * negative count), from which neither the address nor the size of what the main
+ * or epilogue instruction accesses can be found.  For their operands \p size_reg
+ * is set to DR_REG_NULL: a tool should attribute the whole access to the prologue
+ * and record nothing for the main and epilogue instructions.
+ *
+ * The prologue, main and epilogue must also stay consecutive: on a
+ * mismatched-option exception the kernel rewinds the pc by 4 or 8 bytes to the
+ * prologue.  DynamoRIO arranges that for the code cache, whatever is inserted
+ * between them.
+ */
+bool
+drutil_opnd_mem_size_is_variable(opnd_t memref, instr_t *inst,
+                                 DR_PARAM_OUT reg_id_t *size_reg);
 
 DR_EXPORT
 /**

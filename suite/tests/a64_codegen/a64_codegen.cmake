@@ -131,3 +131,5 @@ add_custom_target(a64_codegen_tests)
 add_dependencies(a64_codegen_tests api.a64_codegen_ir api.a64_codegen_build)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/client.a64_cleancall_ool.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/client.a64_mops.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/client.a64_emit_decoded.cmake")

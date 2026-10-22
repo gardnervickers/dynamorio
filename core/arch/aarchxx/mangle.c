@@ -4483,6 +4483,136 @@ mangle_exclusive_monitor_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *i
     return next_instr;
 }
 
+#ifdef AARCH64
+/***************************************************************************
+ * FEAT_MOPS copies and sets
+ *
+ * Each copy or set is a prologue, main and epilogue instruction (e.g., CPYFP,
+ * CPYFM, CPYFE) with the same registers, which the hardware may split the work
+ * between however it likes, recording its choice (option A or B) in NZCV and the
+ * form of the registers.  If the main or epilogue instruction runs on a CPU that
+ * would have chosen the other option, e.g. after a migration, it raises a MOPS
+ * exception, and the kernel puts the registers back into the form the prologue
+ * takes and rewinds the pc by 4 bytes from the main instruction or 8 from the
+ * epilogue: it assumes the three are consecutive.  In the code cache they need not
+ * be: a client's instrumentation, drreg's spills and restores, our stolen-register
+ * mangling and a block that ends after the prologue or main instruction all put
+ * code between them, so a rewind would land in the middle of that code.
+ *
+ * So before a main instruction that does not follow its prologue in the final
+ * code, we add a copy of the prologue with the main instruction's operands, and
+ * jump over it:
+ *
+ *     <instrumentation, restores, stolen-register swap>
+ *     b      main
+ *     cpyfp  <main's registers>    <- the kernel's rewind lands here
+ *   main:
+ *     cpyfm  <app>
+ *
+ * Normally the copy never runs.  After a rewind the registers are in the
+ * prologue's form, in the registers the main instruction uses, so running the
+ * copy and then the main instruction is what the app would do.  Before an
+ * epilogue we add copies of both.  The copies use the main or epilogue
+ * instruction's final operands, after stolen-register mangling, as those are
+ * the registers the kernel resets.  A fault in a copy translates to the app's
+ * prologue or main instruction, which is the state the rewind left.
+ */
+
+/* Like instr_get_prev(), but skips labels, which take no space. */
+static instr_t *
+mops_prev_in_code(instr_t *instr)
+{
+    do
+        instr = instr_get_prev(instr);
+    while (instr != NULL && instr_is_label(instr));
+    return instr;
+}
+
+static bool
+mops_same_operands(instr_t *a, instr_t *b)
+{
+    if (instr_num_srcs(a) != instr_num_srcs(b) || instr_num_dsts(a) != instr_num_dsts(b))
+        return false;
+    for (int i = 0; i < instr_num_srcs(a); i++) {
+        if (!opnd_same(instr_get_src(a, i), instr_get_src(b, i)))
+            return false;
+    }
+    for (int i = 0; i < instr_num_dsts(a); i++) {
+        if (!opnd_same(instr_get_dst(a, i), instr_get_dst(b, i)))
+            return false;
+    }
+    return true;
+}
+
+/* Returns a copy of instr's operands under the prologue or main opcode. */
+static instr_t *
+mops_copy(dcontext_t *dcontext, instr_t *instr, int opcode, app_pc xl8)
+{
+    instr_t *copy =
+        instr_build(dcontext, opcode, instr_num_dsts(instr), instr_num_srcs(instr));
+    for (int i = 0; i < instr_num_dsts(instr); i++)
+        instr_set_dst(copy, i, instr_get_dst(instr, i));
+    for (int i = 0; i < instr_num_srcs(instr); i++)
+        instr_set_src(copy, i, instr_get_src(instr, i));
+    instr_set_translation(copy, xl8);
+    instr_set_our_mangling(copy, true);
+    return copy;
+}
+
+/* Called at the end of d_r_mangle(): see the comment above. */
+void
+mangle_mops_sequences(dcontext_t *dcontext, instrlist_t *ilist,
+                      uint *flags DR_PARAM_INOUT)
+{
+    /* Without FEAT_MOPS these instructions raise SIGILL wherever they are, and the
+     * copies could not be encoded.
+     */
+    if (!proc_has_feature(FEATURE_MOPS))
+        return;
+    bool added = false;
+    for (instr_t *instr = instrlist_first(ilist); instr != NULL;
+         instr = instr_get_next(instr)) {
+        int prologue, main;
+        int stage = instr_mops_stage(instr, &prologue, &main);
+        if (stage <= 0 || !instr_is_app(instr))
+            continue;
+        instr_t *prev = mops_prev_in_code(instr);
+        if (prev != NULL && instr_get_opcode(prev) == (stage == 1 ? prologue : main) &&
+            mops_same_operands(prev, instr)) {
+            if (stage == 1)
+                continue;
+            /* The main instruction before an epilogue has been handled already, so
+             * if it is the app's it follows its prologue or a copy of it.
+             */
+            instr_t *prev2 = mops_prev_in_code(prev);
+            if (prev2 != NULL && instr_get_opcode(prev2) == prologue &&
+                mops_same_operands(prev2, instr))
+                continue;
+        }
+        app_pc xl8 = get_app_instr_xl8(instr);
+        LOG(THREAD, LOG_INTERP, 3,
+            "mangle: MOPS instr @" PFX " does not follow its %s: adding copies\n", xl8,
+            stage == 1 ? "prologue" : "prologue and main instr");
+        instr_t *jump = XINST_CREATE_jump(dcontext, opnd_create_instr(instr));
+        instr_set_translation(jump, xl8);
+        instr_set_our_mangling(jump, true);
+        PRE(ilist, instr, jump);
+        PRE(ilist, instr,
+            mops_copy(dcontext, instr, prologue, xl8 - stage * AARCH64_INSTR_SIZE));
+        if (stage == 2) {
+            PRE(ilist, instr, mops_copy(dcontext, instr, main, xl8 - AARCH64_INSTR_SIZE));
+        }
+        added = true;
+    }
+    /* A trace is built by decoding its blocks' code, which would take the copies
+     * for app instructions.  Copies are rare enough that we keep such blocks out of
+     * traces instead.
+     */
+    if (added && !TESTANY(FRAG_IS_TRACE, *flags))
+        *flags |= FRAG_CANNOT_BE_TRACE;
+}
+#endif /* AARCH64 */
+
 /* END OF CONTROL-FLOW MANGLING ROUTINES
  *###########################################################################
  *###########################################################################
@@ -4623,6 +4753,7 @@ sandbox_write(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr, instr_t 
      */
     ASSERT_NOT_IMPLEMENTED(!instr_is_scatter(instr));
     ASSERT_NOT_IMPLEMENTED(instr_get_opcode(instr) != OP_dc_zva);
+    ASSERT_NOT_IMPLEMENTED(!instr_is_mops(instr));
 
     /*
      * perform_write()

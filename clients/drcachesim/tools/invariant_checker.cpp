@@ -828,6 +828,26 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                             instr_num_memory_read_access(noalloc_instr);
                         cur_instr_info.decoding.num_memory_write_access =
                             instr_num_memory_write_access(noalloc_instr);
+#ifdef AARCH64
+                        // The tracer records no accesses for the FEAT_MOPS copies and
+                        // sets, whose size is only known at run time: see
+                        // instru_t::instr_has_traced_memrefs().
+                        switch (cur_instr_info.decoding.opcode) {
+                        case OP_cpyfp:
+                        case OP_cpyfm:
+                        case OP_cpyfe:
+                        case OP_cpyp:
+                        case OP_cpym:
+                        case OP_cpye:
+                        case OP_setp:
+                        case OP_setm:
+                        case OP_sete:
+                            cur_instr_info.decoding.num_memory_read_access = 0;
+                            cur_instr_info.decoding.num_memory_write_access = 0;
+                            break;
+                        default: break;
+                        }
+#endif
                     }
                     if (type_is_instr_branch(memref.instr.type) &&
                         // DR_ISA_REGDEPS instructions don't have a branch target saved as

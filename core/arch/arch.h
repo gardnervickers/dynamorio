@@ -813,6 +813,9 @@ mangle_reads_thread_register(dcontext_t *dcontext, instrlist_t *ilist, instr_t *
 instr_t *
 mangle_writes_thread_register(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                               instr_t *next_instr);
+void
+mangle_mops_sequences(dcontext_t *dcontext, instrlist_t *ilist,
+                      uint *flags DR_PARAM_INOUT);
 #endif /* AARCH64 */
 
 /* offsets within local_state_t used for specific scratch purposes */

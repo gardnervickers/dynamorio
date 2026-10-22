@@ -35,6 +35,10 @@
 
 struct _decode_info_t {
     bool check_reachable; /* This is used by the encoder, not the decoder. */
+    /* For the encoder: encode whatever the CPU's features, to check an instruction
+     * we decoded against bytes it may have come from.
+     */
+    bool ignore_isa_features;
 };
 
 #endif /* DECODE_PRIVATE_H */

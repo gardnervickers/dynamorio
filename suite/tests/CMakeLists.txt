@@ -490,7 +490,8 @@ endfunction(append_link_flags)
 # TODO i#6429 Change this allowlist to a blocklist.
 set(sve_tests
       simple_app api.ir api.ir_negative api.ir_v81 api.ir_v82 api.ir_v83 api.ir_v84
-      api.ir_v85 api.ir_v87 api.ir_sve api.ir_sve2 api.ir-static api.drdecode
+      api.ir_v85 api.ir_v87 api.ir_v88 api.ir_v89 api.ir_sve api.ir_sve2 api.ir-static
+      api.drdecode
       common.broadfun common.nzcv common.getretaddr common.segfault
       common.allasm_aarch64_isa common.allasm_aarch64_cache allasm_aarch64_prefetch
       allasm_aarch64_flush libutil.frontend_test libutil.drconfig_test
@@ -2048,6 +2049,8 @@ if (NOT ANDROID)
     tobuild_api(api.ir_v84 api/ir_aarch64_v84.c "" "" OFF OFF OFF)
     tobuild_api(api.ir_v85 api/ir_aarch64_v85.c "" "" OFF OFF OFF)
     tobuild_api(api.ir_v87 api/ir_aarch64_v87.c "" "" OFF OFF OFF)
+    tobuild_api(api.ir_v88 api/ir_aarch64_v88.c "" "" OFF OFF OFF)
+    tobuild_api(api.ir_v89 api/ir_aarch64_v89.c "" "" OFF OFF OFF)
     tobuild_api(api.ir_sve api/ir_aarch64_sve.c "" "" OFF OFF OFF)
     tobuild_api(api.ir_sve2 api/ir_aarch64_sve2.c "" "" OFF OFF OFF)
   endif (AARCH64)
@@ -2326,6 +2329,10 @@ if (DR_HOST_AARCH64)
   add_exe(allasm_aarch64_flush
     ${PROJECT_SOURCE_DIR}/clients/drcachesim/tests/allasm_aarch64_flush.asm "" "")
   append_pure_asm_app_link_flags(allasm_aarch64_flush)
+
+  add_exe(allasm_aarch64_mops
+    ${PROJECT_SOURCE_DIR}/clients/drcachesim/tests/allasm_aarch64_mops.asm "" "")
+  append_pure_asm_app_link_flags(allasm_aarch64_mops)
 endif ()
 
 if (DEBUG)
@@ -3325,6 +3332,10 @@ elseif (AARCH64)
     "-q;${CMAKE_CURRENT_SOURCE_DIR}/api/dis-a64-v85.txt" OFF OFF)
   torunonly_api(api.dis-a64-v87 api.dis-a64 api/dis-a64.c ""
     "-q;${CMAKE_CURRENT_SOURCE_DIR}/api/dis-a64-v87.txt" OFF OFF)
+  torunonly_api(api.dis-a64-v88 api.dis-a64 api/dis-a64.c ""
+    "-q;${CMAKE_CURRENT_SOURCE_DIR}/api/dis-a64-v88.txt" OFF OFF)
+  torunonly_api(api.dis-a64-v89 api.dis-a64 api/dis-a64.c ""
+    "-q;${CMAKE_CURRENT_SOURCE_DIR}/api/dis-a64-v89.txt" OFF OFF)
   torunonly_api(api.dis-a64-sve api.dis-a64 api/dis-a64.c ""
     "-q;${CMAKE_CURRENT_SOURCE_DIR}/api/dis-a64-sve.txt" OFF OFF)
   torunonly_api(api.dis-a64-sve2 api.dis-a64 api/dis-a64.c ""
@@ -3900,6 +3911,13 @@ if (BUILD_CLIENTS)
 
       torunonly_drcachesim(allasm-aarch64-flush-basic-counts allasm_aarch64_flush
         "-tool basic_counts" "")
+
+      # The FEAT_MOPS copies and sets have no data records: their size is only
+      # known at run time.  One is a 0-byte set at address 0, which as a 0-byte
+      # write record made the cache simulator loop over the address space.
+      torunonly_drcachesim(allasm-aarch64-mops-basic-counts allasm_aarch64_mops
+        "-tool basic_counts" "")
+      torunonly_drcachesim(allasm-aarch64-mops-cache allasm_aarch64_mops "" "")
     endif ()
 
     # XXX i#1703: add more dedicated tests (in suite/tests/clients/) for which
@@ -4957,6 +4975,14 @@ if (BUILD_CLIENTS)
     endif ()
 
     if (AARCH64)
+      # No data records for the FEAT_MOPS copies and sets, the same way in the
+      # tracer and raw2trace.  Without FEAT_MOPS each one faults and is an
+      # uncompleted instruction; the invariant checker then reports the signal
+      # each takes right after the previous handler's sigreturn as control flow
+      # with no marker, so we do not run it here.
+      torunonly_drcacheoff(allasm-aarch64-mops allasm_aarch64_mops ""
+        "@-tool@basic_counts" "")
+
       set(testname_full "tool.drcacheoff.allasm-aarch64-prefetch-counts")
       torunonly_ci(${testname_full} allasm_aarch64_prefetch drmemtrace_launcher
         "offline-allasm-aarch64-prefetch-counts"

@@ -97,6 +97,25 @@ sigcontext_record_at(byte *base, size_t offset, size_t limit)
     return head;
 }
 
+bool
+sigcontext_get_fault_esr(sigcontext_t *sc, uint64 *esr DR_PARAM_OUT)
+{
+    /* The kernel puts the esr_context record, when it adds one, in __reserved
+     * (never in the EXTRA space), after the fpsimd_context.
+     */
+    size_t offset = 0;
+    struct _aarch64_ctx *head;
+    while ((head = sigcontext_record_at(sc->__reserved, offset,
+                                        sizeof(sc->__reserved))) != NULL) {
+        if (head->magic == ESR_MAGIC && head->size >= sizeof(struct esr_context)) {
+            *esr = ((struct esr_context *)head)->esr;
+            return true;
+        }
+        offset += head->size;
+    }
+    return false;
+}
+
 #ifdef DEBUG
 /* Representation of quadwords (128 bits) as 2 doublewords. */
 typedef union {

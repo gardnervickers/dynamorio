@@ -564,6 +564,42 @@ drutil_opnd_mem_size_in_bytes(opnd_t memref, instr_t *inst)
         return opnd_size_in_bytes(opnd_get_size(memref));
 }
 
+DR_EXPORT
+bool
+drutil_opnd_mem_size_is_variable(opnd_t memref, instr_t *inst,
+                                 DR_PARAM_OUT reg_id_t *size_reg)
+{
+    if (inst == NULL || !opnd_is_memory_reference(memref))
+        return false;
+#ifdef AARCH64
+    /* The FEAT_MOPS copies and sets: see the docs.  The operand layout is the
+     * same for all of them: dsts [Xd], Xd, (Xs,) Xn and srcs ([Xs],) Xd, (Xs,) Xn,
+     * so Xn is the last destination.
+     */
+    switch (instr_get_opcode(inst)) {
+    case OP_cpyfp:
+    case OP_cpyp:
+    case OP_setp:
+        if (size_reg != NULL) {
+            opnd_t n = instr_get_dst(inst, instr_num_dsts(inst) - 1);
+            *size_reg = opnd_is_reg(n) ? opnd_get_reg(n) : DR_REG_NULL;
+        }
+        return true;
+    case OP_cpyfm:
+    case OP_cpyfe:
+    case OP_cpym:
+    case OP_cpye:
+    case OP_setm:
+    case OP_sete:
+        if (size_reg != NULL)
+            *size_reg = DR_REG_NULL;
+        return true;
+    default: break;
+    }
+#endif
+    return false;
+}
+
 #ifdef X86
 static bool
 opc_is_stringop_loop(uint opc)

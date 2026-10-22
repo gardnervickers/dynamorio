@@ -219,6 +219,23 @@ instru_t::is_aarch64_dc_zva_instr(instr_t *instr)
 #endif
 
 bool
+instru_t::instr_has_traced_memrefs(instr_t *instr)
+{
+    // Use instr_{reads,writes}_memory() to rule out LEA and NOP.
+    if (!instr_reads_memory(instr) && !instr_writes_memory(instr))
+        return false;
+    for (int i = 0; i < instr_num_srcs(instr); i++) {
+        if (drutil_opnd_mem_size_is_variable(instr_get_src(instr, i), instr, nullptr))
+            return false;
+    }
+    for (int i = 0; i < instr_num_dsts(instr); i++) {
+        if (drutil_opnd_mem_size_is_variable(instr_get_dst(instr, i), instr, nullptr))
+            return false;
+    }
+    return true;
+}
+
+bool
 instru_t::instr_is_flush(instr_t *instr)
 {
     // Assuming we won't see any privileged instructions.

@@ -720,6 +720,12 @@ sigcontext_set_app_pstate(sigcontext_t *sc);
 void
 sigcontext_copy_app_pstate(sigcontext_t *sc, reg_t pstate);
 
+/* Sets *esr to the ESR_EL1 value the kernel recorded in sc for the fault that
+ * caused the signal (its esr_context record), and returns whether there is one.
+ */
+bool
+sigcontext_get_fault_esr(sigcontext_t *sc, uint64 *esr DR_PARAM_OUT);
+
 /* Returns how many bytes beyond sizeof(sigframe_rt_t) frame needs on a stack:
  * an EXTRA record's data goes right after the terminator that follows it and
  * can run past the frame.  A queued frame (pending) keeps the data in a

@@ -61,7 +61,12 @@
  *            is set to NE encodes to B.NE; an undecoded B.EQ (raw bits only) whose
  *            predicate is set still encodes, to its raw bits.
  *
- * Words the decoder does not know (OP_xx) are counted, not checked.
+ * Words the decoder does not know (OP_xx) are counted, not checked.  The
+ * corpus is libc's whole executable segment, which also holds its symbol
+ * tables, .rodata and .eh_frame: almost all of its OP_xx words are data.  The
+ * guards also count the words and OP_xx words of the executable sections
+ * alone (from libc's section headers), and -list-xx prints each OP_xx word
+ * there with its offset in libc, to compare with a disassembler's view.
  *
  * All CPU features are enabled for the guards, so the result does not depend
  * on the host.  The benchmarks run first with the host's features (the
@@ -84,7 +89,7 @@
  * d_r_get_thread_id(), a gettid system call when the thread has no DR TLS.)
  *
  * Usage: api.a64_codegen_ir [-reps N] [-random N] [-bench-only|-guard-only]
- *                           [-standalone]
+ *                           [-standalone] [-list-xx]
  */
 
 #ifndef _GNU_SOURCE
@@ -93,22 +98,31 @@
 #include "configure.h"
 #include "dr_api.h"
 
+#include <fcntl.h>
 #include <link.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define RANDOM_PC ((byte *)0x10000000)
 #define MAX_REPORTS 20
+#define MAX_CODE_RANGES 8
 
 typedef struct {
     byte *start;
     size_t words;
+    byte *base;       /* The load address of libc's ELF file, */
+    const char *path; /* and its path. */
+    /* The executable sections (.text, .plt, ...) inside the segment. */
+    byte *code_start[MAX_CODE_RANGES], *code_end[MAX_CODE_RANGES];
+    int num_code;
 } corpus_t;
 
 static void *dc;
+static bool list_xx;
 
 static int
 find_libc_text(struct dl_phdr_info *info, size_t size, void *data)
@@ -122,9 +136,56 @@ find_libc_text(struct dl_phdr_info *info, size_t size, void *data)
             ph->p_memsz / 4 > c->words) {
             c->start = (byte *)(info->dlpi_addr + ph->p_vaddr);
             c->words = ph->p_memsz / 4;
+            c->base = (byte *)info->dlpi_addr;
+            c->path = info->dlpi_name;
         }
     }
     return c->words > 0;
+}
+
+/* Finds the executable sections of the corpus from the section headers of
+ * libc's file, which are not mapped.  Returns false if they can't be read.
+ */
+static bool
+find_code_sections(corpus_t *c)
+{
+    ElfW(Ehdr) eh;
+    int fd = open(c->path, O_RDONLY);
+    if (fd < 0)
+        return false;
+    bool ok = pread(fd, &eh, sizeof(eh), 0) == sizeof(eh) &&
+        eh.e_shentsize == sizeof(ElfW(Shdr));
+    for (int i = 0; ok && i < eh.e_shnum; i++) {
+        ElfW(Shdr) sh;
+        if (pread(fd, &sh, sizeof(sh), eh.e_shoff + i * sizeof(sh)) != sizeof(sh)) {
+            ok = false;
+            break;
+        }
+        byte *start = c->base + sh.sh_addr;
+        if ((sh.sh_flags & SHF_EXECINSTR) == 0 || sh.sh_size == 0 || start < c->start ||
+            start + sh.sh_size > c->start + 4 * c->words)
+            continue;
+        if (c->num_code == MAX_CODE_RANGES) {
+            ok = false;
+            break;
+        }
+        c->code_start[c->num_code] = start;
+        c->code_end[c->num_code++] = start + sh.sh_size;
+    }
+    close(fd);
+    if (!ok)
+        c->num_code = 0;
+    return ok && c->num_code > 0;
+}
+
+static bool
+in_code(corpus_t *c, byte *pc)
+{
+    for (int i = 0; i < c->num_code; i++) {
+        if (pc >= c->code_start[i] && pc < c->code_end[i])
+            return true;
+    }
+    return false;
 }
 
 static double
@@ -151,6 +212,7 @@ xorshift64(uint64_t *s)
 typedef struct {
     const char *name;
     uint64_t words, valid, xx, pcrel, exact, alias, failures;
+    uint64_t code_words, code_xx; /* In executable sections. */
 } guard_counts_t;
 
 static bool
@@ -204,13 +266,17 @@ report(guard_counts_t *g, const char *what, uint enc, byte *pc, uint enc2)
     }
 }
 
-/* Checks the word enc, which is (a copy of) the word at pc. */
+/* Checks the word enc, which is (a copy of) the word at pc.  code says whether
+ * pc is in an executable section of libc.
+ */
 static void
-guard_word(guard_counts_t *g, uint enc, byte *pc)
+guard_word(guard_counts_t *g, uint enc, byte *pc, bool code, corpus_t *libc)
 {
     instr_t a, b, *n = NULL;
     uint enc2 = 0, enc3 = 0;
     g->words++;
+    if (code)
+        g->code_words++;
     instr_init(dc, &a);
     instr_init(dc, &b);
     /* Decoding from a copy leaves the raw bits invalid, so encoding a runs
@@ -233,6 +299,11 @@ guard_word(guard_counts_t *g, uint enc, byte *pc)
     if (instr_get_opcode(&a) == OP_xx) {
         /* Not known to the decoder: the encoder copies the word back. */
         g->xx++;
+        if (code) {
+            g->code_xx++;
+            if (list_xx)
+                printf("xx %s+0x%lx %08x\n", g->name, (ulong)(pc - libc->base), enc);
+        }
         goto done;
     }
     n = rebuild(&a);
@@ -344,12 +415,18 @@ guards(corpus_t *libc, uint64_t random_words)
     for (size_t i = 0; i < libc->words; i++) {
         uint enc;
         memcpy(&enc, libc->start + 4 * i, 4);
-        guard_word(&gl, enc, libc->start + 4 * i);
+        guard_word(&gl, enc, libc->start + 4 * i, in_code(libc, libc->start + 4 * i),
+                   libc);
     }
     guard_print(&gl);
+    if (libc->num_code > 0) {
+        printf("guard libc executable sections: %llu words, %llu OP_xx\n",
+               (unsigned long long)gl.code_words, (unsigned long long)gl.code_xx);
+    } else
+        printf("guard libc executable sections: section headers not found\n");
     uint64_t seed = 0x9e3779b97f4a7c15ULL;
     for (uint64_t i = 0; i < random_words; i++)
-        guard_word(&gr, (uint)xorshift64(&seed), RANDOM_PC);
+        guard_word(&gr, (uint)xorshift64(&seed), RANDOM_PC, false, libc);
     guard_print(&gr);
     return gl.failures + gr.failures + guard_predicate();
 }
@@ -524,10 +601,12 @@ main(int argc, char *argv[])
             bench = false;
         else if (strcmp(argv[i], "-standalone") == 0)
             standalone = true;
+        else if (strcmp(argv[i], "-list-xx") == 0)
+            list_xx = true;
         else {
             fprintf(stderr,
                     "usage: %s [-reps N] [-random N] [-bench-only|-guard-only] "
-                    "[-standalone]\n",
+                    "[-standalone] [-list-xx]\n",
                     argv[0]);
             return 1;
         }
@@ -547,6 +626,7 @@ main(int argc, char *argv[])
         printf("FAIL: no executable libc segment found\n");
         return 1;
     }
+    find_code_sections(&libc);
     if (bench)
         benchmarks(&libc, reps);
     uint64_t failures = 0;

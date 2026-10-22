@@ -138,10 +138,11 @@ def main():
             # Scan for some max lengths for formatting
             instr_length = max(len(i.opcode) for i in instrs)
             pre_colon = max(
-                len(i.opndtypes.split(":")[0].strip())
-                for i in instrs
-                if ":" in i.opndtypes
-                and len(i.opndtypes.split(":")[0].strip()) < 14)
+                (len(i.opndtypes.split(":")[0].strip())
+                 for i in instrs
+                 if ":" in i.opndtypes
+                 and len(i.opndtypes.split(":")[0].strip()) < 14),
+                default=0)
 
             for instr in instrs:
                 new_lines.append(

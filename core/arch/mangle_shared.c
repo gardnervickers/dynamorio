@@ -2263,6 +2263,10 @@ d_r_mangle(dcontext_t *dcontext, instrlist_t *ilist, uint *flags DR_PARAM_INOUT,
         }
     }
 #endif
+#ifdef AARCH64
+    /* After all other mangling, as it needs the final code. */
+    mangle_mops_sequences(dcontext, ilist, flags);
+#endif
     if (record_translation)
         instrlist_set_translation_target(ilist, NULL);
     instrlist_set_our_mangling(ilist, false); /* PR 267260 */
@@ -2530,10 +2534,13 @@ insert_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, uint flags,
 #    endif
 #    ifdef AARCH64
             /* Skip tag-only stores and unsupported writes.
-             * TODO i#7585: Add support for scatter operations and DC ZVA.
+             * TODO i#7585: Add support for scatter operations, DC ZVA and the
+             * FEAT_MOPS copies and sets.  The size of a MOPS write is only known at
+             * run time, and nothing may be inserted between a MOPS prologue, main
+             * and epilogue instruction.
              */
             if (!instr_writes_memory(instr) || instr_is_scatter(instr) ||
-                opcode == OP_dc_zva) {
+                opcode == OP_dc_zva || instr_is_mops(instr)) {
                 continue;
             }
 #    endif

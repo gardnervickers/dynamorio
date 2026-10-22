@@ -84,6 +84,57 @@ test_fmov_general(void *dc)
     instr_destroy(dc, instr);
 }
 
+/* FEAT_MOPS encodings with overlapping registers, or with register number 31 other
+ * than as a set's data register, are CONSTRAINED UNPREDICTABLE: they must decode as
+ * OP_xx, and the encoder must not produce them.
+ */
+static void
+test_mops_reserved(void *dc)
+{
+    instr_t *instr;
+
+    enable_all_test_cpu_features();
+
+    static const uint reserved[] = {
+        0x19010441, /* cpyfp Rd == Rs (x1) */
+        0x19010442, /* cpyfp Rd == Rn (x2) */
+        0x19010421, /* cpyfp Rd == Rs == Rn (x1) */
+        0x19020443, /* cpyfp Rs == Rn (x2) */
+        0x1901045f, /* cpyfp Rd == 31 */
+        0x191f0443, /* cpyfp Rs == 31 */
+        0x190107e3, /* cpyfp Rn == 31 */
+        0x1d410441, /* cpym Rd == Rs (x1) */
+        0x19c10441, /* setp Rd == Rs (x1) */
+        0x19c20443, /* setp Rn == Rs (x2) */
+        0x19c1045f, /* setp Rd == 31 */
+        0x19c107e3, /* setp Rn == 31 */
+        0x59010443, /* cpyfp with sz == 01 */
+    };
+    for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+        instr = instr_create(dc);
+        decode(dc, (byte *)&reserved[i], instr);
+        ASSERT(instr_get_opcode(instr) == OP_xx);
+        instr_destroy(dc, instr);
+    }
+
+    /* A set's data register may be XZR... */
+    static const uint setp_xzr = 0x19df0443; /* setp [x3]!, x2!, xzr */
+    instr = instr_create(dc);
+    decode(dc, (byte *)&setp_xzr, instr);
+    ASSERT(instr_get_opcode(instr) == OP_setp);
+    instr_destroy(dc, instr);
+
+    /* ...but no address or size register may be. */
+    instr = INSTR_CREATE_cpyfp(dc, opnd_create_reg(DR_REG_X3), opnd_create_reg(DR_REG_X1),
+                               opnd_create_reg(DR_REG_XZR));
+    ASSERT(!instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+    instr = INSTR_CREATE_setp(dc, opnd_create_reg(DR_REG_X3), opnd_create_reg(DR_REG_XZR),
+                              opnd_create_reg(DR_REG_X1));
+    ASSERT(!instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -95,6 +146,9 @@ main(int argc, char *argv[])
 
     test_fmov_general(dcontext);
     print("test_fmov_general complete\n");
+
+    test_mops_reserved(dcontext);
+    print("test_mops_reserved complete\n");
 
     print("All tests complete\n");
 #ifndef STANDALONE_DECODER

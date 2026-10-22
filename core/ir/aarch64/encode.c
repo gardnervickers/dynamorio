@@ -426,6 +426,7 @@ void
 decode_info_init_for_instr(decode_info_t *di, instr_t *instr)
 {
     di->check_reachable = false;
+    di->ignore_isa_features = false;
 }
 
 byte *
@@ -454,6 +455,7 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
     CLIENT_ASSERT(instr_operands_valid(instr), "instr_encode error: operands invalid");
 
     di.check_reachable = check_reachable;
+    di.ignore_isa_features = false;
     enc = encode_common(final_pc, instr, &di);
     if (enc == ENCFAIL) {
         /* This is to make decoding reversible. We would not normally encode an OP_xx. */
@@ -482,29 +484,44 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
     return copy_pc + 4;
 }
 
-/* Returns the word to emit for instr, which was decoded from app memory where word
- * is now: word if it still holds instr, else instr's encoding.
+/* Sets *word, which holds what app memory holds now where instr was decoded from,
+ * to the word to emit for instr: *word if it still holds instr, else instr's
+ * encoding.  Returns false if there is no such word: instr cannot be encoded, and
+ * *word holds another instruction.
  */
-static uint
-app_word_to_emit(dcontext_t *dcontext, instr_t *instr, uint word, byte *final_pc)
+static bool
+app_word_to_emit(dcontext_t *dcontext, instr_t *instr, uint *word DR_PARAM_INOUT,
+                 byte *final_pc)
 {
     decode_info_t di;
     di.check_reachable = false;
+    /* The encoding stands for bytes the app ran or may run on this CPU, so the CPU's
+     * features do not matter.  E.g., the GCS instructions decode on a CPU without
+     * FEAT_GCS, but encoding them for one fails.
+     */
+    di.ignore_isa_features = true;
     uint enc = encode_common(final_pc, instr, &di);
-    if (enc != ENCFAIL && enc != word) {
-        /* The encoder may choose another encoding of the same instruction. */
-        instr_t now;
-        instr_init(dcontext, &now);
-        if (decode_from_copy(dcontext, (byte *)&word, instr->bytes, &now) == NULL ||
-            !instr_same(&now, instr)) {
-            LOG(THREAD, LOG_EMIT, 2,
-                "app instr " PFX " changed after decode: emitting 0x%08x not 0x%08x\n",
-                instr->bytes, enc, word);
-            word = enc;
-        }
-        instr_free(dcontext, &now);
-    }
-    return word;
+    /* An instruction we could not decode holds its word (see instr_encode_arch()). */
+    if (enc == ENCFAIL && instr_get_opcode(instr) == OP_xx && instr_num_srcs(instr) > 0 &&
+        opnd_is_immed_int(instr_get_src(instr, 0)))
+        enc = (uint)opnd_get_immed_int(instr_get_src(instr, 0));
+    if (enc == *word)
+        return true;
+    /* The encoder may choose another encoding of the same instruction. */
+    instr_t now;
+    instr_init(dcontext, &now);
+    bool same = decode_from_copy(dcontext, (byte *)word, instr->bytes, &now) != NULL &&
+        instr_same(&now, instr);
+    instr_free(dcontext, &now);
+    if (same)
+        return true;
+    if (enc == ENCFAIL)
+        return false;
+    LOG(THREAD, LOG_EMIT, 2,
+        "app instr " PFX " changed after decode: emitting 0x%08x not 0x%08x\n",
+        instr->bytes, enc, *word);
+    *word = enc;
+    return true;
 }
 
 byte *
@@ -531,16 +548,31 @@ copy_and_re_relativize_raw_instr(dcontext_t *dcontext, instr_t *instr, byte *dst
         uint word = *(volatile uint *)instr->bytes;
 #ifndef NOT_DYNAMORIO_CORE_PROPER
         uint decoded;
-        if (bb_build_decoded_word(dcontext, instr, &decoded) && decoded == word) {
-            /* The usual case: bb building decoded instr from its copy of this word,
-             * so the bytes still hold instr, and we need not encode it to check.
+        if (bb_build_decoded_word(dcontext, instr, &decoded)) {
+            /* The usual case: bb building decoded instr from its copy of the app
+             * code, and nothing has changed instr since.  That word is instr,
+             * whatever the app code holds now, and we need not encode instr.
              */
             DOCHECK(1, {
-                ASSERT(app_word_to_emit(dcontext, instr, word, final_pc) == word);
+                uint check = decoded;
+                ASSERT(app_word_to_emit(dcontext, instr, &check, final_pc) &&
+                       check == decoded);
             });
+            word = decoded;
         } else
 #endif
-            word = app_word_to_emit(dcontext, instr, word, final_pc);
+            if (!app_word_to_emit(dcontext, instr, &word, final_pc)) {
+            /* We have neither instr's bytes nor its encoding: we decoded it, so the
+             * encoder should handle it.  Copying the new bytes would put an
+             * instruction we never saw, and did not mangle, into the cache.  An
+             * undefined instruction at least faults at instr's pc.
+             */
+            SYSLOG_INTERNAL_ERROR("Failed to emit app instr " PFX ": it changed after "
+                                  "decode and cannot be encoded",
+                                  instr->bytes);
+            ASSERT_NOT_REACHED();
+            word = 0; /* UDF #0 */
+        }
         *(uint *)dst_pc = word;
         return dst_pc + AARCH64_INSTR_SIZE;
     }

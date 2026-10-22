@@ -518,7 +518,10 @@ rename_exempt(int opc)
 static bool
 sys_alias_matches(instr_t *want, uint enc)
 {
-    if (instr_num_dsts(want) != 1 || instr_num_srcs(want) != 4)
+    /* SYS reads Xt, its last source; SYSL writes it. */
+    bool is_sys = instr_get_opcode(want) == OP_sys;
+    if (instr_num_dsts(want) != (is_sys ? 0 : 1) ||
+        instr_num_srcs(want) != (is_sys ? 5 : 4))
         return false;
     static const int shift[4] = { 16, 12, 8, 5 }, width[4] = { 3, 4, 4, 3 };
     for (int i = 0; i < 4; i++) {
@@ -530,7 +533,7 @@ sys_alias_matches(instr_t *want, uint enc)
             (uint)v != ((enc >> shift[i]) & ((1u << width[i]) - 1)))
             return false;
     }
-    opnd_t rt = instr_get_dst(want, 0);
+    opnd_t rt = is_sys ? instr_get_src(want, 4) : instr_get_dst(want, 0);
     if (!opnd_is_reg(rt))
         return false;
     reg_id_t r = opnd_get_reg(rt);

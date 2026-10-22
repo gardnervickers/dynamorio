@@ -802,7 +802,40 @@
 #define INSTR_CREATE_adr(dc, rt, imm) instr_create_1dst_1src(dc, OP_adr, rt, imm)
 #define INSTR_CREATE_adrp(dc, rt, imm) instr_create_1dst_1src(dc, OP_adrp, rt, imm)
 
-#define INSTR_CREATE_sys(dc, op, Rn) instr_create_0dst_2src(dc, OP_sys, op, Rn)
+/**
+ * Creates a SYS instruction, a system instruction that DR decodes by name only for
+ * the aliases it knows (DC, IC and the GCS instructions).
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    SYS     #<op1>, <Cn>, <Cm>, #<op2>{, <Xt>}
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param op1  The 3-bit op1 field, an unsigned immediate.
+ * \param Cn   The 4-bit CRn field, an unsigned immediate.
+ * \param Cm   The 4-bit CRm field, an unsigned immediate.
+ * \param op2  The 3-bit op2 field, an unsigned immediate.
+ * \param Rt   The source register, X (Extended, 64 bits) or XZR.
+ */
+#define INSTR_CREATE_sys(dc, op1, Cn, Cm, op2, Rt) \
+    instr_create_Ndst_Msrc_varsrc(dc, OP_sys, 0, 5, 0, 0, op1, Cn, Cm, op2, Rt)
+
+/**
+ * Creates a SYSL instruction, a system instruction with a result.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    SYSL    <Xt>, #<op1>, <Cn>, <Cm>, #<op2>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rt   The destination register, X (Extended, 64 bits) or XZR.
+ * \param op1  The 3-bit op1 field, an unsigned immediate.
+ * \param Cn   The 4-bit CRn field, an unsigned immediate.
+ * \param Cm   The 4-bit CRm field, an unsigned immediate.
+ * \param op2  The 3-bit op2 field, an unsigned immediate.
+ */
+#define INSTR_CREATE_sysl(dc, Rt, op1, Cn, Cm, op2) \
+    instr_create_1dst_4src(dc, OP_sysl, Rt, op1, Cn, Cm, op2)
 
 /* TODO i#4400: Cache instructions which behave like memory stores (e.g. DC
  * ZVA) should implement memory operand which encapsulates back-aligned start
@@ -18902,5 +18935,342 @@
         dc, OP_st64bv0, 2, 0, 8, 0, Rn, Rs, Rt0, opnd_inc_reg(Rt0, 1),    \
         opnd_inc_reg(Rt0, 2), opnd_inc_reg(Rt0, 3), opnd_inc_reg(Rt0, 4), \
         opnd_inc_reg(Rt0, 5), opnd_inc_reg(Rt0, 6), opnd_inc_reg(Rt0, 7))
+
+/**
+ * Creates a CPYFP instruction (FEAT_MOPS): the prologue instruction of a forward-only
+ * memory copy.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CPYFP   [<Xd>]!, [<Xs>]!, <Xn>!
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rs   The source address register, X (Extended, 64 bits), read and written
+ *             back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ *
+ * Rd, Rs and Rn must be different registers, none of them XZR or SP. The memory
+ * operands this creates, at Rd (written) and at Rs (read), have size #OPSZ_0: how
+ * many bytes are copied, and where, depends on Rn and on the algorithm option the
+ * implementation chose.
+ */
+#define INSTR_CREATE_cpyfp(dc, Rd, Rs, Rn)                                              \
+    instr_create_4dst_4src(                                                             \
+        dc, OP_cpyfp,                                                                   \
+        opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), Rd, Rs, Rn, \
+        opnd_create_base_disp(opnd_get_reg(Rs), DR_REG_NULL, 0, 0, OPSZ_0), Rd, Rs, Rn)
+
+/**
+ * Creates a CPYFM instruction (FEAT_MOPS): the main instruction of a forward-only memory
+ * copy.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CPYFM   [<Xd>]!, [<Xs>]!, <Xn>!
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rs   The source address register, X (Extended, 64 bits), read and written
+ *             back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ *
+ * Rd, Rs and Rn must be different registers, none of them XZR or SP. The memory
+ * operands this creates, at Rd (written) and at Rs (read), have size #OPSZ_0: how
+ * many bytes are copied, and where, depends on Rn and on the algorithm option the
+ * implementation chose.
+ */
+#define INSTR_CREATE_cpyfm(dc, Rd, Rs, Rn)                                              \
+    instr_create_4dst_4src(                                                             \
+        dc, OP_cpyfm,                                                                   \
+        opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), Rd, Rs, Rn, \
+        opnd_create_base_disp(opnd_get_reg(Rs), DR_REG_NULL, 0, 0, OPSZ_0), Rd, Rs, Rn)
+
+/**
+ * Creates a CPYFE instruction (FEAT_MOPS): the epilogue instruction of a forward-only
+ * memory copy.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CPYFE   [<Xd>]!, [<Xs>]!, <Xn>!
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rs   The source address register, X (Extended, 64 bits), read and written
+ *             back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ *
+ * Rd, Rs and Rn must be different registers, none of them XZR or SP. The memory
+ * operands this creates, at Rd (written) and at Rs (read), have size #OPSZ_0: how
+ * many bytes are copied, and where, depends on Rn and on the algorithm option the
+ * implementation chose.
+ */
+#define INSTR_CREATE_cpyfe(dc, Rd, Rs, Rn)                                              \
+    instr_create_4dst_4src(                                                             \
+        dc, OP_cpyfe,                                                                   \
+        opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), Rd, Rs, Rn, \
+        opnd_create_base_disp(opnd_get_reg(Rs), DR_REG_NULL, 0, 0, OPSZ_0), Rd, Rs, Rn)
+
+/**
+ * Creates a CPYP instruction (FEAT_MOPS): the prologue instruction of a memory copy
+ * whose source and destination may overlap.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CPYP    [<Xd>]!, [<Xs>]!, <Xn>!
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rs   The source address register, X (Extended, 64 bits), read and written
+ *             back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ *
+ * Rd, Rs and Rn must be different registers, none of them XZR or SP. The memory
+ * operands this creates, at Rd (written) and at Rs (read), have size #OPSZ_0: how
+ * many bytes are copied, and where, depends on Rn and on the algorithm option the
+ * implementation chose.
+ */
+#define INSTR_CREATE_cpyp(dc, Rd, Rs, Rn)                                                \
+    instr_create_4dst_4src(                                                              \
+        dc, OP_cpyp, opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), \
+        Rd, Rs, Rn, opnd_create_base_disp(opnd_get_reg(Rs), DR_REG_NULL, 0, 0, OPSZ_0),  \
+        Rd, Rs, Rn)
+
+/**
+ * Creates a CPYM instruction (FEAT_MOPS): the main instruction of a memory copy whose
+ * source and destination may overlap.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CPYM    [<Xd>]!, [<Xs>]!, <Xn>!
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rs   The source address register, X (Extended, 64 bits), read and written
+ *             back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ *
+ * Rd, Rs and Rn must be different registers, none of them XZR or SP. The memory
+ * operands this creates, at Rd (written) and at Rs (read), have size #OPSZ_0: how
+ * many bytes are copied, and where, depends on Rn and on the algorithm option the
+ * implementation chose.
+ */
+#define INSTR_CREATE_cpym(dc, Rd, Rs, Rn)                                                \
+    instr_create_4dst_4src(                                                              \
+        dc, OP_cpym, opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), \
+        Rd, Rs, Rn, opnd_create_base_disp(opnd_get_reg(Rs), DR_REG_NULL, 0, 0, OPSZ_0),  \
+        Rd, Rs, Rn)
+
+/**
+ * Creates a CPYE instruction (FEAT_MOPS): the epilogue instruction of a memory copy
+ * whose source and destination may overlap.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CPYE    [<Xd>]!, [<Xs>]!, <Xn>!
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rs   The source address register, X (Extended, 64 bits), read and written
+ *             back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ *
+ * Rd, Rs and Rn must be different registers, none of them XZR or SP. The memory
+ * operands this creates, at Rd (written) and at Rs (read), have size #OPSZ_0: how
+ * many bytes are copied, and where, depends on Rn and on the algorithm option the
+ * implementation chose.
+ */
+#define INSTR_CREATE_cpye(dc, Rd, Rs, Rn)                                                \
+    instr_create_4dst_4src(                                                              \
+        dc, OP_cpye, opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), \
+        Rd, Rs, Rn, opnd_create_base_disp(opnd_get_reg(Rs), DR_REG_NULL, 0, 0, OPSZ_0),  \
+        Rd, Rs, Rn)
+
+/**
+ * Creates a SETP instruction (FEAT_MOPS): the prologue instruction of a memory set.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    SETP    [<Xd>]!, <Xn>!, <Xs>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ * \param Rs   The source register, X (Extended, 64 bits) or XZR, whose low byte is
+ *             the value to set.
+ *
+ * Rd, Rn and Rs must be different registers, Rd and Rn neither XZR nor SP. The
+ * memory operand this creates, at Rd, has size #OPSZ_0: how many bytes are set, and
+ * where, depends on Rn and on the algorithm option the implementation chose.
+ */
+#define INSTR_CREATE_setp(dc, Rd, Rn, Rs)                                                \
+    instr_create_3dst_3src(                                                              \
+        dc, OP_setp, opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), \
+        Rd, Rn, Rd, Rn, Rs)
+
+/**
+ * Creates a SETM instruction (FEAT_MOPS): the main instruction of a memory set.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    SETM    [<Xd>]!, <Xn>!, <Xs>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ * \param Rs   The source register, X (Extended, 64 bits) or XZR, whose low byte is
+ *             the value to set.
+ *
+ * Rd, Rn and Rs must be different registers, Rd and Rn neither XZR nor SP. The
+ * memory operand this creates, at Rd, has size #OPSZ_0: how many bytes are set, and
+ * where, depends on Rn and on the algorithm option the implementation chose.
+ */
+#define INSTR_CREATE_setm(dc, Rd, Rn, Rs)                                                \
+    instr_create_3dst_3src(                                                              \
+        dc, OP_setm, opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), \
+        Rd, Rn, Rd, Rn, Rs)
+
+/**
+ * Creates a SETE instruction (FEAT_MOPS): the epilogue instruction of a memory set.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    SETE    [<Xd>]!, <Xn>!, <Xs>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rd   The destination address register, X (Extended, 64 bits), read and
+ *             written back.
+ * \param Rn   The size register, X (Extended, 64 bits), read and written back.
+ * \param Rs   The source register, X (Extended, 64 bits) or XZR, whose low byte is
+ *             the value to set.
+ *
+ * Rd, Rn and Rs must be different registers, Rd and Rn neither XZR nor SP. The
+ * memory operand this creates, at Rd, has size #OPSZ_0: how many bytes are set, and
+ * where, depends on Rn and on the algorithm option the implementation chose.
+ */
+#define INSTR_CREATE_sete(dc, Rd, Rn, Rs)                                                \
+    instr_create_3dst_3src(                                                              \
+        dc, OP_sete, opnd_create_base_disp(opnd_get_reg(Rd), DR_REG_NULL, 0, 0, OPSZ_0), \
+        Rd, Rn, Rd, Rn, Rs)
+
+/**
+ * Creates a CHKFEAT instruction (FEAT_CHK), which clears the bits of X16 that select
+ * enabled features: bit 0 is the Guarded Control Stack.  It is a hint, which executes
+ * as a NOP if FEAT_CHK is not implemented.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    CHKFEAT X16
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ */
+#define INSTR_CREATE_chkfeat(dc)                                        \
+    instr_create_1dst_1src(dc, OP_chkfeat, opnd_create_reg(DR_REG_X16), \
+                           opnd_create_reg(DR_REG_X16))
+
+/**
+ * Creates a GCSPUSHM instruction (FEAT_GCS), which pushes Rt onto the current
+ * Guarded Control Stack.  The stack access has no memory operand.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSPUSHM <Xt>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rt   The source register, X (Extended, 64 bits) or XZR.
+ */
+#define INSTR_CREATE_gcspushm(dc, Rt) instr_create_0dst_1src(dc, OP_gcspushm, Rt)
+
+/**
+ * Creates a GCSPOPM instruction (FEAT_GCS), which pops the current Guarded Control
+ * Stack into Rt.  Rt is also a source: it is left unchanged if the Guarded Control
+ * Stack is not enabled.  The stack access has no memory operand.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSPOPM {<Xt>}
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rt   The destination register, X (Extended, 64 bits) or XZR.
+ */
+#define INSTR_CREATE_gcspopm(dc, Rt) instr_create_1dst_1src(dc, OP_gcspopm, Rt, Rt)
+
+/**
+ * Creates a GCSSS1 instruction (FEAT_GCS), the first of the two instructions that
+ * switch Guarded Control Stacks.  The atomic access to the incoming stack's cap
+ * record at Rt has no memory operand.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSSS1  <Xt>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rt   The source register, X (Extended, 64 bits) or XZR, holding the address
+ *             of the incoming stack's cap record.
+ */
+#define INSTR_CREATE_gcsss1(dc, Rt) instr_create_0dst_1src(dc, OP_gcsss1, Rt)
+
+/**
+ * Creates a GCSSS2 instruction (FEAT_GCS), the second of the two instructions that
+ * switch Guarded Control Stacks, which sets Rt to the address of the outgoing
+ * stack's cap record.  Rt is also a source: it is left unchanged if the Guarded
+ * Control Stack is not enabled.  The stack accesses have no memory operands.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSSS2  <Xt>
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ * \param Rt   The destination register, X (Extended, 64 bits) or XZR.
+ */
+#define INSTR_CREATE_gcsss2(dc, Rt) instr_create_1dst_1src(dc, OP_gcsss2, Rt, Rt)
+
+/**
+ * Creates a GCSPUSHX instruction (FEAT_GCS, EL1 and higher), which pushes an
+ * exception return record (ELR_ELx, SPSR_ELx and X30) onto the current Guarded
+ * Control Stack.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSPUSHX
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ */
+#define INSTR_CREATE_gcspushx(dc) \
+    instr_create_0dst_1src(dc, OP_gcspushx, opnd_create_reg(DR_REG_X30))
+
+/**
+ * Creates a GCSPOPCX instruction (FEAT_GCS, EL1 and higher), which pops an exception
+ * return record from the current Guarded Control Stack and compares it with ELR_ELx,
+ * SPSR_ELx and X30.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSPOPCX
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ */
+#define INSTR_CREATE_gcspopcx(dc) \
+    instr_create_0dst_1src(dc, OP_gcspopcx, opnd_create_reg(DR_REG_X30))
+
+/**
+ * Creates a GCSPOPX instruction (FEAT_GCS, EL1 and higher), which pops an exception
+ * return record from the current Guarded Control Stack.
+ *
+ * This macro is used to encode the forms:
+ * \verbatim
+ *    GCSPOPX
+ * \endverbatim
+ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
+ */
+#define INSTR_CREATE_gcspopx(dc) instr_create_0dst_0src(dc, OP_gcspopx)
 
 #endif /* DR_IR_MACROS_AARCH64_H */

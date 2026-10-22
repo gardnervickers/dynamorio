@@ -57,6 +57,23 @@
 # CRm:op2=0. If the decoder reads an undefined hint, a message with the
 # unallocated CRm:op2 field value is output and the encoding converted into a
 # NOP instruction, see decode_common() in codec.c.
+#
+# CHKFEAT X16 (HINT #40, FEAT_CHK) clears the bits of X16 that select enabled
+# features: bit 0 is GCS. Without FEAT_CHK it is a NOP, so it is BASE here: X16
+# is read and written either way.
+#
+# SYS, SYSL and the Guarded Control Stack (FEAT_GCS) instructions
+# ----------------------------------------------------------------
+# SYS's Xt is a source and SYSL's is a destination. The SYS and SYSL aliases
+# that DR decodes as their own opcodes are defined here too, so that they are
+# matched before the generic SYS and SYSL patterns. Of the GCS instructions:
+# - GCSPUSHM and GCSSS1 read Xt;
+# - GCSPOPM and GCSSS2 write Xt, and also read it: they leave it unchanged when
+#   GCS is not enabled;
+# - GCSPUSHX and GCSPOPCX (EL1 and up, Rt == 31) read X30, the LR in the
+#   exception return record; GCSPOPX has no register operands.
+# Their accesses to the Guarded Control Stack (at GCSPR_ELx, and at Xt for
+# GCSSS1) have no memory operands.
 
 # Instruction patterns
 
@@ -182,6 +199,7 @@ x0111010010xxxxxxxxx00xxxxx0xxxx  rw  56   BASE       ccmn                : wx5 
 x0111010010xxxxxxxxx10xxxxx0xxxx  rw  56   BASE       ccmn                : wx5 imm5 nzcv cond
 x1111010010xxxxxxxxx00xxxxx0xxxx  rw  57   BASE       ccmp                : wx5 wx16 nzcv cond
 x1111010010xxxxxxxxx10xxxxx0xxxx  rw  57   BASE       ccmp                : wx5 imm5 nzcv cond
+11010101000000110010010100011111  n   1242 BASE    chkfeat         impx16 : impx16
 11010101000000110011xxxx01011111  n   58   BASE      clrex                : imm4
 x101101011000000000101xxxxxxxxxx  n   59   BASE        cls            wx0 : wx5
 0x001110xx100000010010xxxxxxxxxx  n   59   BASE        cls            dq0 : dq5 bhs_sz
@@ -482,6 +500,13 @@ x001111001011001xxxxxxxxxxxxxxxx  n   126  BASE     fcvtzu            wx0 : d5 s
 0x1011101x100001111110xxxxxxxxxx  n   167  BASE      fsqrt            dq0 : dq5 sd_sz_q
 0x0011101x1xxxxx110101xxxxxxxxxx  n   168  BASE       fsub            dq0 : dq5 dq16 sd_sz_q
 00011110xx1xxxxx001110xxxxxxxxxx  n   168  BASE       fsub     float_reg0 : float_reg5 float_reg16
+11010101000010000111011110111111  n   1243 GCS    gcspopcx                : impx30
+110101010010101101110111001xxxxx  n   1244 GCS     gcspopm             x0 : x0
+11010101000010000111011111011111  n   1245 GCS     gcspopx                :
+110101010000101101110111000xxxxx  n   1246 GCS    gcspushm                : x0
+11010101000010000111011110011111  n   1247 GCS    gcspushx                : impx30
+110101010000101101110111010xxxxx  n   1248 GCS      gcsss1                : x0
+110101010010101101110111011xxxxx  n   1249 GCS      gcsss2             x0 : x0
 11010100010xxxxxxxxxxxxxxxx00000  n   169  BASE        hlt                : imm16
 11010100000xxxxxxxxxxxxxxxx00010  n   170  BASE        hvc                : imm16
 11010101000010000111010100011111  n   576  BASE   ic_iallu                :
@@ -1101,7 +1126,7 @@ x1101011xx0xxxxxxxxxxxxxxxxxxxxx  w   473  BASE       subs            wx0 : wx5 
 0101111011100000001110xxxxxxxxxx  n   474  BASE     suqadd             d0 : d0 d5
 0x001110xx100000001110xxxxxxxxxx  n   474  BASE     suqadd            dq0 : dq0 dq5 bhsd_sz_q
 11010100000xxxxxxxxxxxxxxxx00001  n   475  BASE        svc                : imm16
-1101010100001xxxxxxxxxxxxxxxxxxx  n   488  BASE        sys             x0 : imm3 crn imm4 op2
+1101010100001xxxxxxxxxxxxxxxxxxx  n   488  BASE        sys                : imm3 crn imm4 op2 x0
 1101010100101xxxxxxxxxxxxxxxxxxx  n   489  BASE       sysl             x0 : imm3 crn imm4 op2
 0x001110000xxxxx000000xxxxxxxxxx  n   490  BASE        tbl            dq0 : q5 dq16
 0x001110000xxxxx001000xxxxxxxxxx  n   490  BASE        tbl            dq0 : q5 q5p1 dq16

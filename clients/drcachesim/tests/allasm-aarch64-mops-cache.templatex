@@ -1,0 +1,10 @@
+Hello, world!
+---- <application exited with code 0> ----
+Cache simulation results:
+Core #0 \(1 thread\(s\)\)
+  L1I0 .* stats:
+.*
+  L1D0 .* stats:
+    Hits: *[0-9]+
+    Misses: *[0-9]+
+.*

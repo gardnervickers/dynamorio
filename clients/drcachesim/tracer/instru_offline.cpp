@@ -987,8 +987,8 @@ offline_instru_t::identify_elidable_addresses(void *drcontext, instrlist_t *ilis
             saw_base.clear();
             continue;
         }
-        // Use instr_{reads,writes}_memory() to rule out LEA and NOP.
-        if (instr_reads_memory(instr) || instr_writes_memory(instr)) {
+        // This rules out LEA and NOP, and accesses we do not trace.
+        if (instru_t::instr_has_traced_memrefs(instr)) {
             int mem_count = 0;
             for (int i = 0; i < instr_num_srcs(instr); i++) {
                 if (opnd_is_memory_reference(instr_get_src(instr, i))) {

@@ -1193,8 +1193,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     instr_t *instr_fetch = drmgr_orig_app_instr_for_fetch(drcontext);
     instr_t *instr_operands = drmgr_orig_app_instr_for_operands(drcontext);
     if (instr_fetch == NULL &&
-        (instr_operands == NULL ||
-         !(instr_reads_memory(instr_operands) || instr_writes_memory(instr_operands))) &&
+        (instr_operands == NULL || !instru_t::instr_has_traced_memrefs(instr_operands)) &&
         // Ensure we reach the code below for post-strex instru.
         ud->strex == NULL &&
         // Do not skip misc cases that need instrumentation.
@@ -1239,8 +1238,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     // Optimization: delay the simple instr trace instrumentation if possible.
     // For offline traces we want a single instr entry for the start of the bb.
     if (instr_fetch != NULL && (!op_offline.get_value() || ud->recorded_instr) &&
-        (instr_operands == NULL ||
-         !(instr_reads_memory(instr_operands) || instr_writes_memory(instr_operands))) &&
+        (instr_operands == NULL || !instru_t::instr_has_traced_memrefs(instr_operands)) &&
         // Avoid dropping trailing bundled instrs or missing the block-final clean call.
         !is_last_instr(drcontext, instr) &&
         // Avoid bundling instrs whose types we separate.
@@ -1340,8 +1338,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     }
 
     /* Data entries. */
-    if (instr_operands != NULL &&
-        (instr_reads_memory(instr_operands) || instr_writes_memory(instr_operands))) {
+    if (instr_operands != NULL && instru_t::instr_has_traced_memrefs(instr_operands)) {
         dr_pred_type_t pred = instr_get_predicate(instr_operands);
         if (pred != DR_PRED_NONE && adjust != 0) {
             // Update buffer ptr and reset adjust to 0, because

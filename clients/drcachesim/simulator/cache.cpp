@@ -87,8 +87,13 @@ void
 cache_t::flush(const memref_t &memref)
 {
     addr_t tag = compute_tag(memref.flush.addr);
-    addr_t final_tag =
-        compute_tag(memref.flush.addr + memref.flush.size - 1 /*no overflow*/);
+    // As in caching_device_t::request(), a size of 0 must not become a loop over the
+    // whole address space, and a range that wraps ends at the top.
+    addr_t final_addr = memref.flush.addr +
+        (memref.flush.size == 0 ? 0 : memref.flush.size - 1 /*no overflow*/);
+    if (final_addr < memref.flush.addr)
+        final_addr = ~static_cast<addr_t>(0);
+    addr_t final_tag = compute_tag(final_addr);
     last_tag_ = TAG_INVALID;
     for (; tag <= final_tag; ++tag) {
         auto block_way = find_caching_device_block(tag);

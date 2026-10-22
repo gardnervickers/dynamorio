@@ -1656,7 +1656,6 @@ static int patch_count = 0, patch_threads = 3;
 #define PATCH_MAX_THREADS 64
 #define PATCH_TARGETS 64
 
-#define MOVZ_X0(imm) (0xd2800000 | (uint32_t)(imm) << 5)
 #define ADD_X0_X0(imm) (0x91000000 | (uint32_t)(imm) << 10)
 #define NOP 0xd503201f
 

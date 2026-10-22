@@ -151,6 +151,46 @@ changes:
    the destination's size (D or Q) instead of S or D.  TBL and TBX now list every table
    register (as Q registers, wrapping from V31 to V0) instead of the first one plus a
    length immediate.
+ - On AArch64, the FEAT_MOPS memory copy and set instructions without options now
+   decode as OP_cpyfp, OP_cpyfm, OP_cpyfe, OP_cpyp, OP_cpym, OP_cpye, OP_setp, OP_setm
+   and OP_sete instead of OP_xx, and the ISA_FEAT_ constants from ISA_FEAT_MTE on are
+   one higher, after the new ISA_FEAT_MOPS.
+ - Added the AArch64 FEAT_MOPS memory copy and set instructions without options
+   (CPYFP, CPYFM, CPYFE, CPYP, CPYM, CPYE, SETP, SETM and SETE), with
+   INSTR_CREATE_cpyfp() and the other INSTR_CREATE_ macros and #FEATURE_MOPS.  Their
+   memory operands have size #OPSZ_0, as the number of bytes is only known at run time.
+   Selfmod sandboxing leaves their writes unchecked, as it does for DC ZVA.  The forms
+   with options (unprivileged, non-temporal) and SETG* still decode as OP_xx.
+   DR keeps each main and epilogue instruction right after its prologue (and main)
+   instruction in the code cache, as the kernel's restart after a mismatched-option
+   exception requires, whatever is inserted between them, and takes the target of a
+   fault in one of them from the kernel's fault address (si_addr).
+ - On AArch64, OP_sys now lists its register operand Xt as a source instead of a
+   destination, as SYS reads it (SYSL writes it).  INSTR_CREATE_sys() takes the op1,
+   CRn, CRm and op2 immediates and Xt instead of its old two operands, which could
+   not be encoded.  CHKFEAT X16 now decodes as OP_chkfeat, reading and writing X16,
+   instead of OP_nop.  The FEAT_GCS aliases of SYS and SYSL now decode as OP_gcspushm,
+   OP_gcspopm, OP_gcsss1, OP_gcsss2, OP_gcspushx, OP_gcspopcx and OP_gcspopx instead
+   of OP_sys or OP_sysl.  The ISA_FEAT_ constants from ISA_FEAT_I8MM on are one
+   higher, after the new ISA_FEAT_GCS.
+ - Added the AArch64 CHKFEAT instruction (FEAT_CHK) and the FEAT_GCS Guarded Control
+   Stack instructions GCSPUSHM, GCSPOPM, GCSSS1, GCSSS2, GCSPUSHX, GCSPOPCX and GCSPOPX,
+   with INSTR_CREATE_chkfeat() and the other INSTR_CREATE_ macros, INSTR_CREATE_sysl()
+   and #FEATURE_GCS.  GCSPOPM and GCSSS2 read as well as write Xt, which they leave
+   unchanged when the Guarded Control Stack is not enabled.  Their accesses to the
+   Guarded Control Stack have no memory operands.  DR does not yet support running
+   applications with the Guarded Control Stack enabled.
+ - Added drutil_opnd_mem_size_is_variable(), for memory references whose size is only
+   known at run time: those of the AArch64 FEAT_MOPS instructions, for which
+   drutil_opnd_mem_size_in_bytes() returns 0.  The drmemtrace tracer, the
+   memtrace_simple and memval_simple samples record nothing for them rather than a
+   0-byte access, and the drcachesim cache and TLB simulators treat a 0-byte or
+   wrapping record as ending at its first byte or the top of the address space
+   instead of looping over the whole address space.
+ - Fixed AArch64 emission of an application instruction whose bytes changed between
+   DR's decode and the emit and which could not be encoded (e.g., an instruction of
+   an ISA feature the CPU lacks, or one decoded as OP_xx): DR copied the new bytes,
+   unchecked.  It now emits the instruction it decoded.
  - Added #OPSZ_18, #OPSZ_22, #OPSZ_26, #OPSZ_30, #OPSZ_144, #OPSZ_160, #OPSZ_176,
    #OPSZ_208, #OPSZ_224 and #OPSZ_240 at the end of the OPSZ_ enum, so that AArch64
    SVE Z and P registers and their memory operands have a size at every vector length

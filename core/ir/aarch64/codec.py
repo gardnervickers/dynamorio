@@ -392,7 +392,8 @@ def generate_encoder(patterns, opndsettab, opndtab, opc_props, curr_isa, next_is
         c.append('    case OP_%s:' % opcode)
         if opc_props[opcode].feat != 'BASE':
             c.append('#       if !defined(DR_HOST_NOT_TARGET) && !defined(STANDALONE_DECODER)')
-            c.append('        if (!proc_has_feature(FEATURE_%s))' % opc_props[opcode].feat)
+            c.append('        if (!di->ignore_isa_features && !proc_has_feature(FEATURE_%s))'
+                     % opc_props[opcode].feat)
             c.append('            return ENCFAIL;')
             c.append('#       endif')
         patterns = sorted(case[opcode], key=pattern_sort_key)
@@ -828,7 +829,7 @@ def main():
     # and SVE2 are partially supported. The null terminator element at the end
     # is required by some generator functions to correctly generate links
     # between each version's decode/encode logic.
-    isa_versions = ['v80', 'v81', 'v82', 'v83', 'v84', 'v85', 'v87', 'sve', 'sve2', '']
+    isa_versions = ['v80', 'v81', 'v82', 'v83', 'v84', 'v85', 'v87', 'v88', 'sve', 'sve2', '']
 
     # Read the instruction operand definitions. Used by the codec when
     # generating code to decode and encode instructions.

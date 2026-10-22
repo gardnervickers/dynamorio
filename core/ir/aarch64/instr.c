@@ -411,6 +411,55 @@ instr_is_icache_op(instr_t *instr)
     return false;
 }
 
+/* Is instr one of the FEAT_MOPS memory copy or set instructions?  Each copy or
+ * set is a prologue, main and epilogue instruction that must run one after the
+ * other (the kernel's handler for a mismatched-option MOPS exception rewinds the
+ * pc by 4 or 8 bytes to the prologue), with NZCV, written by the prologue, live
+ * between them.  How many bytes each accesses is only known at run time.
+ */
+bool
+instr_is_mops(instr_t *instr)
+{
+    switch (instr_get_opcode(instr)) {
+    case OP_cpyfp:
+    case OP_cpyfm:
+    case OP_cpyfe:
+    case OP_cpyp:
+    case OP_cpym:
+    case OP_cpye:
+    case OP_setp:
+    case OP_setm:
+    case OP_sete: return true;
+    }
+    return false;
+}
+
+int
+instr_mops_stage(instr_t *instr, DR_PARAM_OUT int *prologue_opcode,
+                 DR_PARAM_OUT int *main_opcode)
+{
+    int opcode = instr_get_opcode(instr), stage;
+    switch (opcode) {
+    case OP_cpyfp:
+    case OP_cpyp:
+    case OP_setp: stage = 0; break;
+    case OP_cpyfm:
+    case OP_cpym:
+    case OP_setm: stage = 1; break;
+    case OP_cpyfe:
+    case OP_cpye:
+    case OP_sete: stage = 2; break;
+    default: return -1;
+    }
+    bool cpyf = opcode == OP_cpyfp || opcode == OP_cpyfm || opcode == OP_cpyfe;
+    bool cpy = opcode == OP_cpyp || opcode == OP_cpym || opcode == OP_cpye;
+    if (prologue_opcode != NULL)
+        *prologue_opcode = cpyf ? OP_cpyfp : (cpy ? OP_cpyp : OP_setp);
+    if (main_opcode != NULL)
+        *main_opcode = cpyf ? OP_cpyfm : (cpy ? OP_cpym : OP_setm);
+    return stage;
+}
+
 bool
 instr_is_undefined(instr_t *instr)
 {
@@ -958,6 +1007,7 @@ instr_get_isa_feature(byte *pc, instr_t *instr)
      * a buffer, so disabling the reachability check is necessary.
      */
     di.check_reachable = false;
+    di.ignore_isa_features = false;
     return isa_feature_common(pc, instr, &di);
 }
 

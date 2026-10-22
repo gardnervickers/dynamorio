@@ -1367,8 +1367,8 @@ raw2trace_t::analyze_elidable_addresses(raw2trace_thread_data_t *tdata, uint64 m
         for (instr_t *prev = meminst; prev != nullptr; prev = instr_get_prev(prev)) {
             if (!instr_is_app(prev))
                 continue;
-            // Use instr_{reads,writes}_memory() to rule out LEA and NOP.
-            if (!instr_reads_memory(prev) && !instr_writes_memory(prev))
+            // This rules out LEA and NOP, and accesses the tracer does not record.
+            if (!instru_t::instr_has_traced_memrefs(prev))
                 continue;
             bool remember_write = false;
             int mem_count = 0;
@@ -2713,8 +2713,11 @@ instr_summary_t::construct(void *dcontext, app_pc block_start, DR_PARAM_INOUT ap
 
     bool is_prefetch = instr_is_prefetch(instr);
     bool is_flush = instru_t::instr_is_flush(instr);
-    bool reads_memory = instr_reads_memory(instr);
-    bool writes_memory = instr_writes_memory(instr);
+    // The tracer records no accesses for some instrs that access memory: see
+    // instru_t::instr_has_traced_memrefs().
+    bool traced_memrefs = instru_t::instr_has_traced_memrefs(instr);
+    bool reads_memory = traced_memrefs && instr_reads_memory(instr);
+    bool writes_memory = traced_memrefs && instr_writes_memory(instr);
 
     if (reads_memory)
         desc->packed_ |= kReadsMemMask;

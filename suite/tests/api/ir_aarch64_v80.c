@@ -331,6 +331,59 @@ TEST_INSTR(wfi)
     TEST_LOOP_EXPECT(wfi, 1, INSTR_CREATE_wfi(dc), EXPECT_DISASSEMBLY("wfi"));
 }
 
+/* SYS and SYSL fields (op1, CRn, CRm, op2) that are not aliases DR decodes by name,
+ * and their registers.
+ */
+static const uint sys_fields[6][4] = {
+    { 0, 0, 0, 0 }, { 1, 1, 2, 1 },   { 2, 4, 4, 2 },
+    { 4, 5, 6, 3 }, { 6, 15, 15, 7 }, { 7, 2, 9, 5 },
+};
+static const reg_id_t sys_rt[6] = { DR_REG_X0,  DR_REG_X5,  DR_REG_X10,
+                                    DR_REG_X16, DR_REG_X30, DR_REG_XZR };
+
+#define SYS_FIELD(i, f, size) opnd_create_immed_uint(sys_fields[i][f], size)
+
+TEST_INSTR(sys)
+{
+    /* Testing SYS     #<op1>, <Cn>, <Cm>, #<op2>{, <Xt>}: Xt is a source. */
+    TEST_LOOP_EXPECT(
+        sys, 6,
+        INSTR_CREATE_sys(dc, SYS_FIELD(i, 0, OPSZ_3b), SYS_FIELD(i, 1, OPSZ_4b),
+                         SYS_FIELD(i, 2, OPSZ_4b), SYS_FIELD(i, 3, OPSZ_3b),
+                         opnd_create_reg(sys_rt[i])),
+        {
+            EXPECT_DISASSEMBLY("sys    $0x00 $0x00 $0x00 $0x00 %x0",
+                               "sys    $0x01 $0x01 $0x02 $0x01 %x5",
+                               "sys    $0x02 $0x04 $0x04 $0x02 %x10",
+                               "sys    $0x04 $0x05 $0x06 $0x03 %x16",
+                               "sys    $0x06 $0x0f $0x0f $0x07 %x30",
+                               "sys    $0x07 $0x02 $0x09 $0x05 %xzr");
+            EXPECT_EQ("%d", instr_num_dsts(instr), 0);
+            EXPECT_TRUE(instr_reads_from_reg(instr, sys_rt[i], DR_QUERY_DEFAULT));
+            EXPECT_FALSE(instr_writes_to_reg(instr, sys_rt[i], DR_QUERY_DEFAULT));
+        });
+}
+
+TEST_INSTR(sysl)
+{
+    /* Testing SYSL    <Xt>, #<op1>, <Cn>, <Cm>, #<op2>: Xt is a destination. */
+    TEST_LOOP_EXPECT(
+        sysl, 6,
+        INSTR_CREATE_sysl(dc, opnd_create_reg(sys_rt[i]), SYS_FIELD(i, 0, OPSZ_3b),
+                          SYS_FIELD(i, 1, OPSZ_4b), SYS_FIELD(i, 2, OPSZ_4b),
+                          SYS_FIELD(i, 3, OPSZ_3b)),
+        {
+            EXPECT_DISASSEMBLY("sysl   $0x00 $0x00 $0x00 $0x00 -> %x0",
+                               "sysl   $0x01 $0x01 $0x02 $0x01 -> %x5",
+                               "sysl   $0x02 $0x04 $0x04 $0x02 -> %x10",
+                               "sysl   $0x04 $0x05 $0x06 $0x03 -> %x16",
+                               "sysl   $0x06 $0x0f $0x0f $0x07 -> %x30",
+                               "sysl   $0x07 $0x02 $0x09 $0x05 -> %xzr");
+            EXPECT_FALSE(instr_reads_from_reg(instr, sys_rt[i], DR_QUERY_DEFAULT));
+            EXPECT_TRUE(instr_writes_to_reg(instr, sys_rt[i], DR_QUERY_DEFAULT));
+        });
+}
+
 TEST_INSTR(orr)
 {
     /* Testing ORR     <Xd|SP>, <Xn>, #<imm> */
@@ -664,6 +717,9 @@ main(int argc, char *argv[])
 
     RUN_INSTR_TEST(wfe);
     RUN_INSTR_TEST(wfi);
+
+    RUN_INSTR_TEST(sys);
+    RUN_INSTR_TEST(sysl);
 
     RUN_INSTR_TEST(orr);
     RUN_INSTR_TEST(orr_shift);

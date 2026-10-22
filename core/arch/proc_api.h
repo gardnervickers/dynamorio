@@ -417,6 +417,10 @@ typedef enum {
     FEATURE_FPACCOMBINE =
         DEF_FEAT(AA64ISAR2, 3, 5, FEAT_GR_EQ), /**< Faulting on combined branch pointer
                                                   authentication instructions (AArch64) */
+    FEATURE_MOPS = DEF_FEAT(
+        AA64ISAR2, 4, 1, FEAT_GR_EQ), /**< Memory copy and set instructions (AArch64) */
+    FEATURE_GCS =
+        DEF_FEAT(AA64PFR1, 11, 1, FEAT_GR_EQ), /**< Guarded Control Stack (AArch64) */
 } feature_bit_t;
 
 #endif
