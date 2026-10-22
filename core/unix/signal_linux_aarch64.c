@@ -56,15 +56,23 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame)
 void
 sigcontext_set_app_pstate(sigcontext_t *sc)
 {
-    /* DR never writes PSTATE.DIT, so the hardware value is the app's. */
+    /* We sample only DIT: we may be in a signal handler, where TCO is not the
+     * app's (see PSTATE_APP_STATE_BITS), and reading SSBS with MRS needs
+     * FEAT_SSBS2 (FEAT_SSBS alone has only the MSR immediate form).
+     */
 #ifndef DR_HOST_NOT_TARGET
     if (proc_has_feature(FEATURE_DIT)) {
-        const ptr_uint_t dit_bit = 1 << 24;
-        ptr_uint_t dit;
+        reg_t dit;
         asm volatile("mrs %0, s3_3_c4_c2_5" : "=r"(dit)); /* mrs %0, dit */
-        sc->pstate = (sc->pstate & ~dit_bit) | (dit & dit_bit);
+        sc->pstate = PSTATE_WITH_BITS_OF(sc->pstate, dit, PSTATE_DIT_BIT);
     }
 #endif
+}
+
+void
+sigcontext_copy_app_pstate(sigcontext_t *sc, reg_t pstate)
+{
+    sc->pstate = PSTATE_WITH_BITS_OF(sc->pstate, pstate, PSTATE_APP_STATE_BITS);
 }
 
 /* Returns the context record at offset in the record list at base (limit bytes

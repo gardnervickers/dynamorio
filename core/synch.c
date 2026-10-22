@@ -501,7 +501,20 @@ translate_mcontext(thread_record_t *trec, priv_mcontext_t *mcontext, bool restor
                 LOG(THREAD_GET, LOG_SYNCH, 2, "Thread State\n");
                 dump_mcontext(get_mcontext(trec->dcontext), THREAD_GET, DUMP_NOT_XML);
             });
+#ifdef AARCH64
+            /* The saved context has only NZCV of PSTATE (see
+             * PSTATE_APP_STATE_BITS): keep DIT, which is the app's, from the
+             * interrupted context we were given (the thread's suspended frame,
+             * written back on detach).  Only DIT: the thread may be waiting in
+             * our signal handler, where TCO is not the app's.
+             */
+            uint interrupted_pstate = mcontext->nzcv;
+#endif
             *mcontext = *get_mcontext(trec->dcontext);
+#ifdef AARCH64
+            mcontext->nzcv =
+                PSTATE_WITH_BITS_OF(mcontext->nzcv, interrupted_pstate, PSTATE_DIT_BIT);
+#endif
             if (dr_xl8_hook_exists()) {
                 if (!instrument_restore_nonfcache_state(trec->dcontext, true, mcontext))
                     return false;

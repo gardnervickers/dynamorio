@@ -464,6 +464,21 @@ arch_reset_stolen_reg(void);
 void
 arch_mcontext_reset_stolen_reg(dcontext_t *dcontext, priv_mcontext_t *mc);
 #endif
+#ifdef AARCH64
+/* An mcontext we fill in ourselves holds only NZCV of PSTATE (we read it with
+ * MRS NZCV), while one read from a signal frame holds the whole PSTATE.  These
+ * are the PSTATE fields that are the app's in an interrupted context outside a
+ * signal handler, our code's included, because we never write them: DIT, SSBS
+ * and TCO.  Not BTYPE (our own branches set it), nor PAN, UAO, SS, IL or DAIF,
+ * which are not app state.  Inside a signal handler only DIT is known to still
+ * be the interrupted context's: Linux clears TCO on handler entry.
+ */
+#    define PSTATE_DIT_BIT (1ULL << 24)
+#    define PSTATE_APP_STATE_BITS \
+        ((1ULL << 25) /*TCO*/ | PSTATE_DIT_BIT | (1ULL << 12) /*SSBS*/)
+/* Returns dst with the fields in mask taken from src. */
+#    define PSTATE_WITH_BITS_OF(dst, src, mask) (((dst) & ~(mask)) | ((src) & (mask)))
+#endif
 
 bool
 is_indirect_branch_lookup_routine(dcontext_t *dcontext, cache_pc pc);

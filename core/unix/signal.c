@@ -5129,6 +5129,11 @@ send_signal_to_client(dcontext_t *dcontext, int sig, sigframe_rt_t *frame,
         /* propagate client changes */
         CLIENT_ASSERT(si.mcontext->flags == DR_MC_ALL,
                       "signal mcontext flags cannot be changed");
+        /* XXX: On AArch64 the frame's whole PSTATE becomes si.mcontext->nzcv,
+         * which holds it unless the client stored just condition flags there:
+         * then DIT, SSBS and TCO (PSTATE_APP_STATE_BITS) are cleared in the
+         * delivered frame.  NZCV-only writes should keep the rest.
+         */
         mcontext_to_ucontext(uc, dr_mcontext_as_priv_mcontext(si.mcontext));
     } else if (action == DR_SIGNAL_SUPPRESS && raw_sc != NULL) {
         /* propagate client changes */
@@ -6240,9 +6245,18 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 reg_t app_stolen = get_stolen_reg_val(mc);
                 if (app_stolen == tls_base)
                     app_stolen = dcontext->local_state->spill_space.reg_stolen;
+                /* The mcontext has only NZCV of PSTATE.  The interrupted
+                 * PSTATE's DIT, SSBS and TCO are the app's, as we never write
+                 * them (unlike, say, its BTYPE, which our own branches set):
+                 * dropped, the kernel's sigreturn from our handler would clear
+                 * them in the app's PSTATE, and so would the app's from its
+                 * handler, whose frame is this context.
+                 */
+                reg_t interrupted_pstate = sc->SC_XFLAGS;
 #    endif
                 mcontext_to_ucontext(ucxt, mc);
 #    ifdef AARCH64
+                sigcontext_copy_app_pstate(sc, interrupted_pstate);
                 dcontext->local_state->spill_space.reg_stolen = app_stolen;
                 set_sigcxt_stolen_reg(sc, tls_base);
 #    endif
