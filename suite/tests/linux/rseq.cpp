@@ -73,6 +73,12 @@
 #include <errno.h>
 #undef NDEBUG
 #include <assert.h>
+#ifdef RSEQ_TEST_FLAT_MAP
+#    include <fcntl.h>
+#    include <sys/mman.h>
+#    include <sys/stat.h>
+#    include <unistd.h>
+#endif
 
 #define EXPANDSTR(x) #x
 #define STRINGIFY(x) EXPANDSTR(x)
@@ -128,7 +134,14 @@ register_rseq()
          * fallback that does a wider search, it would be good to keep the
          * expected offset in sync with glibc changes.
          */
-#    if __GLIBC__ == 2 && __GLIBC_MINOR__ >= 36
+#    if __GLIBC__ > 2 || __GLIBC_MINOR__ >= 41
+        /* glibc 2.41+ places it in static TLS, at an offset that depends on the
+         * program's TLS, so DR's attach search no longer finds it at a fixed offset.
+         */
+#        ifdef AARCH64
+        assert(__rseq_offset > 0);
+#        endif
+#    elif __GLIBC__ == 2 && __GLIBC_MINOR__ >= 36
 #        ifdef X86
 #            ifdef X64
         assert(__rseq_offset == 2336);
@@ -182,6 +195,43 @@ get_my_rseq()
 #endif
     return &rseq_tls;
 }
+
+#ifdef RSEQ_TEST_FLAT_MAP
+/* Make the file larger than the extent of its loaded segments, as symbol tables and
+ * debug information do, so that a mapping of the whole file looks to DR like a
+ * module being loaded.
+ */
+asm(".pushsection .rseq_test_pad, \"\", %progbits\n\t"
+    ".zero 0x200000\n\t"
+    ".popsection\n\t");
+
+static void *flat_map;
+static size_t flat_map_size;
+
+/* Map our own file whole and read-only, as libunwind does to read the symbols for
+ * a backtrace.  This is data, not a module: DR must not read rseq tables from it.
+ */
+static void
+map_own_file()
+{
+    /* Under DR's early injection /proc/self/exe is libdynamorio.so: open the path
+     * it reports for the link instead.
+     */
+    char path[4096];
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    assert(len > 0);
+    path[len] = '\0';
+    int fd = open(path, O_RDONLY);
+    assert(fd != -1);
+    struct stat st;
+    int res = fstat(fd, &st);
+    assert(res == 0);
+    flat_map_size = st.st_size;
+    flat_map = mmap(NULL, flat_map_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    assert(flat_map != MAP_FAILED);
+    close(fd);
+}
+#endif
 
 static void
 signal_handler(int sig, siginfo_t *siginfo, ucontext_t *ucxt)
@@ -1430,6 +1480,9 @@ main()
         wait_cond_var(thread_ready);
         dr_app_setup_and_start();
 #endif
+#ifdef RSEQ_TEST_FLAT_MAP
+        map_own_file();
+#endif
         test_rseq_call();
         /* Test variations inside the sequence. */
         test_rseq_branches();
@@ -1457,6 +1510,9 @@ main()
         dr_app_stop_and_cleanup();
         join_thread(mythread);
         destroy_cond_var(thread_ready);
+#endif
+#ifdef RSEQ_TEST_FLAT_MAP
+        munmap(flat_map, flat_map_size);
 #endif
     }
     print("All done\n");

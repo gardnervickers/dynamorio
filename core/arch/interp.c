@@ -930,6 +930,19 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
             return false;
         }
         recreate_restore_sandbox_flag(bb, flags_before);
+#ifdef LINUX
+        /* It must still stop at an rseq boundary, as the original did: without
+         * xfer, check_thread_vm_area() does not, and a recreated block that runs
+         * through an rseq endpoint fails its rseq mangling.
+         */
+        bool exited_rseq;
+        if (!is_first_instr && bb->recreate_keep_sandbox &&
+            vm_area_rseq_boundary(bb->start_pc, new_pc, &bb->flags, NULL, &exited_rseq)) {
+            if (exited_rseq)
+                bb->flags |= FRAG_HAS_RSEQ_ENDPOINT;
+            return false;
+        }
+#endif
     }
     if (bb->overlap_info != NULL)
         update_overlap_info(dcontext, bb, new_pc, false /*not jmp*/);
@@ -3501,11 +3514,7 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
              /* to split riprel, need to decode every instr */
              /* in x86_to_x64, need to translate every x86 instr */
              IF_X64(|| DYNAMO_OPTION(coarse_split_riprel) || DYNAMO_OPTION(x86_to_x64)) ||
-        INTERNAL_OPTION(full_decode)
-        /* We separate rseq regions into their own blocks to make this check easier. */
-        IF_LINUX(||
-                 (!vmvector_empty(d_r_rseq_areas) &&
-                  vmvector_overlap(d_r_rseq_areas, bb->start_pc, bb->start_pc + 1))))
+        INTERNAL_OPTION(full_decode))
         bb->full_decode = true;
     else {
 #ifdef CHECK_RETURNS_SSE2
@@ -3534,6 +3543,15 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
     /* start converting instructions into IR */
     if (!bb->checked_start_vmarea)
         check_new_page_start(dcontext, bb);
+#ifdef LINUX
+    /* We separate rseq regions into their own blocks to make this check easier.
+     * It follows the vm area check, which reads the rseq tables of a module that
+     * first executes here (rseq_module_executed()).
+     */
+    if (!vmvector_empty(d_r_rseq_areas) &&
+        vmvector_overlap(d_r_rseq_areas, bb->start_pc, bb->start_pc + 1))
+        bb->full_decode = true;
+#endif
 
 #if defined(WINDOWS) && !defined(STANDALONE_DECODER)
     /* i#1632: if `bb->start_pc` points into the middle of a DR intercept hook, change

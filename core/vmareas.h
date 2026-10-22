@@ -657,6 +657,12 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc start, app_pc tag, void **vmli
 void
 check_thread_vm_area_abort(dcontext_t *dcontext, void **vmlist, uint flags);
 
+#ifdef LINUX
+bool
+vm_area_rseq_boundary(app_pc tag, app_pc pc, uint *flags, app_pc *stop,
+                      bool *exited_rseq DR_PARAM_OUT);
+#endif
+
 /* Indicate the PC of the page in which instructions are about to be decoded. */
 void
 set_thread_decode_page_start(dcontext_t *dcontext, app_pc page_start);

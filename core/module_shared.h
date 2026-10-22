@@ -128,6 +128,10 @@ enum {
     MODULE_NULL_INSTRUMENT = 0x00000080,
     /* we use this to send just one module load event on 1st exec (i#884) */
     MODULE_LOAD_EVENT = 0x00000100,
+#ifdef LINUX
+    /* Mapped but not yet executed: rseq tables are read on 1st exec. */
+    MODULE_RSEQ_DEFERRED = 0x00000200,
+#endif
 };
 
 /**************** init/exit routines *****************/

@@ -85,7 +85,9 @@ static volatile bool rseq_enabled;
  * As of glibc 2.35, it is present at the following offset from the app
  * lib seg base. We check these offsets first and then fall back to a
  * wider search. The linux.rseq test helps detect changes in these
- * offsets in future glibc versions.
+ * offsets in future glibc versions.  glibc 2.41+ instead places it in static TLS
+ * (at a positive offset on AArch64), at an offset that depends on the program, so
+ * there we rely on the search.
  */
 #ifdef X86
 #    ifdef X64
@@ -186,7 +188,7 @@ d_r_rseq_init(void)
                                         rseq_cs_free _IF_DEBUG("rseq_cs table"));
     /* Enable rseq pre-attach for things like dr_prepopulate_cache(). */
     if (rseq_is_registered_for_current_thread())
-        rseq_locate_rseq_regions(false);
+        rseq_locate_rseq_regions();
 }
 
 void
@@ -383,7 +385,9 @@ rseq_analyze_instructions(rseq_region_t *info)
         if (instr_is_syscall(&instr)
             /* Allow a syscall for our test in debug build. */
             IF_DEBUG(
-                &&!check_filter("api.rseq;linux.rseq;linux.rseq_table;linux.rseq_noarray",
+                &&!check_filter("api.rseq;linux.rseq;linux.rseq_table;linux.rseq_noarray;"
+                                "linux.rseq_glibc_lld;linux.rseq_glibc_relr;"
+                                "linux.rseq_flatmap",
                                 get_short_name(get_application_name())))) {
             REPORT_FATAL_ERROR_AND_EXIT(RSEQ_BEHAVIOR_UNSUPPORTED, 3,
                                         get_application_name(), get_application_pid(),
@@ -426,19 +430,19 @@ rseq_analyze_instructions(rseq_region_t *info)
 }
 
 static void
-rseq_process_entry(struct rseq_cs *entry, ssize_t load_offs)
+rseq_process_entry(module_area_t *ma, const struct rseq_cs *entry)
 {
     LOG(GLOBAL, LOG_LOADER, 2,
         "Found rseq region: ver=%u; flags=%u; start=" PFX "; end=" PFX "; abort=" PFX
         "\n",
-        entry->version, entry->flags, entry->start_ip + load_offs,
-        entry->start_ip + entry->post_commit_offset + load_offs,
-        entry->abort_ip + load_offs);
+        entry->version, entry->flags, (ptr_uint_t)entry->start_ip,
+        (ptr_uint_t)(entry->start_ip + entry->post_commit_offset),
+        (ptr_uint_t)entry->abort_ip);
     rseq_region_t *info =
         HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, rseq_region_t, ACCT_VMAREAS, PROTECTED);
-    info->start = (app_pc)(ptr_uint_t)entry->start_ip + load_offs;
+    info->start = (app_pc)(ptr_uint_t)entry->start_ip;
     info->end = info->start + entry->post_commit_offset;
-    info->handler = (app_pc)(ptr_uint_t)entry->abort_ip + load_offs;
+    info->handler = (app_pc)(ptr_uint_t)entry->abort_ip;
     info->final_instr_pc = NULL; /* Only set later at block building time. */
     int signature;
     if (!d_r_safe_read(info->handler - sizeof(signature), sizeof(signature),
@@ -455,6 +459,12 @@ rseq_process_entry(struct rseq_cs *entry, ssize_t load_offs)
             SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
             LOG(GLOBAL, LOG_LOADER, 2, "Rseq signature is 0x%08x\n", rseq_signature);
         } else {
+            LOG(GLOBAL, LOG_LOADER, 1,
+                "Rseq signature 0x%08x at " PFX " in %s differs from 0x%08x\n", signature,
+                info->handler - sizeof(signature),
+                GET_MODULE_NAME(&ma->names) == NULL ? "(null)"
+                                                    : GET_MODULE_NAME(&ma->names),
+                rseq_signature);
             REPORT_FATAL_ERROR_AND_EXIT(RSEQ_BEHAVIOR_UNSUPPORTED, 3,
                                         get_application_name(), get_application_pid(),
                                         "Rseq signatures are not all identical");
@@ -479,97 +489,390 @@ rseq_process_entry(struct rseq_cs *entry, ssize_t load_offs)
     }
 }
 
-static void
-rseq_process_elf_sections(module_area_t *ma, bool at_map,
-                          ELF_SECTION_HEADER_TYPE *sec_hdr_start, const char *strtab,
-                          ssize_t load_offs)
+/* Reading rseq tables.
+ *
+ * A module's rseq tables (the __rseq_cs_ptr_array pointers and the start_ip and
+ * abort_ip of each struct rseq_cs) hold link-time addresses which the loader
+ * relocates.  Whether it has done so when we look depends on when the app first
+ * registers rseq, which we cannot reliably tell: glibc 2.35+ registers each thread
+ * from ld.so before it relocates anything, while an app's own registration usually
+ * comes later.  (glibc 2.41+ also moved its struct rseq into static TLS, so its TLS
+ * offset no longer distinguishes the two.)  The in-memory words are not enough to
+ * relocate them ourselves either: RELA relocations need not leave anything in
+ * place (lld writes zero), and the loader may be part-way through.
+ *
+ * We therefore read the tables' original contents from the module's file and apply
+ * its dynamic relocations (RELA, REL and RELR) ourselves.  This gives the run-time
+ * values whatever the loader has done so far.
+ */
+
+/* SHT_RELR is missing from older system headers. */
+#ifndef SHT_RELR
+#    define SHT_RELR 19
+#endif
+
+typedef struct _rseq_elf_file_t {
+    module_area_t *ma;
+    file_t fd;
+    /* Run-time address minus link-time address. */
+    ssize_t load_offs;
+    ELF_SECTION_HEADER_TYPE *sec_hdr;
+    uint num_sections;
+} rseq_elf_file_t;
+
+/* A pointer-sized word of an rseq table at a link-time address. */
+typedef struct _rseq_word_t {
+    ptr_uint_t vaddr;
+    ptr_uint_t original; /* The contents of the file. */
+    ptr_uint_t value;    /* The run-time value. */
+} rseq_word_t;
+
+static bool
+rseq_read_file_offset(rseq_elf_file_t *elf, uint64 offset, void *buf, size_t size)
 {
-    bool found_array = false;
-    uint i;
-    ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)ma->start;
-    ELF_SECTION_HEADER_TYPE *sec_hdr = sec_hdr_start;
-    /* The section entries on disk need load_offs.  The rseq entries in memory are
-     * relocated and only need the offset if relocations have not yet been applied.
-     */
-    ssize_t entry_offs = 0;
-    if (at_map || (DYNAMO_OPTION(early_inject) && !dr_api_entry && !dynamo_started))
-        entry_offs = load_offs;
-    for (i = 0; i < elf_hdr->e_shnum; i++) {
-#define RSEQ_PTR_ARRAY_SEC_NAME "__rseq_cs_ptr_array"
-        if (strcmp(strtab + sec_hdr->sh_name, RSEQ_PTR_ARRAY_SEC_NAME) == 0) {
-            found_array = true;
-            byte **ptrs = (byte **)(sec_hdr->sh_addr + load_offs);
-            int j;
-            for (j = 0; j < sec_hdr->sh_size / sizeof(ptrs); ++j) {
-                /* We require that the table is loaded.  If not, bail, but unlike
-                 * failing to find section headers, make this a fatal error: better
-                 * to notify the user than try to run the rseq w/o proper handling.
-                 */
-                if (ptrs < (byte **)ma->start || ptrs > (byte **)ma->end) {
-                    REPORT_FATAL_ERROR_AND_EXIT(
-                        RSEQ_BEHAVIOR_UNSUPPORTED, 3, get_application_name(),
-                        get_application_pid(),
-                        RSEQ_PTR_ARRAY_SEC_NAME " is not in a loaded segment");
-                    ASSERT_NOT_REACHED();
-                }
-                /* We assume this is a full mapping and it's safe to read the data
-                 * (a partial map shouldn't make it to module list processing).
-                 * We do perform a sanity check to handle unusual non-relocated
-                 * cases (it's possible this array is not in a loaded segment?).
-                 */
-                byte *entry = *ptrs + entry_offs;
-                if (entry < ma->start || entry > ma->end) {
-                    REPORT_FATAL_ERROR_AND_EXIT(
-                        RSEQ_BEHAVIOR_UNSUPPORTED, 3, get_application_name(),
-                        get_application_pid(),
-                        RSEQ_PTR_ARRAY_SEC_NAME "'s entries are not in a loaded segment");
-                    ASSERT_NOT_REACHED();
-                }
-                rseq_process_entry((struct rseq_cs *)entry, entry_offs);
-                ++ptrs;
-            }
-            break;
-        }
-        ++sec_hdr;
+    if (!os_seek(elf->fd, (int64)offset, SEEK_SET))
+        return false;
+    byte *cur = (byte *)buf;
+    while (size > 0) {
+        ssize_t got = os_read(elf->fd, cur, size);
+        if (got <= 0)
+            return false;
+        cur += got;
+        size -= got;
     }
-    if (!found_array) {
-        sec_hdr = sec_hdr_start;
-        for (i = 0; i < elf_hdr->e_shnum; i++) {
-#define RSEQ_SEC_NAME "__rseq_cs"
-#define RSEQ_OLD_SEC_NAME "__rseq_table"
-            if (strcmp(strtab + sec_hdr->sh_name, RSEQ_SEC_NAME) == 0 ||
-                strcmp(strtab + sec_hdr->sh_name, RSEQ_OLD_SEC_NAME) == 0) {
-                /* There may be padding at the start of the section, so ensure we skip
-                 * over it.  We're reading the loaded data, not the file, so it will
-                 * always be aligned.
-                 */
-#define RSEQ_CS_ALIGNMENT (4 * sizeof(__u64))
-                struct rseq_cs *array = (struct rseq_cs *)ALIGN_FORWARD(
-                    sec_hdr->sh_addr + load_offs, RSEQ_CS_ALIGNMENT);
-                int j;
-                for (j = 0; j < sec_hdr->sh_size / sizeof(*array); ++j) {
-                    /* We require that the table is loaded.  If not, bail. */
-                    if (array < (struct rseq_cs *)ma->start ||
-                        array > (struct rseq_cs *)ma->end) {
-                        REPORT_FATAL_ERROR_AND_EXIT(
-                            RSEQ_BEHAVIOR_UNSUPPORTED, 3, get_application_name(),
-                            get_application_pid(),
-                            RSEQ_SEC_NAME " is not in a loaded segment");
-                        ASSERT_NOT_REACHED();
-                    }
-                    rseq_process_entry(array, entry_offs);
-                    ++array;
-                }
-                break;
-            }
-            ++sec_hdr;
-        }
-    }
+    return true;
 }
 
-/* Returns whether successfully searched for rseq data (not whether found rseq data). */
+/* Reads the original contents of [vaddr, vaddr + size) from the module's file. */
 static bool
-rseq_process_module(module_area_t *ma, bool at_map, bool saw_glibc_rseq_reg)
+rseq_read_file(rseq_elf_file_t *elf, ptr_uint_t vaddr, void *buf, size_t size)
+{
+    for (uint i = 0; i < elf->num_sections; i++) {
+        ELF_SECTION_HEADER_TYPE *sec = &elf->sec_hdr[i];
+        /* TLS sections' addresses overlap the sections after them. */
+        if (!TESTANY(SHF_ALLOC, sec->sh_flags) || TESTANY(SHF_TLS, sec->sh_flags) ||
+            vaddr < sec->sh_addr || vaddr - sec->sh_addr >= sec->sh_size ||
+            size > sec->sh_size - (vaddr - sec->sh_addr))
+            continue;
+        if (sec->sh_type == SHT_NOBITS) {
+            memset(buf, 0, size);
+            return true;
+        }
+        return rseq_read_file_offset(elf, sec->sh_offset + (vaddr - sec->sh_addr), buf,
+                                     size);
+    }
+    return false;
+}
+
+/* Returns the index in order[], which sorts words[] by vaddr, of the first word at
+ * or after vaddr.
+ */
+static uint
+rseq_find_word(rseq_word_t *words, uint *order, uint num_words, ptr_uint_t vaddr)
+{
+    uint lo = 0, hi = num_words;
+    while (lo < hi) {
+        uint mid = lo + (hi - lo) / 2;
+        if (words[order[mid]].vaddr < vaddr)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+/* Applies one dynamic relocation at link-time address where to the words there.
+ * REL and RELR relocations (!has_addend) take their addend from the original
+ * contents.
+ */
+static bool
+rseq_apply_relocation(rseq_elf_file_t *elf, rseq_word_t *words, uint *order,
+                      uint num_words, ptr_uint_t where, uint type, uint sym_index,
+                      ELF_SECTION_HEADER_TYPE *symtab, bool has_addend, ptr_int_t addend,
+                      const char **error DR_PARAM_OUT)
+{
+    for (uint i = rseq_find_word(words, order, num_words, where);
+         i < num_words && words[order[i]].vaddr == where; i++) {
+        rseq_word_t *word = &words[order[i]];
+        ptr_uint_t base = has_addend ? (ptr_uint_t)addend : word->original;
+        if (type == ELF_R_RELATIVE) {
+            word->value = elf->load_offs + base;
+        } else if (type == ELF_R_DIRECT) {
+            ELF_SYM_TYPE sym;
+            if (symtab == NULL || symtab->sh_type != SHT_DYNSYM ||
+                sym_index >= symtab->sh_size / sizeof(sym) ||
+                !rseq_read_file_offset(elf, symtab->sh_offset + sym_index * sizeof(sym),
+                                       &sym, sizeof(sym))) {
+                *error = "Rseq table relocation symbol is unreadable";
+                return false;
+            }
+            if (sym.st_shndx == SHN_UNDEF) {
+                *error = "Rseq table refers to another module";
+                return false;
+            }
+            word->value =
+                (sym.st_shndx == SHN_ABS ? 0 : elf->load_offs) + sym.st_value + base;
+        } else if (type != ELF_R_NONE) {
+            *error = "Rseq table has an unsupported relocation";
+            return false;
+        }
+        LOG(GLOBAL, LOG_LOADER, 3,
+            "Rseq table word @" PFX ": reloc type %u, " PFX " => " PFX "\n", where, type,
+            word->original, word->value);
+    }
+    return true;
+}
+
+/* Computes the run-time value of each of words[], given its vaddr, from the
+ * module's file and its dynamic relocations.
+ */
+static bool
+rseq_relocate_words(rseq_elf_file_t *elf, rseq_word_t *words, uint num_words,
+                    const char **error DR_PARAM_OUT)
+{
+    *error = NULL;
+    if (num_words == 0)
+        return true;
+    for (uint i = 0; i < num_words; i++) {
+        if (!rseq_read_file(elf, words[i].vaddr, &words[i].original,
+                            sizeof(words[i].original))) {
+            *error = "Rseq table is not in the module's file";
+            return false;
+        }
+        words[i].value = words[i].original;
+    }
+    /* Sort an index for lookups.  The tables are small, so insertion sort it is. */
+    uint *order =
+        HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, uint, num_words, ACCT_OTHER, PROTECTED);
+    for (uint i = 0; i < num_words; i++) {
+        uint j = i;
+        for (; j > 0 && words[order[j - 1]].vaddr > words[i].vaddr; j--)
+            order[j] = order[j - 1];
+        order[j] = i;
+    }
+    ptr_uint_t min_vaddr = words[order[0]].vaddr;
+    ptr_uint_t max_vaddr = words[order[num_words - 1]].vaddr;
+    bool ok = true;
+    for (uint s = 0; ok && s < elf->num_sections; s++) {
+        ELF_SECTION_HEADER_TYPE *sec = &elf->sec_hdr[s];
+        size_t entry_size;
+        /* Relocation sections without SHF_ALLOC are static relocations, as kept by
+         * --emit-relocs (BOLT-processed binaries have them), which the loader does
+         * not apply.
+         */
+        if (!TESTANY(SHF_ALLOC, sec->sh_flags) || sec->sh_size == 0)
+            continue;
+        if (sec->sh_type == SHT_RELA)
+            entry_size = sizeof(ELF_RELA_TYPE);
+        else if (sec->sh_type == SHT_REL)
+            entry_size = sizeof(ELF_REL_TYPE);
+        else if (sec->sh_type == SHT_RELR)
+            entry_size = sizeof(ELF_WORD);
+        else
+            continue;
+        if (sec->sh_entsize != entry_size) {
+            *error = "Rseq module has malformed relocations";
+            ok = false;
+            break;
+        }
+        uint64 map_offs = ALIGN_BACKWARD(sec->sh_offset, PAGE_SIZE);
+        size_t map_size =
+            ALIGN_FORWARD(sec->sh_offset + sec->sh_size, PAGE_SIZE) - map_offs;
+        byte *map = os_map_file(elf->fd, &map_size, map_offs, NULL, MEMPROT_READ,
+                                MAP_FILE_COPY_ON_WRITE);
+        if (map == NULL) {
+            *error = "Rseq module's relocations are unreadable";
+            ok = false;
+            break;
+        }
+        byte *data = map + (sec->sh_offset - map_offs);
+        size_t count = sec->sh_size / entry_size;
+        ELF_SECTION_HEADER_TYPE *symtab =
+            sec->sh_link < elf->num_sections ? &elf->sec_hdr[sec->sh_link] : NULL;
+        LOG(GLOBAL, LOG_LOADER, 3, "Scanning %zu relocations of type %u\n", count,
+            sec->sh_type);
+        ptr_uint_t relr_where = 0;
+        for (size_t i = 0; ok && i < count; i++) {
+            if (sec->sh_type == SHT_RELA) {
+                ELF_RELA_TYPE *rela = &((ELF_RELA_TYPE *)data)[i];
+                if (rela->r_offset < min_vaddr || rela->r_offset > max_vaddr)
+                    continue;
+                ok = rseq_apply_relocation(elf, words, order, num_words, rela->r_offset,
+                                           (uint)ELF_R_TYPE(rela->r_info),
+                                           (uint)ELF_R_SYM(rela->r_info), symtab, true,
+                                           (ptr_int_t)rela->r_addend, error);
+            } else if (sec->sh_type == SHT_REL) {
+                ELF_REL_TYPE *rel = &((ELF_REL_TYPE *)data)[i];
+                if (rel->r_offset < min_vaddr || rel->r_offset > max_vaddr)
+                    continue;
+                ok = rseq_apply_relocation(elf, words, order, num_words, rel->r_offset,
+                                           (uint)ELF_R_TYPE(rel->r_info),
+                                           (uint)ELF_R_SYM(rel->r_info), symtab, false, 0,
+                                           error);
+            } else {
+                /* RELR: an address, then bitmaps of the words after it (see
+                 * module_relocate_relr()).  Each is a relative relocation.
+                 */
+                ELF_WORD entry = ((ELF_WORD *)data)[i];
+                if (!TESTANY(1, entry)) {
+                    relr_where = (ptr_uint_t)entry;
+                    if (relr_where >= min_vaddr && relr_where <= max_vaddr) {
+                        ok = rseq_apply_relocation(elf, words, order, num_words,
+                                                   relr_where, ELF_R_RELATIVE, 0, NULL,
+                                                   false, 0, error);
+                    }
+                    relr_where += sizeof(ELF_ADDR);
+                } else {
+                    ptr_uint_t where = relr_where;
+                    for (ELF_WORD bitmap = entry >> 1; ok && bitmap != 0;
+                         bitmap >>= 1, where += sizeof(ELF_ADDR)) {
+                        if (TESTANY(1, bitmap) && where >= min_vaddr &&
+                            where <= max_vaddr) {
+                            ok = rseq_apply_relocation(elf, words, order, num_words,
+                                                       where, ELF_R_RELATIVE, 0, NULL,
+                                                       false, 0, error);
+                        }
+                    }
+                    relr_where += (CHAR_BIT * sizeof(ELF_WORD) - 1) * sizeof(ELF_ADDR);
+                }
+            }
+        }
+        os_unmap_file(map, map_size);
+    }
+    HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, order, uint, num_words, ACCT_OTHER, PROTECTED);
+    return ok;
+}
+
+static void
+rseq_report_table_error(const char *error)
+{
+    REPORT_FATAL_ERROR_AND_EXIT(RSEQ_BEHAVIOR_UNSUPPORTED, 3, get_application_name(),
+                                get_application_pid(), error);
+    ASSERT_NOT_REACHED();
+}
+
+/* Processes the struct rseq_cs entries at the given link-time addresses. */
+static void
+rseq_process_entries(rseq_elf_file_t *elf, ptr_uint_t *entries, uint num_entries)
+{
+    if (num_entries == 0)
+        return;
+    const char *error;
+    uint num_words = 2 * num_entries;
+    rseq_word_t *words =
+        HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, rseq_word_t, num_words, ACCT_OTHER, PROTECTED);
+    for (uint i = 0; i < num_entries; i++) {
+        words[2 * i].vaddr = entries[i] + offsetof(struct rseq_cs, start_ip);
+        words[2 * i + 1].vaddr = entries[i] + offsetof(struct rseq_cs, abort_ip);
+    }
+    if (!rseq_relocate_words(elf, words, num_words, &error))
+        rseq_report_table_error(error);
+    for (uint i = 0; i < num_entries; i++) {
+        struct rseq_cs entry;
+        if (!rseq_read_file(elf, entries[i], &entry, sizeof(entry)))
+            rseq_report_table_error("Rseq table is not in the module's file");
+        entry.start_ip = words[2 * i].value;
+        entry.abort_ip = words[2 * i + 1].value;
+        rseq_process_entry(elf->ma, &entry);
+    }
+    HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, words, rseq_word_t, num_words, ACCT_OTHER,
+                    PROTECTED);
+}
+
+static void
+rseq_process_elf_sections(rseq_elf_file_t *elf, const char *strtab, size_t strtab_size)
+{
+    module_area_t *ma = elf->ma;
+    ELF_SECTION_HEADER_TYPE *array_sec = NULL, *cs_sec = NULL;
+    for (uint i = 0; i < elf->num_sections; i++) {
+        ELF_SECTION_HEADER_TYPE *sec = &elf->sec_hdr[i];
+        if (sec->sh_name >= strtab_size)
+            continue;
+        const char *name = strtab + sec->sh_name;
+#define RSEQ_PTR_ARRAY_SEC_NAME "__rseq_cs_ptr_array"
+#define RSEQ_SEC_NAME "__rseq_cs"
+#define RSEQ_OLD_SEC_NAME "__rseq_table"
+        if (array_sec == NULL && strcmp(name, RSEQ_PTR_ARRAY_SEC_NAME) == 0)
+            array_sec = sec;
+        else if (cs_sec == NULL &&
+                 (strcmp(name, RSEQ_SEC_NAME) == 0 ||
+                  strcmp(name, RSEQ_OLD_SEC_NAME) == 0))
+            cs_sec = sec;
+    }
+    uint num_entries = 0;
+    ptr_uint_t *entries = NULL;
+    if (array_sec != NULL) {
+        /* We require that the table is loaded.  If not, bail, but unlike failing to
+         * find section headers, make this a fatal error: better to notify the user
+         * than try to run the rseq w/o proper handling.
+         */
+        app_pc array = (app_pc)(array_sec->sh_addr + elf->load_offs);
+        if (array < ma->start || array > ma->end ||
+            array_sec->sh_size > (size_t)(ma->end - array)) {
+            rseq_report_table_error(RSEQ_PTR_ARRAY_SEC_NAME
+                                    " is not in a loaded segment");
+        }
+        num_entries = (uint)(array_sec->sh_size / sizeof(ELF_ADDR));
+        if (num_entries == 0)
+            return;
+        const char *error;
+        rseq_word_t *words = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, rseq_word_t, num_entries,
+                                              ACCT_OTHER, PROTECTED);
+        for (uint i = 0; i < num_entries; i++)
+            words[i].vaddr = array_sec->sh_addr + i * sizeof(ELF_ADDR);
+        if (!rseq_relocate_words(elf, words, num_entries, &error))
+            rseq_report_table_error(error);
+        entries = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, ptr_uint_t, num_entries, ACCT_OTHER,
+                                   PROTECTED);
+        for (uint i = 0; i < num_entries; i++) {
+            app_pc entry = (app_pc)words[i].value;
+            if (entry < ma->start || entry > ma->end ||
+                sizeof(struct rseq_cs) > (size_t)(ma->end - entry)) {
+                LOG(GLOBAL, LOG_LOADER, 1,
+                    "Rseq array entry %u @" PFX " is " PFX " (file " PFX ")\n", i,
+                    words[i].vaddr, words[i].value, words[i].original);
+                rseq_report_table_error(RSEQ_PTR_ARRAY_SEC_NAME
+                                        "'s entries are not in a loaded segment");
+            }
+            entries[i] = words[i].value - elf->load_offs;
+        }
+        HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, words, rseq_word_t, num_entries, ACCT_OTHER,
+                        PROTECTED);
+    } else if (cs_sec != NULL) {
+        /* There may be padding at the start of the section, so ensure we skip over
+         * it.  The load offset is page-aligned, so the link-time and run-time
+         * alignments agree.
+         */
+#define RSEQ_CS_ALIGNMENT (4 * sizeof(__u64))
+        ptr_uint_t first = ALIGN_FORWARD(cs_sec->sh_addr, RSEQ_CS_ALIGNMENT);
+        ptr_uint_t end = cs_sec->sh_addr + cs_sec->sh_size;
+        if (first >= end)
+            return;
+        /* We require that the table is loaded.  If not, bail. */
+        if ((app_pc)(first + elf->load_offs) < ma->start ||
+            (app_pc)(end + elf->load_offs) > ma->end)
+            rseq_report_table_error(RSEQ_SEC_NAME " is not in a loaded segment");
+        num_entries = (uint)((end - first) / sizeof(struct rseq_cs));
+        if (num_entries == 0)
+            return;
+        entries = HEAP_ARRAY_ALLOC(GLOBAL_DCONTEXT, ptr_uint_t, num_entries, ACCT_OTHER,
+                                   PROTECTED);
+        for (uint i = 0; i < num_entries; i++)
+            entries[i] = first + i * sizeof(struct rseq_cs);
+    } else
+        return;
+    rseq_process_entries(elf, entries, num_entries);
+    HEAP_ARRAY_FREE(GLOBAL_DCONTEXT, entries, ptr_uint_t, num_entries, ACCT_OTHER,
+                    PROTECTED);
+}
+
+/* Returns whether successfully searched for rseq data (not whether found rseq data).
+ * The module must be fully mapped (its first segment's initial mapping over its
+ * whole extent replaced by the loader's per-segment mappings), as we read its code
+ * for the signatures and register analysis; see rseq_module_init().
+ */
+static bool
+rseq_process_module(module_area_t *ma)
 {
     bool res = false;
     ASSERT(is_elf_so_header(ma->start, ma->end - ma->start));
@@ -580,53 +883,44 @@ rseq_process_module(module_area_t *ma, bool at_map, bool saw_glibc_rseq_reg)
     size_t sec_size = 0, str_size = 0;
     ELF_SECTION_HEADER_TYPE *sec_hdr = NULL;
     char *strtab;
-    ssize_t load_offs = ma->start - ma->os_data.base_address;
-    if (at_map &&
-        elf_hdr->e_shoff + elf_hdr->e_shnum * elf_hdr->e_shentsize + ma->start <
-            ma->end) {
-        sec_map = elf_hdr->e_shoff + ma->start;
-        sec_hdr = (ELF_SECTION_HEADER_TYPE *)sec_map;
-        /* We assume strtab is there too. */
-        strtab = (char *)(ma->start + sec_hdr[elf_hdr->e_shstrndx].sh_offset);
-        if (strtab > (char *)ma->end)
-            goto rseq_process_module_cleanup;
-    } else {
-        /* The section headers are not mapped in.  Unfortunately this is the common
-         * case: they are typically at the end of the file.  For this reason, we delay
-         * calling this function until we see the app use rseq.
-         */
-        if (ma->full_path == NULL)
-            goto rseq_process_module_cleanup;
-        fd = os_open(ma->full_path, OS_OPEN_READ);
-        if (fd == INVALID_FILE)
-            goto rseq_process_module_cleanup;
-        off_t offs = ALIGN_BACKWARD(elf_hdr->e_shoff, PAGE_SIZE);
-        sec_size =
-            ALIGN_FORWARD(elf_hdr->e_shoff + elf_hdr->e_shnum * elf_hdr->e_shentsize,
-                          PAGE_SIZE) -
-            offs;
-        sec_map =
-            os_map_file(fd, &sec_size, offs, NULL, MEMPROT_READ, MAP_FILE_COPY_ON_WRITE);
-        if (sec_map == NULL)
-            goto rseq_process_module_cleanup;
-        sec_hdr = (ELF_SECTION_HEADER_TYPE *)(sec_map + elf_hdr->e_shoff - offs);
-        /* We also need the section header string table. */
-        offs = ALIGN_BACKWARD(sec_hdr[elf_hdr->e_shstrndx].sh_offset, PAGE_SIZE);
-        str_size = ALIGN_FORWARD(sec_hdr[elf_hdr->e_shstrndx].sh_offset +
-                                     sec_hdr[elf_hdr->e_shstrndx].sh_size,
-                                 PAGE_SIZE) -
-            offs;
-        str_map =
-            os_map_file(fd, &str_size, offs, NULL, MEMPROT_READ, MAP_FILE_COPY_ON_WRITE);
-        if (str_map == NULL)
-            goto rseq_process_module_cleanup;
-        strtab = (char *)(str_map + sec_hdr[elf_hdr->e_shstrndx].sh_offset - offs);
-    }
-    /* When saw_glibc_rseq_reg is set, we are still at glibc init, and ld has not
-     * relocated the executable yet.
+    /* The section headers are not mapped in: they are typically at the end of the
+     * file.  We read them, and the tables' contents and relocations, from the file.
+     * For this reason, we delay calling this function until we see the app use rseq.
      */
-    rseq_process_elf_sections(ma, at_map || saw_glibc_rseq_reg, sec_hdr, strtab,
-                              load_offs);
+    if (ma->full_path == NULL || elf_hdr->e_shnum == 0 ||
+        elf_hdr->e_shstrndx >= elf_hdr->e_shnum ||
+        elf_hdr->e_shentsize != sizeof(ELF_SECTION_HEADER_TYPE))
+        goto rseq_process_module_cleanup;
+    fd = os_open(ma->full_path, OS_OPEN_READ);
+    if (fd == INVALID_FILE)
+        goto rseq_process_module_cleanup;
+    off_t offs = ALIGN_BACKWARD(elf_hdr->e_shoff, PAGE_SIZE);
+    sec_size = ALIGN_FORWARD(elf_hdr->e_shoff + elf_hdr->e_shnum * elf_hdr->e_shentsize,
+                             PAGE_SIZE) -
+        offs;
+    sec_map =
+        os_map_file(fd, &sec_size, offs, NULL, MEMPROT_READ, MAP_FILE_COPY_ON_WRITE);
+    if (sec_map == NULL) {
+        sec_size = 0;
+        goto rseq_process_module_cleanup;
+    }
+    sec_hdr = (ELF_SECTION_HEADER_TYPE *)(sec_map + elf_hdr->e_shoff - offs);
+    /* We also need the section header string table. */
+    offs = ALIGN_BACKWARD(sec_hdr[elf_hdr->e_shstrndx].sh_offset, PAGE_SIZE);
+    str_size = ALIGN_FORWARD(sec_hdr[elf_hdr->e_shstrndx].sh_offset +
+                                 sec_hdr[elf_hdr->e_shstrndx].sh_size,
+                             PAGE_SIZE) -
+        offs;
+    str_map =
+        os_map_file(fd, &str_size, offs, NULL, MEMPROT_READ, MAP_FILE_COPY_ON_WRITE);
+    if (str_map == NULL) {
+        str_size = 0;
+        goto rseq_process_module_cleanup;
+    }
+    strtab = (char *)(str_map + sec_hdr[elf_hdr->e_shstrndx].sh_offset - offs);
+    rseq_elf_file_t elf = { ma, fd, ma->start - ma->os_data.base_address, sec_hdr,
+                            elf_hdr->e_shnum };
+    rseq_process_elf_sections(&elf, strtab, sec_hdr[elf_hdr->e_shstrndx].sh_size);
     res = true;
 rseq_process_module_cleanup:
     if (str_size != 0)
@@ -801,15 +1095,12 @@ rseq_process_syscall(dcontext_t *dcontext)
     byte *seg_base = get_app_segment_base(LIB_SEG_TLS);
     byte *app_addr = (byte *)dcontext->sys_param0;
     bool constant_offset = false;
-    bool first_rseq_registration = false;
     if (rseq_tls_offset == 0) {
         SELF_UNPROTECT_DATASEC(DATASEC_RARELY_PROT);
         int offset = app_addr - seg_base;
         /* To handle races here, we use an atomic_exchange. */
         int prior = atomic_exchange_int(&rseq_tls_offset, offset);
         SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
-        if (prior == 0)
-            first_rseq_registration = true;
         constant_offset = (prior == 0 || prior == offset);
         LOG(GLOBAL, LOG_LOADER, 2,
             "Observed struct rseq at syscall @ " PFX " for thread => %s:%s0x%x\n",
@@ -823,12 +1114,10 @@ rseq_process_syscall(dcontext_t *dcontext)
                                     "struct rseq is not always at the same offset");
         ASSERT_NOT_REACHED();
     }
-    /* The struct rseq registered by glibc 2.35+ is inside struct pthread, which is
-     * at a positive offset from thread pointer on x86 and negative offset on AArch64,
-     * both unlike the static TLS used by manual app registration.
+    /* This may be glibc's registration from ld.so, before it relocates any module:
+     * rseq_process_module() does not depend on whether it has.
      */
-    rseq_locate_rseq_regions(first_rseq_registration &&
-                             IF_X86_ELSE(rseq_tls_offset > 0, rseq_tls_offset < 0));
+    rseq_locate_rseq_regions();
 }
 
 /* Restartable sequence region identification.
@@ -841,7 +1130,7 @@ rseq_process_syscall(dcontext_t *dcontext)
  * the app has registered the current thread for rseq.
  */
 void
-rseq_locate_rseq_regions(bool saw_glibc_rseq_reg)
+rseq_locate_rseq_regions(void)
 {
     if (rseq_enabled)
         return;
@@ -877,7 +1166,9 @@ rseq_locate_rseq_regions(bool saw_glibc_rseq_reg)
     module_iterator_t *iter = module_iterator_start();
     while (module_iterator_hasnext(iter)) {
         module_area_t *ma = module_iterator_next(iter);
-        rseq_process_module(ma, false /*!at_map*/, saw_glibc_rseq_reg);
+        /* Deferred modules are processed when they first execute. */
+        if (!TESTANY(MODULE_RSEQ_DEFERRED, ma->flags))
+            rseq_process_module(ma);
     }
     module_iterator_stop(iter);
     d_r_mutex_unlock(&rseq_trigger_lock);
@@ -886,9 +1177,49 @@ rseq_locate_rseq_regions(bool saw_glibc_rseq_reg)
 void
 rseq_module_init(module_area_t *ma, bool at_map)
 {
-    if (rseq_enabled) {
-        rseq_process_module(ma, at_map, false);
+    ASSERT(os_get_module_info_write_locked());
+    if (at_map) {
+        /* At its first mapping a module is not ready to read: the loader maps the
+         * file over the module's whole extent and then maps each later segment over
+         * that from its own file offset, so only the first segment is in place yet.
+         * The same mapping also arises when the app maps an ELF file whole to read it
+         * as data, as libunwind does with its own executable to print a backtrace;
+         * such a mapping never becomes a module.  We defer until the module first
+         * executes (rseq_module_executed()), by which time it has been mapped, and
+         * before any of its rseq regions can run.
+         */
+        ma->flags |= MODULE_RSEQ_DEFERRED;
+        return;
     }
+    if (rseq_enabled)
+        rseq_process_module(ma);
+}
+
+void
+rseq_module_executed(app_pc pc)
+{
+    os_get_module_info_lock();
+    module_area_t *ma = module_pc_lookup(pc);
+    bool deferred = ma != NULL && TESTANY(MODULE_RSEQ_DEFERRED, ma->flags);
+    os_get_module_info_unlock();
+    if (!deferred)
+        return;
+    /* The trigger lock orders this against rseq_locate_rseq_regions(), which skips
+     * deferred modules: each module is processed once, by whichever comes second.
+     */
+    d_r_mutex_lock(&rseq_trigger_lock);
+    os_get_module_info_write_lock();
+    ma = module_pc_lookup(pc);
+    if (ma != NULL && TESTANY(MODULE_RSEQ_DEFERRED, ma->flags)) {
+        ma->flags &= ~MODULE_RSEQ_DEFERRED;
+        LOG(GLOBAL, LOG_LOADER, 2, "%s: %s first executes at " PFX "\n", __FUNCTION__,
+            GET_MODULE_NAME(&ma->names) == NULL ? "(null)" : GET_MODULE_NAME(&ma->names),
+            pc);
+        if (rseq_enabled)
+            rseq_process_module(ma);
+    }
+    os_get_module_info_write_unlock();
+    d_r_mutex_unlock(&rseq_trigger_lock);
 }
 
 void

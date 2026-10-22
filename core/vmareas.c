@@ -7505,6 +7505,60 @@ allow_xfer_for_frag_flags(dcontext_t *dcontext, app_pc pc, uint src_flags, uint 
     return allow;
 }
 
+#ifdef LINUX
+/* Returns whether a block starting at tag that reaches pc must end before pc, at an
+ * rseq region's start or end, and sets *exited_rseq if it would end at an endpoint.
+ * Sets FRAG_STARTS_RSEQ_REGION in *flags if tag starts a region, and lowers *stop
+ * (if non-NULL) so the block is checked again before the next boundary.  A block's
+ * first instruction is never a stop: callers only stop at later ones.
+ */
+bool
+vm_area_rseq_boundary(app_pc tag, app_pc pc, uint *flags, app_pc *stop,
+                      bool *exited_rseq DR_PARAM_OUT)
+{
+    *exited_rseq = false;
+    if (vmvector_empty(d_r_rseq_areas))
+        return false;
+    /* XXX i#3798: While for core operation we do not need to end a block at
+     * an rseq endpoint, we need clients to treat the endpoint as a barrier and
+     * restore app state (which we do have DR_NOTE_REG_BARRIER for) and we
+     * prefer to simplify the block as much as we can.
+     * Similarly, we don't really need to not have a block span the start
+     * of an rseq region.  But, we need to save app values at the start, which
+     * is best done prior to drreg storing them elsewhere; plus, it makes it
+     * easier to turn on full_decode for simpler mangling.
+     */
+    bool entered_rseq = false;
+    app_pc rseq_start, next_boundary = NULL;
+    if (vmvector_lookup_data(d_r_rseq_areas, pc, &rseq_start, &next_boundary, NULL)) {
+        if (rseq_start > tag)
+            entered_rseq = true;
+        else if (tag == rseq_start)
+            *flags |= FRAG_STARTS_RSEQ_REGION;
+    } else {
+        app_pc prev_end;
+        if (vmvector_lookup_prev_next(d_r_rseq_areas, pc, NULL, &prev_end, &next_boundary,
+                                      NULL)) {
+            if (tag < prev_end) {
+                /* Avoiding instructions after the rseq endpoint simplifies
+                 * drmemtrace and other clients when the native rseq execution
+                 * aborts, and shrinks the block with the large native rseq
+                 * mangling.
+                 */
+                *exited_rseq = true;
+            }
+            if (prev_end == pc)
+                next_boundary = prev_end;
+        }
+    }
+    if (stop != NULL && next_boundary != NULL && next_boundary < *stop) {
+        /* Ensure we check again before we hit a boundary. */
+        *stop = next_boundary;
+    }
+    return entered_rseq || *exited_rseq || pc == next_boundary;
+}
+#endif
+
 /* check origins of code for several purposes:
  * 1) we need list of areas where this thread's fragments come
  *    from, for faster flushing on munmaps
@@ -7629,6 +7683,12 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
          * whether it is an unseen module here.
          */
         os_check_new_app_module(dcontext, pc);
+#endif
+#ifdef LINUX
+        /* A module the app maps has its rseq tables read when it first executes
+         * (see rseq_module_init()).
+         */
+        rseq_module_executed(pc);
 #endif
         /* i#884: module load event is now on first execution */
         instrument_module_load_trigger(pc);
@@ -8457,51 +8517,13 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
             *stop = local_area->end;
         ASSERT(*stop != NULL);
 #ifdef LINUX
-        if (!vmvector_empty(d_r_rseq_areas)) {
-            /* XXX i#3798: While for core operation we do not need to end a block at
-             * an rseq endpoint, we need clients to treat the endpoint as a barrier and
-             * restore app state (which we do have DR_NOTE_REG_BARRIER for) and we
-             * prefer to simplify the block as much as we can.
-             * Similarly, we don't really need to not have a block span the start
-             * of an rseq region.  But, we need to save app values at the start, which
-             * is best done prior to drreg storing them elsewhere; plus, it makes it
-             * easier to turn on full_decode for simpler mangling.
-             */
-            bool entered_rseq = false, exited_rseq = false;
-            app_pc rseq_start, next_boundary = NULL;
-            if (vmvector_lookup_data(d_r_rseq_areas, pc, &rseq_start, &next_boundary,
-                                     NULL)) {
-                if (rseq_start > tag)
-                    entered_rseq = true;
-                else if (tag == rseq_start)
-                    *flags |= FRAG_STARTS_RSEQ_REGION;
-            } else {
-                app_pc prev_end;
-                if (vmvector_lookup_prev_next(d_r_rseq_areas, pc, NULL, &prev_end,
-                                              &next_boundary, NULL)) {
-                    if (tag < prev_end) {
-                        /* Avoiding instructions after the rseq endpoint simplifies
-                         * drmemtrace and other clients when the native rseq execution
-                         * aborts, and shrinks the block with the large native rseq
-                         * mangling.
-                         */
-                        exited_rseq = true;
-                    }
-                    if (prev_end == pc)
-                        next_boundary = prev_end;
-                }
-            }
-            if (next_boundary != NULL && next_boundary < *stop) {
-                /* Ensure we check again before we hit a boundary. */
-                *stop = next_boundary;
-            }
-            if (xfer && (entered_rseq || exited_rseq || pc == next_boundary)) {
-                LOG(THREAD, LOG_VMAREAS | LOG_INTERP, 3,
-                    "Stopping bb at rseq boundary " PFX "\n", pc);
-                if (exited_rseq)
-                    *flags |= FRAG_HAS_RSEQ_ENDPOINT;
-                result = false;
-            }
+        bool exited_rseq;
+        if (vm_area_rseq_boundary(tag, pc, flags, stop, &exited_rseq) && xfer) {
+            LOG(THREAD, LOG_VMAREAS | LOG_INTERP, 3,
+                "Stopping bb at rseq boundary " PFX "\n", pc);
+            if (exited_rseq)
+                *flags |= FRAG_HAS_RSEQ_ENDPOINT;
+            result = false;
         }
 #endif
         LOG(THREAD, LOG_INTERP | LOG_VMAREAS, 4,

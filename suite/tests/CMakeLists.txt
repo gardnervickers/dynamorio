@@ -5743,6 +5743,29 @@ if (UNIX)
     tobuild(linux.rseq_noarray linux/rseq.cpp)
     append_property_list(TARGET linux.rseq_noarray
       COMPILE_DEFINITIONS "RSEQ_TEST_USE_NO_ARRAY")
+    # glibc 2.35+ registers rseq from ld.so, before relocating the executable, and
+    # 2.41+ does so in static TLS.  linux.rseq runs with glibc's registration here;
+    # test reading the tables with the other ways of relocating them too: RELA,
+    # whose addends GNU ld also leaves in place but lld does not, and RELR.
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-fuse-ld=lld")
+    check_c_source_compiles("int main(void) { return 0; }" rseq_lld_avail)
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,-z,pack-relative-relocs,--fatal-warnings")
+    check_c_source_compiles("int main(void) { return 0; }" rseq_relr_avail)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    if (rseq_lld_avail)
+      tobuild(linux.rseq_glibc_lld linux/rseq.cpp)
+      append_property_string(TARGET linux.rseq_glibc_lld LINK_FLAGS "-fuse-ld=lld")
+    endif ()
+    if (rseq_relr_avail)
+      tobuild(linux.rseq_glibc_relr linux/rseq.cpp)
+      append_property_string(TARGET linux.rseq_glibc_relr LINK_FLAGS
+        "-Wl,-z,pack-relative-relocs")
+    endif ()
+    # A whole-file mapping of the executable, as libunwind makes, is not a module.
+    tobuild(linux.rseq_flatmap linux/rseq.cpp)
+    append_property_list(TARGET linux.rseq_flatmap
+      COMPILE_DEFINITIONS "RSEQ_TEST_FLAT_MAP")
     # Test attaching, which has a separate lazy rseq check.
     # We build with static DR to also test client interactions.
     tobuild_api(api.rseq linux/rseq.cpp "" "" OFF ON OFF)

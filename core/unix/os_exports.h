@@ -685,6 +685,10 @@ rseq_process_native_abort(dcontext_t *dcontext);
 void
 rseq_insert_start_label(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist);
 
+/* Called before building the first block in a region new to the thread. */
+void
+rseq_module_executed(app_pc pc);
+
 #endif
 
 /* Release a delayed shared-fragment exit before acknowledging a flush epoch.
