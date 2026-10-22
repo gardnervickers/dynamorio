@@ -84,6 +84,97 @@ test_fmov_general(void *dc)
     instr_destroy(dc, instr);
 }
 
+/* Reserved SVE/SVE2 encodings must neither be produced by the encoder nor accepted by
+ * the decoder.
+ */
+static void
+test_sve_reserved(void *dc)
+{
+    instr_t *instr;
+
+    /* Otherwise SVE encodings are not possible on hardware without SVE. */
+    enable_all_test_cpu_features();
+
+    /* Byte elements with LSL #8 (size:sh == 001) are reserved... */
+    instr = INSTR_CREATE_add_sve_shift(
+        dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_1),
+        opnd_create_immed_uint(1, OPSZ_1), opnd_create_immed_uint(8, OPSZ_1b));
+    ASSERT(!instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+    /* ...but not for larger elements. */
+    instr = INSTR_CREATE_add_sve_shift(
+        dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_2),
+        opnd_create_immed_uint(1, OPSZ_1), opnd_create_immed_uint(8, OPSZ_1b));
+    ASSERT(instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+
+    /* Scalar+scalar contiguous loads, stores and prefetches reserve Rm == 31 (XZR)... */
+    instr = INSTR_CREATE_ld1b_sve_pred(
+        dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_1),
+        opnd_create_predicate_reg(DR_REG_P0, false),
+        opnd_create_base_disp_aarch64(DR_REG_X0, DR_REG_XZR, DR_EXTEND_UXTX, 0, 0, 0,
+                                      OPSZ_1));
+    ASSERT(!instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+    /* ...except for the first-fault loads. */
+    instr = INSTR_CREATE_ldff1b_sve_pred(
+        dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_1),
+        opnd_create_predicate_reg(DR_REG_P0, false),
+        opnd_create_base_disp_aarch64(DR_REG_X0, DR_REG_XZR, DR_EXTEND_UXTX, 0, 0, 0,
+                                      OPSZ_1));
+    ASSERT(instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+
+    /* SVE ADR (vector) has no negated index or transfer size, and its index is
+     * scaled exactly when the shift amount is nonzero.
+     */
+    const opnd_t adr_ok = opnd_create_vector_base_disp_aarch64(
+        DR_REG_Z1, DR_REG_Z2, OPSZ_4, DR_EXTEND_UXTX, true, 0, 0, OPSZ_0, 1);
+    const opnd_t adr_bad[] = {
+        opnd_create_vector_base_disp_aarch64(DR_REG_Z1, DR_REG_Z2, OPSZ_4, DR_EXTEND_UXTX,
+                                             true, 0, DR_OPND_NEGATED, OPSZ_0, 1),
+        opnd_create_vector_base_disp_aarch64(DR_REG_Z1, DR_REG_Z2, OPSZ_4, DR_EXTEND_UXTX,
+                                             true, 0, 0, OPSZ_4, 1),
+        opnd_create_vector_base_disp_aarch64(DR_REG_Z1, DR_REG_Z2, OPSZ_4, DR_EXTEND_UXTX,
+                                             true, 0, 0, OPSZ_0, 0),
+    };
+    instr = INSTR_CREATE_adr_sve(dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_4),
+                                 adr_ok);
+    ASSERT(instr_is_encoding_possible(instr));
+    instr_destroy(dc, instr);
+    for (size_t i = 0; i < sizeof(adr_bad) / sizeof(adr_bad[0]); i++) {
+        instr = INSTR_CREATE_adr_sve(
+            dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_4), adr_bad[i]);
+        ASSERT(!instr_is_encoding_possible(instr));
+        instr_destroy(dc, instr);
+    }
+
+    static const uint reserved[] = {
+        0x2520e72c, /* add z12.b, z12.b, #57, lsl #8 */
+        0x05102209, /* cpy z9.b, p0/z, #16, lsl #8 */
+        0x2538e136, /* dup z22.b, #9, lsl #8 */
+        0xa41f4000, /* ld1b {z0.b}, p0/z, [x0, xzr] */
+        0xe41f4000, /* st1b {z0.b}, p0, [x0, xzr] */
+        0x841fc000, /* prfb pldl1keep, p0, [x0, xzr] */
+        0xa43f0000, /* ld1rob {z0.b}, p0/z, [x0, xzr] */
+        0x45384000, /* sqxtnb with tsize == 111 */
+        0x45806800, /* pmullb with size == 10 */
+    };
+    for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+        instr = instr_create(dc);
+        decode(dc, (byte *)&reserved[i], instr);
+        ASSERT(instr_get_opcode(instr) == OP_xx);
+        instr_destroy(dc, instr);
+    }
+
+    /* A zero Rm still decodes for ldff1b. */
+    static const uint ldff1b_xzr = 0xa41f6000; /* ldff1b {z0.b}, p0/z, [x0, xzr] */
+    instr = instr_create(dc);
+    decode(dc, (byte *)&ldff1b_xzr, instr);
+    ASSERT(instr_get_opcode(instr) == OP_ldff1b);
+    instr_destroy(dc, instr);
+}
+
 /* FEAT_MOPS encodings with overlapping registers, or with register number 31 other
  * than as a set's data register, are CONSTRAINED UNPREDICTABLE: they must decode as
  * OP_xx, and the encoder must not produce them.
@@ -146,6 +237,9 @@ main(int argc, char *argv[])
 
     test_fmov_general(dcontext);
     print("test_fmov_general complete\n");
+
+    test_sve_reserved(dcontext);
+    print("test_sve_reserved complete\n");
 
     test_mops_reserved(dcontext);
     print("test_mops_reserved complete\n");

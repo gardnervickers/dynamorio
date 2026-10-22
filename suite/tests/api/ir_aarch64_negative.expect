@@ -1,3 +1,4 @@
 test_fmov_general complete
+test_sve_reserved complete
 test_mops_reserved complete
 All tests complete
