@@ -257,6 +257,10 @@ typedef struct _thread_units_t {
     dcontext_t *dcontext; /* back pointer to owner */
     which_vmm_t which;
     bool writable; /* remember state of heap protection */
+    /* Set while a global heap is used under global_alloc_lock's mutex alone (see
+     * common_global_heap_alloc()): it must then not add or free units.
+     */
+    bool no_unit_changes;
 #ifdef HEAP_ACCOUNTING
     heap_acct_t acct;
 #endif
@@ -3493,6 +3497,25 @@ heap_vmareas_synch_units()
     release_recursive_lock(&global_alloc_lock);
 }
 
+/* In standalone mode no thread has DR TLS, so d_r_get_thread_id() is a system call,
+ * and acquire_recursive_lock() makes two (to check for and to record the owner).
+ * They were most of the cost of decoding with the shared library, as every IR
+ * allocation and free takes global_alloc_lock (static DR uses malloc instead).  So
+ * when the lock has no owner we first try under its mutex alone, recording none.
+ * This thread cannot hold the lock already: it would be the owner.  The attempt must
+ * not take the lock again or ask who owns it, which only adding or freeing units
+ * does (safe_to_allocate_or_free_heap_units()), so there it fails instead and we
+ * retry with the recursive lock.  No thread id is cached, so ids stay right across
+ * fork and clone, in signal handlers, and in threads without DR TLS.  (An app signal
+ * handler that interrupts the attempt and allocates now waits for the mutex, where it
+ * used to reenter the heap mid-update: standalone mode supports neither.)
+ */
+static inline bool
+global_alloc_lock_unowned(void)
+{
+    return ATOMIC_READ_THREAD_ID(&global_alloc_lock.owner) == INVALID_THREAD_ID;
+}
+
 /* shared between global and global_unprotected */
 static void *
 common_global_heap_alloc(thread_units_t *tu, size_t size HEAPACCT(which_heap_t which))
@@ -3508,6 +3531,15 @@ common_global_heap_alloc(thread_units_t *tu, size_t size HEAPACCT(which_heap_t w
     }
 #endif
     void *p;
+    if (standalone_library && global_alloc_lock_unowned()) {
+        d_r_mutex_lock(&global_alloc_lock.lock);
+        tu->no_unit_changes = true;
+        p = common_heap_alloc(tu, size HEAPACCT(which));
+        tu->no_unit_changes = false;
+        d_r_mutex_unlock(&global_alloc_lock.lock);
+        if (p != NULL)
+            return p;
+    }
     acquire_recursive_lock(&global_alloc_lock);
     p = common_heap_alloc(tu, size HEAPACCT(which));
     release_recursive_lock(&global_alloc_lock);
@@ -3547,6 +3579,15 @@ common_global_heap_free(thread_units_t *tu, void *p,
         return;
     }
 
+    if (standalone_library && global_alloc_lock_unowned()) {
+        d_r_mutex_lock(&global_alloc_lock.lock);
+        tu->no_unit_changes = true;
+        ok = common_heap_free(tu, p, size HEAPACCT(which));
+        tu->no_unit_changes = false;
+        d_r_mutex_unlock(&global_alloc_lock.lock);
+        if (ok)
+            return;
+    }
     acquire_recursive_lock(&global_alloc_lock);
     ok = common_heap_free(tu, p, size HEAPACCT(which));
     release_recursive_lock(&global_alloc_lock);
@@ -3832,6 +3873,7 @@ threadunits_init(dcontext_t *dcontext, thread_units_t *tu, size_t size, bool rea
 {
     int i;
     DODEBUG({ tu->num_units = 0; });
+    tu->no_unit_changes = false;
     tu->which = VMM_HEAP | (reachable ? VMM_REACHABLE : 0);
     if (dcontext != GLOBAL_DCONTEXT) {
         /* Tradeoff (i#4424): no guard pages on per-thread units, to
@@ -4234,7 +4276,7 @@ common_heap_alloc(thread_units_t *tu, size_t size HEAPACCT(which_heap_t which))
         size_t unit_size = ALIGN_FORWARD(size + sizeof(heap_unit_t), PAGE_SIZE);
         ASSERT(size < unit_size && "overflow");
 
-        if (!safe_to_allocate_or_free_heap_units()) {
+        if (tu->no_unit_changes || !safe_to_allocate_or_free_heap_units()) {
             /* circular dependence solution: we need to hold DR lock before
              * global alloc lock -- so we back out, grab it, and then come back
              */
@@ -4336,7 +4378,7 @@ common_heap_alloc(thread_units_t *tu, size_t size HEAPACCT(which_heap_t which))
             POINTER_OVERFLOW_ON_ADD(u->cur_pc, alloc_size) /*xref PR 495961*/) {
             /* We either have to extend the current unit or, failing that,
              * allocate a new unit. */
-            if (!safe_to_allocate_or_free_heap_units()) {
+            if (tu->no_unit_changes || !safe_to_allocate_or_free_heap_units()) {
                 /* circular dependence solution: we need to hold dynamo areas
                  * lock before global alloc lock in case we end up adding a new
                  * unit or we hit oom (which may free units) while extending
@@ -4573,7 +4615,7 @@ common_heap_free(thread_units_t *tu, void *p_void,
         });
 #endif
 
-        if (!safe_to_allocate_or_free_heap_units()) {
+        if (tu->no_unit_changes || !safe_to_allocate_or_free_heap_units()) {
             /* circular dependence solution: we need to hold DR lock before
              * global alloc lock -- so we back out, grab it, and then come back
              */

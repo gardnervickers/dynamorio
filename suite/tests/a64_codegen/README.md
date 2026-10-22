@@ -10,6 +10,7 @@ Each test prints benchmark lines, which are never compared, and fails only on a 
 | Test | What it does |
 | --- | --- |
 | `api.a64_codegen_ir` | Decode, encode and flags queries over libc's executable text and over pseudo-random words |
+| `api.a64_codegen_ir_shared` | The same with the shared `libdynamorio.so`, in standalone mode, as offline decoders use DR |
 | `api.a64_codegen_build` | Builds and runs chains of distinct blocks under static DR, in one child per client mode and DR option set |
 | `api.a64_codegen_scale` | The same binary in its scaling mode: whether the cost per block grows as the code cache does, and how far a flush of one line reaches |
 | `api.a64_codegen_patch` | The same binary patching a block across a page boundary while other threads run it: no stale code |
@@ -49,7 +50,7 @@ Every application instruction in a block goes through the following IR work:
 
 Words the decoder does not know (`OP_xx`) are counted, not checked. The libc corpus is libc's whole executable segment, which also holds its symbol and relocation tables, `.rodata` and `.eh_frame`, so almost all of its `OP_xx` words are data. The `guard libc executable sections` line counts the words and `OP_xx` words of the executable sections alone (`.plt`, `.text`), found from libc's section headers. `-list-xx` prints each `OP_xx` word there with its offset in libc, to compare with `llvm-objdump -d --mattr=+all`.
 
-The instructions are made with the drcontext of a thread DR has set up (`dr_app_setup()`), as in block building. `-standalone` uses `dr_standalone_init()` instead.
+The instructions are made with the drcontext of a thread DR has set up (`dr_app_setup()`), as in block building. `-standalone` uses `dr_standalone_init()` instead, as `api.a64_codegen_ir_shared` does. Under static DR, standalone mode's global heap is libc's malloc. With the shared library it is DR's own heap, whose lock was costly there (see PROGRESS.md).
 
 ## api.a64_codegen_build
 

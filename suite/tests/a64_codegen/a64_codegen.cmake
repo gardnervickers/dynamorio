@@ -49,6 +49,11 @@ endif ()
 # thread's drcontext.
 tobuild_api(api.a64_codegen_ir api/a64_codegen_ir.c "" "${a64_codegen_ir_ops}"
   OFF ON OFF)
+# The same with the shared library in standalone mode, as offline decoders use it.
+set(a64_codegen_ir_shared_ops -standalone ${a64_codegen_ir_ops})
+tobuild_api(api.a64_codegen_ir_shared api/a64_codegen_ir.c ""
+  "${a64_codegen_ir_shared_ops}" OFF OFF OFF)
+set(api.a64_codegen_ir_shared_timeout ${api.a64_codegen_ir_timeout})
 
 # Building and running chains of blocks under static DR, in a child per client
 # mode and DR option set.
@@ -125,10 +130,12 @@ endif ()
 torunonly_api(api.a64_codegen_ibl api.a64_codegen_build api/a64_codegen_build.c ""
   "${a64_codegen_ibl_ops}" OFF OFF)
 
-set(a64_codegen_testnames api.a64_codegen_ir api.a64_codegen_build
-  api.a64_codegen_scale api.a64_codegen_patch api.a64_codegen_ibl)
+set(a64_codegen_testnames api.a64_codegen_ir api.a64_codegen_ir_shared
+  api.a64_codegen_build api.a64_codegen_scale api.a64_codegen_patch
+  api.a64_codegen_ibl)
 add_custom_target(a64_codegen_tests)
-add_dependencies(a64_codegen_tests api.a64_codegen_ir api.a64_codegen_build)
+add_dependencies(a64_codegen_tests api.a64_codegen_ir api.a64_codegen_ir_shared
+  api.a64_codegen_build)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/client.a64_cleancall_ool.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/client.a64_mops.cmake")

@@ -83,10 +83,10 @@
  *
  * The instructions are made with the drcontext of a thread DR has set up
  * (dr_app_setup(), without starting to run it), as in block building.
- * -standalone uses dr_standalone_init() instead.  (With the shared
- * libdynamorio.so, standalone decoding was 20x slower: every heap allocation
- * and free takes the global heap's recursive lock, whose owner check calls
- * d_r_get_thread_id(), a gettid system call when the thread has no DR TLS.)
+ * -standalone uses dr_standalone_init() instead, as api.a64_codegen_ir_shared
+ * does with the shared libdynamorio.so.  (Standalone decoding there was 20x
+ * slower until the global heap stopped taking its recursive lock, whose owner
+ * check is a gettid system call without DR TLS, for most allocations and frees.)
  *
  * Usage: api.a64_codegen_ir [-reps N] [-random N] [-bench-only|-guard-only]
  *                           [-standalone] [-list-xx]
