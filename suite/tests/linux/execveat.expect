@@ -1,0 +1,20 @@
+parent is running under DynamoRIO
+child memfd is running under DynamoRIO
+child vfork memfd is running under DynamoRIO
+child O_PATH fd is running under DynamoRIO
+child dirfd is running under DynamoRIO
+child vfork dirfd is running under DynamoRIO
+child nofollow is running under DynamoRIO
+child absolute is running under DynamoRIO
+execveat missing failed with No such file or directory
+execveat empty path failed with No such file or directory
+execveat bad flags failed with Invalid argument
+execveat bad fd failed with Bad file descriptor
+execveat directory failed with Permission denied
+execveat nofollow failed with Too many levels of symbolic links
+execveat nofollow dirfd failed with Too many levels of symbolic links
+execveat too big failed with Argument list too long
+parent is still running under DynamoRIO
+execveat cloexec script failed with No such file or directory
+script from /dev/fd is running under DynamoRIO
+all done

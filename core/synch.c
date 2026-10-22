@@ -307,12 +307,18 @@ is_after_or_restarted_do_syscall(dcontext_t *dcontext, app_pc pc, bool check_vsy
 bool
 is_at_do_syscall(dcontext_t *dcontext, app_pc pc, byte *esp)
 {
+#ifdef WINDOWS
+    /* Only Windows looks at the stack.  Elsewhere it need not be readable: a
+     * fault can have the app's sp in a guard page (a stack overflow), or at the
+     * very top of its mapping.
+     */
     app_pc buf[2];
     bool res = d_r_safe_read(esp, sizeof(buf), buf);
     if (!res) {
         ASSERT(res); /* we expect the stack to always be readable */
         return false;
     }
+#endif
 
     if (does_syscall_ret_to_callsite()) {
 #ifdef WINDOWS

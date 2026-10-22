@@ -1,0 +1,4 @@
+parent execs the memfd
+loop done
+client: main module is a memfd
+client: counted the loop

@@ -3080,6 +3080,8 @@ os_process_under_dynamorio_complete(dcontext_t *dcontext)
 void
 os_process_not_under_dynamorio(dcontext_t *dcontext)
 {
+    /* The app may now change its mappings without our seeing it. */
+    IF_NO_MEMQUERY(memcache_mark_stale());
     /* We only support regular process-wide signal handlers for mixed-mode control. */
     signal_remove_handlers(dcontext);
     unhook_vsyscall();
@@ -5402,6 +5404,9 @@ ignorable_system_call_normalized(int num)
     case SYS_prctl:
 #endif
     case SYS_execve:
+#ifdef SYS_execveat
+    case SYS_execveat:
+#endif
 #ifdef LINUX
     case SYS_clone3:
     case SYS_clone:
@@ -6511,6 +6516,127 @@ static const char *const env_to_propagate[] = {
 };
 #define NUM_ENV_TO_PROPAGATE (sizeof(env_to_propagate) / sizeof(env_to_propagate[0]))
 
+#ifdef SYS_execveat
+#    define IS_EXECVEAT(dc) ((dc)->sys_num == SYS_execveat)
+#    ifndef O_PATH
+#        define O_PATH 010000000
+#    endif
+#    ifndef AT_EMPTY_PATH
+#        define AT_EMPTY_PATH 0x1000
+#    endif
+#else
+#    define IS_EXECVEAT(dc) false
+#endif
+
+/* Returns the number of SYS_execve's parameter execve_num in the current syscall,
+ * which may be SYS_execveat: that takes a dirfd before the path, argv and envp,
+ * and flags after them.
+ */
+static inline int
+execve_param_num(dcontext_t *dcontext, int execve_num)
+{
+    return IS_EXECVEAT(dcontext) ? execve_num + 1 : execve_num;
+}
+
+/* The target of a SYS_execve or SYS_execveat. */
+typedef struct _execve_target_t {
+    /* The path to open the target by.  For SYS_execveat of an fd (AT_EMPTY_PATH),
+     * a path relative to a dirfd, or with AT_SYMLINK_NOFOLLOW, this is fd_path,
+     * the /proc path of exe_fd: otherwise it is the app's path.
+     */
+    const char *fname;
+    /* The file the kernel would exec, as a DR fd that is not close-on-exec, or
+     * INVALID_FILE.  The app's fd is often close-on-exec (a memfd, e.g.), yet
+     * when we exec libdynamorio.so its loader must open the target after the exec.
+     */
+    file_t exe_fd;
+    char fd_path[32];
+} execve_target_t;
+
+#ifdef SYS_execveat
+/* Resolves the target of SYS_execveat as the kernel does (alloc_bprm() and
+ * do_open_execat()).  Returns false if we expect the kernel to fail the syscall,
+ * leaving target->fname as the app's path for logging.
+ */
+static bool
+execveat_resolve(dcontext_t *dcontext, execve_target_t *target)
+{
+    int dirfd = (int)sys_param(dcontext, 0);
+    const char *path = (const char *)sys_param(dcontext, 1);
+    int flags = (int)sys_param(dcontext, 4);
+    file_t fd, priv_fd;
+    char first;
+    target->fname = path;
+    target->exe_fd = INVALID_FILE;
+    if (!d_r_safe_read(path, sizeof(first), &first))
+        return false; /* EFAULT */
+    if (TESTANY(~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH), flags))
+        return false; /* EINVAL */
+    if ((dirfd == AT_FDCWD || first == '/') && first != '\0' &&
+        !TESTANY(AT_SYMLINK_NOFOLLOW, flags)) {
+        /* The same as SYS_execve. */
+        return true;
+    }
+    if (first == '\0') {
+        if (!TESTANY(AT_EMPTY_PATH, flags))
+            return false; /* ENOENT */
+        fd = dirfd;
+    } else {
+        /* O_PATH needs no read permission and, unlike O_RDONLY, does not block on
+         * a fifo.  With O_NOFOLLOW a symlink is opened itself: opening it again
+         * through /proc to check its ELF header then fails with ELOOP, as the exec
+         * would natively.
+         */
+        fd = dynamorio_syscall(
+            SYS_openat, 4, dirfd, path,
+            O_PATH | (TESTANY(AT_SYMLINK_NOFOLLOW, flags) ? O_NOFOLLOW : 0), 0);
+        if (fd < 0)
+            return false;
+    }
+    /* F_DUPFD clears FD_CLOEXEC.  We do not add the fd to fd_table, which a vfork
+     * child shares with its parent though it has its own fds.
+     */
+    priv_fd = fd_priv_dup(fd);
+    if (priv_fd < 0)
+        priv_fd = fcntl_syscall(fd, F_DUPFD, 0);
+    if (fd != dirfd)
+        close_syscall(fd);
+    if (priv_fd < 0)
+        return false; /* EBADF, or too many fds for an exec to succeed */
+    target->exe_fd = priv_fd;
+    snprintf(target->fd_path, BUFFER_SIZE_ELEMENTS(target->fd_path), "/proc/self/fd/%d",
+             priv_fd);
+    NULL_TERMINATE_BUFFER(target->fd_path);
+    target->fname = target->fd_path;
+    return true;
+}
+
+/* Writes prefix followed by the name the kernel gives the target of SYS_execveat
+ * (bprm->filename: /dev/fd/<dirfd>[/<path>] for a dirfd) into buf, if not NULL.
+ * Returns the size buf needs, including the null.
+ */
+static size_t
+execveat_kernel_filename(dcontext_t *dcontext, const char *prefix, char *buf, size_t size)
+{
+    int dirfd = (int)sys_param(dcontext, 0);
+    const char *path = (const char *)sys_param(dcontext, 1);
+    char fd_name[32] = "";
+    size_t len;
+    if (dirfd != AT_FDCWD && path[0] != '/') {
+        snprintf(fd_name, BUFFER_SIZE_ELEMENTS(fd_name), "/dev/fd/%d%s", dirfd,
+                 path[0] == '\0' ? "" : "/");
+        NULL_TERMINATE_BUFFER(fd_name);
+    }
+    len = strlen(prefix) + strlen(fd_name) + strlen(path) + 1;
+    if (buf != NULL) {
+        ASSERT(size >= len);
+        snprintf(buf, len, "%s%s%s", prefix, fd_name, path);
+        buf[len - 1] = '\0';
+    }
+    return len;
+}
+#endif
+
 /* Called at pre-SYS_execve to append DR vars in the target process env vars list.
  * For late injection via libdrpreload, we call this for *all children, because
  * even if -no_follow_children is specified, a allowlist will still ask for takeover
@@ -6521,9 +6647,11 @@ static const char *const env_to_propagate[] = {
  * config dir takes precedence (if the child clears the HOME env var, e.g.).
  */
 static void
-add_dr_env_vars(dcontext_t *dcontext, char *inject_library_path, const char *app_path)
+add_dr_env_vars(dcontext_t *dcontext, char *inject_library_path, const char *app_path,
+                file_t exe_fd)
 {
-    char **envp = (char **)sys_param(dcontext, 2);
+    int envp_num = execve_param_num(dcontext, 2);
+    char **envp = (char **)sys_param(dcontext, envp_num);
     int idx, j, preload = -1, ldpath = -1;
     int num_old, num_new, sz;
     bool need_var[NUM_ENV_TO_PROPAGATE];
@@ -6593,6 +6721,7 @@ add_dr_env_vars(dcontext_t *dcontext, char *inject_library_path, const char *app
     num_old = idx;
     /* how many new env vars we need add */
     num_new = 2 + /* execve indicator var plus final NULL */
+        (exe_fd != INVALID_FILE ? 1 : 0) +
         (DYNAMO_OPTION(early_inject)
              ? 0
              : (((preload < 0) ? 1 : 0) + ((ldpath < 0) ? 1 : 0)));
@@ -6721,6 +6850,24 @@ add_dr_env_vars(dcontext_t *dcontext, char *inject_library_path, const char *app
         }
     }
 
+#ifdef SYS_execveat
+    if (exe_fd != INVALID_FILE) {
+        /* The loader in the new image closes exe_fd once it has mapped the app,
+         * and gives the app the kernel's name for it.
+         * handle_execve_post() frees by strlen() so we size the var exactly.
+         */
+        char prefix[sizeof(DYNAMORIO_VAR_EXE_FD) + 13 /* '=' + int + ':' */];
+        snprintf(prefix, BUFFER_SIZE_ELEMENTS(prefix), "%s=%d:", DYNAMORIO_VAR_EXE_FD,
+                 exe_fd);
+        NULL_TERMINATE_BUFFER(prefix);
+        sz = (int)execveat_kernel_filename(dcontext, prefix, NULL, 0);
+        var = heap_alloc(dcontext, sizeof(char) * sz HEAPACCT(ACCT_OTHER));
+        execveat_kernel_filename(dcontext, prefix, var, sz);
+        new_envp[idx++] = var;
+        LOG(THREAD, LOG_SYSCALLS, 2, "\tnew env %d: %s\n", idx - 1, new_envp[idx - 1]);
+    }
+#endif
+
     sz = strlen(DYNAMORIO_VAR_EXECVE) + 4;
     /* we always pass this var to indicate "post-execve" */
     var = heap_alloc(dcontext, sizeof(char) * sz HEAPACCT(ACCT_OTHER));
@@ -6736,7 +6883,7 @@ add_dr_env_vars(dcontext_t *dcontext, char *inject_library_path, const char *app
     ASSERT((num_new + num_old) == idx);
 
     /* update syscall param */
-    *sys_param_addr(dcontext, 2) = (reg_t)new_envp; /* OUT */
+    *sys_param_addr(dcontext, envp_num) = (reg_t)new_envp; /* OUT */
     /* store for reset in case execve fails, and for cleanup if
      * this is a vfork thread
      */
@@ -6786,15 +6933,18 @@ script_file_reader(const char *pathname, void *buf, size_t count)
  * reverts to the original syscall arguments and execs the script.
  */
 static int
-handle_execve_script(dcontext_t *dcontext)
+handle_execve_script(dcontext_t *dcontext, execve_target_t *target,
+                     bool *is_script /* OUT */)
 {
-    char *fname = (char *)sys_param(dcontext, 0);
-    char **orig_argv = (char **)sys_param(dcontext, 1);
+    /* The name the interpreter is passed for the script. */
+    char *fname = (char *)target->fname;
+    char **orig_argv = (char **)sys_param(dcontext, execve_param_num(dcontext, 1));
     script_interpreter_t *script;
     int ret = 0;
 
+    *is_script = false;
     script = global_heap_alloc(sizeof(*script) HEAPACCT(ACCT_OTHER));
-    if (!find_script_interpreter(script, fname, script_file_reader))
+    if (!find_script_interpreter(script, target->fname, script_file_reader))
         goto free_and_return;
 
     if (script->argc == 0) {
@@ -6812,7 +6962,29 @@ handle_execve_script(dcontext_t *dcontext)
             os_close(file);
             goto free_and_return;
         }
+        os_close(file);
     }
+
+#ifdef SYS_execveat
+    if (IS_EXECVEAT(dcontext) && target->exe_fd != INVALID_FILE) {
+        /* The kernel names a script exec'd via a dirfd /dev/fd/<dirfd>[/<path>].
+         * If dirfd is close-on-exec that name is inaccessible to the interpreter so
+         * the kernel fails the exec, with ENOENT.
+         */
+        int dirfd = (int)sys_param(dcontext, 0);
+        const char *path = (const char *)sys_param(dcontext, 1);
+        size_t sz = execveat_kernel_filename(dcontext, "", NULL, 0);
+        if (dirfd != AT_FDCWD && path[0] != '/') {
+            int fd_flags = fcntl_syscall(dirfd, F_GETFD, 0);
+            if (fd_flags < 0 || TESTANY(FD_CLOEXEC, fd_flags)) {
+                ret = ENOENT;
+                goto free_and_return;
+            }
+        }
+        fname = global_heap_alloc(sz HEAPACCT(ACCT_OTHER));
+        execveat_kernel_filename(dcontext, "", fname, sz);
+    }
+#endif
 
     {
         size_t i, orig_argc = 0;
@@ -6833,9 +7005,19 @@ handle_execve_script(dcontext_t *dcontext)
         new_argv[script->argc + orig_argc] = NULL;
 
         /* Modify syscall parameters. */
-        *sys_param_addr(dcontext, 0) = (reg_t)new_argv[0];
-        *sys_param_addr(dcontext, 1) = (reg_t)new_argv;
+        *sys_param_addr(dcontext, execve_param_num(dcontext, 0)) = (reg_t)new_argv[0];
+        *sys_param_addr(dcontext, execve_param_num(dcontext, 1)) = (reg_t)new_argv;
+#ifdef SYS_execveat
+        if (IS_EXECVEAT(dcontext)) {
+            /* The kernel looks up the interpreter as for SYS_execve.  As for the
+             * other parameters (i#2091), we do not restore these if the exec fails.
+             */
+            *sys_param_addr(dcontext, 0) = (reg_t)AT_FDCWD;
+            *sys_param_addr(dcontext, 4) = 0;
+        }
+#endif
     }
+    *is_script = true;
     return 0;
 
 free_and_return:
@@ -6872,9 +7054,16 @@ handle_execve(dcontext_t *dcontext)
      * set across execve: going to ignore for now
      */
     char *fname;
+    /* The target's name for config lookup and logging. */
+    const char *app_name;
+#ifdef SYS_execveat
+    char link_buf[MAXIMUM_PATH];
+#endif
+    execve_target_t target;
+    int path_num = execve_param_num(dcontext, 0);
     bool x64 = IF_X64_ELSE(true, false);
     bool expect_to_fail UNUSED = false;
-    bool should_inject;
+    bool should_inject, redirect = false;
     file_t file;
     char *inject_library_path;
     char rununder_buf[16]; /* just an integer printed in ascii */
@@ -6883,15 +7072,43 @@ handle_execve(dcontext_t *dcontext)
     const char **argv;
 #endif
 
-    if (DYNAMO_OPTION(follow_children) && DYNAMO_OPTION(early_inject)) {
-        int ret = handle_execve_script(dcontext);
+    target.fname = (const char *)sys_param(dcontext, path_num);
+    target.exe_fd = INVALID_FILE;
+    dcontext->sys_param2 = (reg_t)INVALID_FILE; /* no fd to close in post */
+#ifdef SYS_execveat
+    if (IS_EXECVEAT(dcontext) && !execveat_resolve(dcontext, &target))
+        expect_to_fail = true;
+#endif
+
+    if (DYNAMO_OPTION(follow_children) && DYNAMO_OPTION(early_inject) &&
+        !expect_to_fail) {
+        bool is_script;
+        int ret = handle_execve_script(dcontext, &target, &is_script);
+        if (is_script || ret != 0) {
+            /* The target is now the interpreter, by path. */
+            if (target.exe_fd != INVALID_FILE)
+                close_syscall(target.exe_fd);
+            target.exe_fd = INVALID_FILE;
+            target.fname = (const char *)sys_param(dcontext, path_num);
+        }
         if (ret != 0)
             return ret;
     }
 
-    fname = (char *)sys_param(dcontext, 0);
+    fname = (char *)target.fname;
+    app_name = fname;
+#ifdef SYS_execveat
+    if (target.exe_fd != INVALID_FILE) {
+        ssize_t len = dynamorio_syscall(SYS_readlinkat, 4, AT_FDCWD, fname, link_buf,
+                                        BUFFER_SIZE_ELEMENTS(link_buf) - 1);
+        if (len > 0) {
+            link_buf[len] = '\0';
+            app_name = link_buf;
+        }
+    }
+#endif
 #if defined(LINUX) || defined(DEBUG)
-    argv = (const char **)sys_param(dcontext, 1);
+    argv = (const char **)sys_param(dcontext, execve_param_num(dcontext, 1));
 #endif
 
 #ifdef LINUX
@@ -6900,6 +7117,7 @@ handle_execve(dcontext_t *dcontext)
          * the right thing here.
          */
         fname = get_application_name();
+        app_name = fname;
     }
 #endif
 
@@ -6911,9 +7129,10 @@ handle_execve(dcontext_t *dcontext)
         "\n");
     DODEBUG({
         int i;
-        SYSLOG_INTERNAL_INFO("-- execve %s --", fname);
-        LOG(THREAD, LOG_SYSCALLS, 1, "syscall: execve %s\n", fname);
-        LOG(GLOBAL, LOG_TOP | LOG_SYSCALLS, 1, "execve %s\n", fname);
+        const char *sysname = IS_EXECVEAT(dcontext) ? "execveat" : "execve";
+        SYSLOG_INTERNAL_INFO("-- %s %s --", sysname, app_name);
+        LOG(THREAD, LOG_SYSCALLS, 1, "syscall: %s %s (%s)\n", sysname, app_name, fname);
+        LOG(GLOBAL, LOG_TOP | LOG_SYSCALLS, 1, "%s %s\n", sysname, app_name);
         if (d_r_stats->loglevel >= 3) {
             if (argv == NULL) {
                 LOG(THREAD, LOG_SYSCALLS, 3, "\targs are NULL\n");
@@ -6947,6 +7166,8 @@ handle_execve(dcontext_t *dcontext)
     /* no way we can inject, we just lose control */
     SYSLOG_INTERNAL_WARNING("WARNING: static DynamoRIO library, losing control on "
                             "execve");
+    if (target.exe_fd != INVALID_FILE)
+        close_syscall(target.exe_fd);
     return 0;
 #endif
 
@@ -6954,8 +7175,10 @@ handle_execve(dcontext_t *dcontext)
     /* Inspection is required to follow exec. Resource exhaustion must not turn
      * a successful exec into an uninstrumented child.
      */
-    file = open_syscall(fname, O_RDONLY, 0);
+    file = expect_to_fail ? INVALID_FILE : open_syscall(fname, O_RDONLY, 0);
     if (file == -EMFILE || file == -ENFILE) {
+        if (target.exe_fd != INVALID_FILE)
+            close_syscall(target.exe_fd);
         mark_thread_execve(dcontext->thread_record, false);
         return -file;
     }
@@ -6970,7 +7193,7 @@ handle_execve(dcontext_t *dcontext)
         IF_X64_ELSE(x64, !x64) ? dynamorio_library_path : dynamorio_alt_arch_path;
 
     should_inject = DYNAMO_OPTION(follow_children);
-    if (get_config_val_other_app(get_short_name(fname), get_process_id(),
+    if (get_config_val_other_app(get_short_name(app_name), get_process_id(),
                                  x64 ? DR_PLATFORM_64BIT : DR_PLATFORM_32BIT,
                                  DYNAMORIO_VAR_RUNUNDER, rununder_buf,
                                  BUFFER_SIZE_ELEMENTS(rununder_buf), &app_specific,
@@ -6980,35 +7203,55 @@ handle_execve(dcontext_t *dcontext)
             should_inject = rununder_on;
     }
 
+#ifdef LINUX
+    /* We have to be accurate with expect_to_fail as we cannot come back
+     * and fail the syscall once the kernel execs DR!
+     */
+    redirect = should_inject && DYNAMO_OPTION(early_inject) && !expect_to_fail;
+#endif
+    if (!redirect && target.exe_fd != INVALID_FILE) {
+        /* The kernel execs the app's target itself. */
+        close_syscall(target.exe_fd);
+        target.exe_fd = INVALID_FILE;
+    }
+    /* Closed in post if the exec fails. */
+    dcontext->sys_param2 = (reg_t)target.exe_fd;
+
     if (should_inject)
-        add_dr_env_vars(dcontext, inject_library_path, fname);
+        add_dr_env_vars(dcontext, inject_library_path, fname, target.exe_fd);
     else {
         dcontext->sys_param0 = 0;
         dcontext->sys_param1 = 0;
     }
 
 #ifdef LINUX
-    /* We have to be accurate with expect_to_fail as we cannot come back
-     * and fail the syscall once the kernel execs DR!
-     */
-    if (should_inject && DYNAMO_OPTION(early_inject) && !expect_to_fail) {
-        /* i#909: change the target image to libdynamorio.so */
+    if (redirect) {
+        /* i#909: change the target image to libdynamorio.so.  For SYS_execveat
+         * that path is absolute, so the kernel ignores the dirfd and AT_EMPTY_PATH,
+         * and it is not a symlink (it is from /proc/self/maps), so it ignores
+         * AT_SYMLINK_NOFOLLOW.  We thus need only change the path.
+         */
         const char *drpath = IF_X64_ELSE(x64, !x64) ? dynamorio_library_filepath
                                                     : dynamorio_alt_arch_filepath;
         TRY_EXCEPT(
             dcontext, /* try */
             {
-                if (symlink_is_self_exe(argv[0])) {
-                    /* we're out of sys_param entries so we assume argv[0] == fname
+                /* fname must outlive us here if we put it in argv[0]: it does unless
+                 * it is target.fd_path.
+                 */
+                if (target.exe_fd == INVALID_FILE && symlink_is_self_exe(argv[0])) {
+                    /* we're out of sys_param entries so we assume argv[0] == the
+                     * app's path
                      */
                     dcontext->sys_param3 = (reg_t)argv;
                     argv[0] = fname; /* XXX: handle readable but not writable! */
                 } else
-                    dcontext->sys_param3 = 0;        /* no restore in post */
-                dcontext->sys_param4 = (reg_t)fname; /* store for restore in post */
-                *sys_param_addr(dcontext, 0) = (reg_t)drpath;
+                    dcontext->sys_param3 = 0; /* no restore in post */
+                /* store for restore in post */
+                dcontext->sys_param4 = sys_param(dcontext, path_num);
+                *sys_param_addr(dcontext, path_num) = (reg_t)drpath;
                 LOG(THREAD, LOG_SYSCALLS, 2, "actual execve on: %s\n",
-                    (char *)sys_param(dcontext, 0));
+                    (char *)sys_param(dcontext, path_num));
             },
             /* except */
             {
@@ -7046,8 +7289,12 @@ handle_execve_post(dcontext_t *dcontext)
 #endif
 #ifdef LINUX
     if (dcontext->sys_param4 != 0) {
-        /* restore original /proc/.../exe */
-        *sys_param_addr(dcontext, 0) = dcontext->sys_param4;
+        /* Restore the original path, unless it is in the register the kernel
+         * returns the result in.
+         */
+        int path_num = execve_param_num(dcontext, 0);
+        if (IF_X86_ELSE(true, path_num != 0))
+            *sys_param_addr(dcontext, path_num) = dcontext->sys_param4;
         if (dcontext->sys_param3 != 0) {
             /* restore original argv[0] */
             const char **argv = (const char **)dcontext->sys_param3;
@@ -7071,7 +7318,7 @@ handle_execve_post(dcontext_t *dcontext)
         heap_free(dcontext, new_envp, sizeof(char *) * i HEAPACCT(ACCT_OTHER));
         /* restore prev envp if we're post-syscall */
         if (!dcontext->thread_record->execve)
-            *sys_param_addr(dcontext, 2) = (reg_t)old_envp;
+            *sys_param_addr(dcontext, execve_param_num(dcontext, 2)) = (reg_t)old_envp;
     }
 }
 
@@ -7650,15 +7897,28 @@ os_switch_seg_to_context(dcontext_t *dcontext, reg_id_t seg, bool to_app)
              */
             app_mem_valid = false;
         } else {
-            uint prot;
-            bool rc = get_memory_info(os_tls->app_lib_tls_base, NULL, NULL, &prot);
             /* Rule out a garbage value, which happens in our own test
              * common.allasm_aarch_isa.
              * Also rule out an unwritable region, which seems to happen on arm
              * where at process init the thread reg points at rodata in libc
              * until properly set to a writable mmap later.
+             * Neither query reads the memory there (it could raise SIGBUS beyond
+             * the end of a mapped file, and sig_detach() calls us with SIGBUS
+             * blocked): the memory cache, on a miss or at -checklevel 2, asks the
+             * OS only for bounds and protection.  We use the cache, which avoids
+             * reading /proc/self/maps on every thread creation, unless it may lack
+             * changes the app made while native, before
+             * os_process_under_dynamorio_complete() rebuilds it.
+             * Either query may take memory_info_buf_lock.
              */
-            if (!rc || !TESTALL(MEMPROT_READ | MEMPROT_WRITE, prot))
+            uint prot;
+            bool ok;
+            if (IF_MEMQUERY_ELSE(false, memcache_up_to_date())) {
+                ok = get_memory_info(os_tls->app_lib_tls_base, NULL, NULL, &prot);
+            } else {
+                ok = get_memory_info_from_os(os_tls->app_lib_tls_base, NULL, NULL, &prot);
+            }
+            if (!ok || !TESTALL(MEMPROT_READ | MEMPROT_WRITE, prot))
                 app_mem_valid = false;
         }
         if (!app_mem_valid) {
@@ -8513,7 +8773,11 @@ pre_system_call(dcontext_t *dcontext)
     }
 #endif
 
-    case SYS_execve: {
+    case SYS_execve:
+#ifdef SYS_execveat
+    case SYS_execveat:
+#endif
+    {
         int ret = handle_execve(dcontext);
         if (ret != 0) {
             execute_syscall = false;
@@ -10223,12 +10487,22 @@ post_system_call(dcontext_t *dcontext)
     }
 #endif
 
-    case SYS_execve: {
+    case SYS_execve:
+#ifdef SYS_execveat
+    case SYS_execveat:
+#endif
+    {
         /* if we get here it means execve failed (doesn't return on success) */
         success = false;
         mark_thread_execve(dcontext->thread_record, false);
         ASSERT(result < 0);
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: execve failed\n");
+        /* Only here, in the thread that made the syscall, do we close the fd
+         * handle_execve() opened: a vfork parent's handle_execve_post() of its
+         * child must not close an fd in its own fd table.
+         */
+        if ((file_t)dcontext->sys_param2 != INVALID_FILE)
+            close_syscall((file_t)dcontext->sys_param2);
         handle_execve_post(dcontext);
         signal_sync_kernel_mask(dcontext);
         /* Don't 'break' as we have an ASSERT(success) just below
@@ -11261,13 +11535,10 @@ get_memory_info(const byte *pc, byte **base_pc, size_t *size,
                 uint *prot /* OUT optional, returns MEMPROT_* value */)
 {
     dr_mem_info_t info;
-    if (is_vmm_reserved_address((byte *)pc, 1, NULL, NULL)) {
-        if (!query_memory_ex_from_os(pc, &info) || info.type == DR_MEMTYPE_FREE)
-            return false;
-    } else {
-        if (!query_memory_ex(pc, &info) || info.type == DR_MEMTYPE_FREE)
-            return false;
-    }
+    if (is_vmm_reserved_address((byte *)pc, 1, NULL, NULL))
+        return get_memory_info_from_os(pc, base_pc, size, prot);
+    if (!query_memory_ex(pc, &info) || info.type == DR_MEMTYPE_FREE)
+        return false;
     if (base_pc != NULL)
         *base_pc = info.base_pc;
     if (size != NULL)
@@ -11313,12 +11584,23 @@ query_memory_ex_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info)
     return res;
 }
 
+/* Unlike query_memory_ex_from_os(), this does not classify the region as image or
+ * data, so it reads only the OS's mapping metadata and never the memory itself
+ * (looking for an ELF header there raises SIGBUS beyond the end of a mapped file).
+ * Returns false for an unmapped address, but true for a mapped PROT_NONE region.
+ */
 bool
 get_memory_info_from_os(const byte *pc, byte **base_pc, size_t *size,
                         uint *prot /* OUT optional, returns MEMPROT_* value */)
 {
     dr_mem_info_t info;
-    if (!query_memory_ex_from_os(pc, &info) || info.type == DR_MEMTYPE_FREE)
+    bool have_type = false;
+    if (!memquery_from_os(pc, &info, &have_type))
+        return false;
+    /* memquery_from_os() succeeds for an unmapped address too, giving the free
+     * interval around it the type DR_MEMTYPE_FREE; it gives no type for a mapping.
+     */
+    if (have_type && info.type == DR_MEMTYPE_FREE)
         return false;
     if (base_pc != NULL)
         *base_pc = info.base_pc;

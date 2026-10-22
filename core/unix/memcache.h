@@ -42,6 +42,17 @@ memcache_exit(void);
 bool
 memcache_initialized(void);
 
+/* Whether the cache is initialized and has seen every change the app made to its
+ * mappings: false from dr_app_setup(), or from the process going native
+ * (memcache_mark_stale()), until memcache_update_all_from_os() rebuilds it.  When
+ * this is false, a cache hit may be out of date.
+ */
+bool
+memcache_up_to_date(void);
+
+void
+memcache_mark_stale(void);
+
 void
 memcache_lock(void);
 

@@ -63,6 +63,7 @@
 #include <dlfcn.h>  /* dlopen/dlsym */
 #include <unistd.h> /* __environ */
 #include <stddef.h> /* offsetof */
+#include <errno.h>  /* EINTR, ENOENT */
 
 extern size_t
 wcslen(const wchar_t *str); /* in string.c */
@@ -136,6 +137,25 @@ static char gdb_priv_cmds[4096];
 static size_t gdb_priv_cmds_sofar;
 #endif
 
+#if defined(LINUX) && defined(AARCH64)
+/* For redirect_getauxval(): a copy of the auxiliary vector, the number of entries
+ * before its AT_NULL, and whether we got a complete copy.
+ */
+#    define PRIVLOAD_AUXV_MAX 64
+static ELF_AUXV_TYPE privload_auxv[PRIVLOAD_AUXV_MAX];
+static uint privload_auxv_num;
+static bool privload_auxv_complete;
+/* Early injection's vector on the initial stack, which privload_setup_auxv() made
+ * describe the app, until we have copied it: NULL afterward and in every other
+ * mode.
+ */
+static ELF_AUXV_TYPE *privload_initial_auxv;
+/* The private libc's __errno_location(), for redirect_getauxval(). */
+static int *(*privload_libc_errno_loc)(void);
+/* The private libc's sysconf(), for redirect_sysconf(). */
+static long (*privload_libc_sysconf)(int);
+#endif
+
 /* pointing to the I/O data structure in privately loaded libc,
  * They are used on exit when we need update file_no.
  */
@@ -180,6 +200,11 @@ privload_mod_tls_init(privmod_t *mod);
 
 void
 privload_mod_tls_primary_thread_init(privmod_t *mod);
+#endif
+
+#if defined(LINUX) && defined(AARCH64)
+static void
+privload_snapshot_auxv(void);
 #endif
 
 /***************************************************************************/
@@ -247,6 +272,9 @@ os_loader_init_prologue(void)
     ASSERT_OWN_RECURSIVE_LOCK(true, &privload_lock);
 
     privload_init_search_paths();
+#if defined(LINUX) && defined(AARCH64)
+    privload_snapshot_auxv();
+#endif
 #ifndef STATIC_LIBRARY
     /* insert libdynamorio.so */
     mod = privload_insert(NULL, get_dynamorio_dll_start(),
@@ -332,6 +360,11 @@ os_loader_exit(void)
                        PROTECTED);
     }
 
+#if defined(LINUX) && defined(AARCH64)
+    /* The private libc is gone: a re-attach loads it again. */
+    privload_libc_errno_loc = NULL;
+    privload_libc_sysconf = NULL;
+#endif
 #ifdef LINUX
     /* Put printed_gdb_commands into its original state for potential
      * re-attaching and os_loader_init_epilogue().
@@ -703,6 +736,12 @@ privload_os_finalize(privmod_t *privmod)
                                                            LIBC_STDIN_NAME, NULL);
     privmod_stderr = (FILE **)get_proc_address_from_os_data(
         &opd->os_data, opd->load_delta, LIBC_STDERR_NAME, NULL);
+#    ifdef AARCH64
+    privload_libc_errno_loc = (int *(*)(void))get_proc_address_from_os_data(
+        &opd->os_data, opd->load_delta, "__errno_location", NULL);
+    privload_libc_sysconf = (long (*)(int))get_proc_address_from_os_data(
+        &opd->os_data, opd->load_delta, "sysconf", NULL);
+#    endif
     /* i#5133: glibc 2.32+ has ld.so call a hardcoded initializer before calling the
      * regular ELF constructors.
      */
@@ -1541,6 +1580,200 @@ redirect_dl_iterate_phdr_app(int (*callback)(struct dl_phdr_info *info, size_t s
     return res;
 }
 
+#endif /* LINUX */
+
+#if defined(LINUX) && defined(AARCH64)
+/* Copies a vector up to and excluding its AT_NULL into privload_auxv.  Returns
+ * false if there is no AT_NULL within PRIVLOAD_AUXV_MAX entries.  The source must
+ * be readable for that many entries or up to its AT_NULL.
+ */
+static bool
+privload_copy_auxv(const ELF_AUXV_TYPE *src)
+{
+    for (uint i = 0; i < PRIVLOAD_AUXV_MAX; i++) {
+        if (src[i].a_type == AT_NULL) {
+            privload_auxv_num = i;
+            return true;
+        }
+        privload_auxv[i] = src[i];
+    }
+    return false;
+}
+
+/* Reads the kernel's copy of the vector from /proc/self/auxv into privload_auxv. */
+static bool
+privload_read_proc_auxv(void)
+{
+    file_t fd = os_open("/proc/self/auxv", OS_OPEN_READ);
+    if (fd == INVALID_FILE)
+        return false;
+    byte *buf = (byte *)privload_auxv;
+    size_t got = 0;
+    while (got < sizeof(privload_auxv)) {
+        ssize_t len = os_read(fd, buf + got, sizeof(privload_auxv) - got);
+        if (len == -EINTR)
+            continue;
+        if (len <= 0)
+            break;
+        got += len;
+    }
+    os_close(fd);
+    for (uint i = 0; i < got / sizeof(privload_auxv[0]); i++) {
+        if (privload_auxv[i].a_type == AT_NULL) {
+            privload_auxv_num = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Copies the auxiliary vector for redirect_getauxval(), before any private
+ * library's initializer runs.  Under early injection we take the initial stack's
+ * vector, which privload_setup_auxv() has already made describe the app, while the
+ * kernel's copy in /proc/self/auxv still describes our own image (AT_ENTRY,
+ * AT_PHDR, AT_BASE, AT_EXECFN).  In every other mode (late injection, attach,
+ * dr_app_setup(), static DR) we cannot tell whether our environment is still the
+ * initial stack's with the vector after it (attach uses a two-entry fake one), so
+ * we use /proc/self/auxv.
+ * The vector does not change for the life of the process, so we keep a complete
+ * copy across a detach and a later re-attach, by which time the app may have
+ * reused its initial stack: we read that stack only once.
+ */
+static void
+privload_snapshot_auxv(void)
+{
+    if (privload_auxv_complete) {
+        LOG(GLOBAL, LOG_LOADER, 2, "%s: keeping %u auxv entries\n", __FUNCTION__,
+            privload_auxv_num);
+        return;
+    }
+    const char *source = "procfs";
+    privload_auxv_num = 0;
+    if (privload_initial_auxv != NULL) {
+        privload_auxv_complete = privload_copy_auxv(privload_initial_auxv);
+        privload_initial_auxv = NULL;
+        if (privload_auxv_complete)
+            source = "the stack";
+    }
+    if (!privload_auxv_complete)
+        privload_auxv_complete = privload_read_proc_auxv();
+    if (!privload_auxv_complete) {
+        privload_auxv_num = 0;
+        SYSLOG_INTERNAL_WARNING("Failed to read the auxiliary vector: private "
+                                "libraries' getauxval() will find no entries");
+    }
+    LOG(GLOBAL, LOG_LOADER, 2, "%s: %u auxv entries from %s%s\n", __FUNCTION__,
+        privload_auxv_num, source, privload_auxv_complete ? "" : " (failed)");
+}
+
+/* Sets the private libc's errno, as our redirected libc routines must.  The
+ * private libc finds errno through the thread register, so we only do so while
+ * that holds the private TLS, as it does when a private library calls us.
+ */
+static void
+privload_set_libc_errno(int val)
+{
+    if (privload_libc_errno_loc == NULL)
+        return;
+    void *priv_tls = os_get_priv_tls_base(NULL, TLS_REG_LIB);
+    if (priv_tls == NULL || (void *)read_thread_register(TLS_REG_LIB) != priv_tls)
+        return;
+    int *loc = (*privload_libc_errno_loc)();
+    if (loc != NULL)
+        *loc = val;
+}
+
+/* A private libc never runs ld.so's startup code, so GLRO(dl_auxv) in the private
+ * ld.so stays NULL and glibc's getauxval() dereferences it for any type other
+ * than AT_HWCAP and AT_HWCAP2, which it reads from GLRO fields that are themselves
+ * left zero.  libgcc_s from gcc 16 calls getauxval(AT_HWCAP3) from its AArch64
+ * cpu-feature constructor, which then crashed.  We answer from a copy of the real
+ * vector instead, with glibc's contract: a missing type returns 0 and sets errno
+ * to ENOENT, and a found one leaves errno alone.  AT_HWCAP and AT_HWCAP2 are
+ * always found, as glibc reads them from loader fields: 0 if the kernel did not
+ * supply them.
+ * We only do this on AArch64, where glibc's AT_HWCAP and AT_HWCAP2 are the
+ * kernel's values.  On x86, for one, glibc reports its own bits for AT_HWCAP.
+ * XXX: This is not a general initialization of the private ld.so and libc from
+ * the vector.  Still unset are GLRO(dl_minsigstacksize) (zero: redirect_sysconf()
+ * covers the three sysconf() names that assert on it, but not libc's internal
+ * uses), GLRO(dl_pagesize) (the compiled-in EXEC_PAGESIZE, which a private
+ * getpagesize() or sysconf(_SC_PAGESIZE) returns), the GLRO hwcap fields that
+ * libc's own cpu feature setup reads,
+ * __libc_enable_secure (AT_SECURE) and the tunables.  And we only intercept
+ * imports by name: libc's internal calls to its hidden __getauxval and
+ * __getauxval2 still read GLRO(dl_auxv).
+ */
+static unsigned long
+redirect_getauxval(unsigned long type)
+{
+    for (uint i = 0; i < privload_auxv_num; i++) {
+        if (privload_auxv[i].a_type == type)
+            return (unsigned long)privload_auxv[i].a_un.a_val;
+    }
+    if (type != AT_HWCAP && type != AT_HWCAP2)
+        privload_set_libc_errno(ENOENT);
+    return 0;
+}
+
+#    ifndef AT_MINSIGSTKSZ
+#        define AT_MINSIGSTKSZ 51
+#    endif
+#    ifndef _SC_MINSIGSTKSZ
+#        define _SC_MINSIGSTKSZ 249
+#    endif
+#    ifndef _SC_SIGSTKSZ
+#        define _SC_SIGSTKSZ 250
+#    endif
+#    ifndef _SC_THREAD_STACK_MIN
+#        define _SC_THREAD_STACK_MIN 75
+#    endif
+/* The kernel's arm64 MINSIGSTKSZ and SIGSTKSZ, which glibc uses as its constants,
+ * and glibc's aarch64 PTHREAD_STACK_MIN.
+ */
+#    define PRIVLOAD_ARM64_MINSIGSTKSZ 5120
+#    define PRIVLOAD_ARM64_SIGSTKSZ 16384
+#    define PRIVLOAD_ARM64_PTHREAD_STACK_MIN 131072
+
+/* The private ld.so's GLRO(dl_minsigstacksize) is also left zero (see
+ * redirect_getauxval()), and glibc's sysconf() asserts that it is not for
+ * _SC_MINSIGSTKSZ, _SC_SIGSTKSZ and _SC_THREAD_STACK_MIN.  Since glibc 2.34,
+ * SIGSTKSZ, MINSIGSTKSZ and PTHREAD_STACK_MIN are sysconf() calls under
+ * _GNU_SOURCE (which C++ defines), so a client sizing a signal or thread stack
+ * with them aborted:
+ *   Fatal glibc error: ../sysdeps/unix/sysv/linux/sysconf-sigstksz.h:25
+ *   (sysconf_sigstksz): assertion failed: minsigstacksize != 0
+ * We answer those three as glibc does on AArch64, with dl_minsigstacksize as
+ * AT_MINSIGSTKSZ (glibc's 5120 if absent), and pass every other name, including
+ * _SC_PAGESIZE (see above), to the private libc.
+ */
+static long
+redirect_sysconf(int name)
+{
+    if (name == _SC_MINSIGSTKSZ || name == _SC_SIGSTKSZ || name == _SC_THREAD_STACK_MIN) {
+        long minsig = 0;
+        for (uint i = 0; i < privload_auxv_num; i++) {
+            if (privload_auxv[i].a_type == AT_MINSIGSTKSZ)
+                minsig = (long)privload_auxv[i].a_un.a_val;
+        }
+        if (minsig == 0)
+            minsig = PRIVLOAD_ARM64_MINSIGSTKSZ;
+        if (name == _SC_MINSIGSTKSZ)
+            return minsig;
+        if (name == _SC_THREAD_STACK_MIN)
+            return MAX(minsig, PRIVLOAD_ARM64_PTHREAD_STACK_MIN);
+        long size = MAX(minsig, PRIVLOAD_ARM64_MINSIGSTKSZ) * 4;
+        return MAX(size, PRIVLOAD_ARM64_SIGSTKSZ);
+    }
+    if (privload_libc_sysconf == NULL) {
+        privload_set_libc_errno(EINVAL);
+        return -1;
+    }
+    return (*privload_libc_sysconf)(name);
+}
+#endif /* LINUX && AARCH64 */
+
+#ifdef LINUX
 #    if defined(ARM) && !defined(ANDROID)
 typedef struct _unwind_callback_data_t {
     void *pc;
@@ -1644,6 +1877,14 @@ static const redirect_import_t redirect_imports[] = {
     /* i#1717: C++ exceptions call this */
     { "dl_iterate_phdr", (app_pc)redirect_dl_iterate_phdr,
       (app_pc)redirect_dl_iterate_phdr_app },
+#    ifdef AARCH64
+    /* A private libc's getauxval() crashes: see redirect_getauxval(). */
+    { "getauxval", (app_pc)redirect_getauxval },
+    { "__getauxval", (app_pc)redirect_getauxval },
+    /* A private libc's sysconf() asserts for these: see redirect_sysconf(). */
+    { "sysconf", (app_pc)redirect_sysconf },
+    { "__sysconf", (app_pc)redirect_sysconf },
+#    endif
 #    if defined(ARM) && !defined(ANDROID)
     /* i#1717: C++ exceptions call this on ARM Linux */
     { "__gnu_Unwind_Find_exidx", (app_pc)redirect___gnu_Unwind_Find_exidx },
@@ -1746,6 +1987,9 @@ privload_setup_auxv(char **envp, app_pc map, ptr_int_t delta, app_pc interp_map,
     while (*envp != NULL)
         envp++;
     auxv = (ELF_AUXV_TYPE *)(envp + 1);
+#        ifdef AARCH64
+    privload_initial_auxv = auxv;
+#        endif
 
     /* fix up the auxv entries that refer to the executable */
     for (; auxv->a_type != AT_NULL; auxv++) {
@@ -2152,7 +2396,11 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
     char **envp = argv + *argc + 1;
     app_pc entry = NULL;
     char *exe_path;
-    char *exe_basename;
+    /* The kernel's name for the app, for AT_EXECFN and our PR_SET_NAME. */
+    const char *execfn;
+    const char *exe_fd_str;
+    const char *exe_basename;
+    char comm[16];
     app_pc exe_map, exe_end;
     elf_loader_t exe_ld;
     const char *interp;
@@ -2296,6 +2544,23 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
              "Failed to load application.  "
              "Check path and architecture.");
     ASSERT(is_elf_so_header(exe_map, 0));
+    /* For SYS_execveat of an fd or a dirfd-relative path, the parent passed the
+     * app as a /proc/self/fd/ path of an fd it made survive the exec, which we
+     * no longer need now that the app is mapped, followed by the kernel's name for
+     * the app.  We do this after any reload_dynamorio() above, which reads
+     * exe_path again.
+     */
+    execfn = exe_path;
+    exe_fd_str = getenv(DYNAMORIO_VAR_EXE_FD);
+    if (exe_fd_str != NULL) {
+        int exe_fd;
+        if (sscanf(exe_fd_str, "%d", &exe_fd) == 1 && exe_fd >= 0)
+            os_close(exe_fd);
+        if (strchr(exe_fd_str, ':') != NULL)
+            execfn = strchr(exe_fd_str, ':') + 1;
+        /* This leaves the value, which execfn points into, in place. */
+        disable_env(DYNAMORIO_VAR_EXE_FD);
+    }
 
     /* i#1660: the app may have passed a relative path or a symlink to execve,
      * yet the kernel will put a resolved path into /proc/self/maps.
@@ -2318,11 +2583,27 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
     /* Set the process name with prctl PR_SET_NAME.  This makes killall <app>
      * work.
      */
-    exe_basename = strrchr(exe_path, '/');
+    exe_basename = strrchr(execfn, '/');
     if (exe_basename == NULL) {
-        exe_basename = exe_path;
+        exe_basename = execfn;
     } else {
         exe_basename++;
+    }
+    if (exe_fd_str != NULL && strncmp(execfn, "/dev/fd/", 8) == 0 &&
+        strchr(execfn + 8, '/') == NULL) {
+        /* The kernel names the exec of an fd itself (AT_EMPTY_PATH) by its file:
+         * a memfd's is "memfd:<name>", shown as "/memfd:<name> (deleted)" in maps.
+         */
+        const char *deleted;
+        size_t len;
+        exe_basename = strrchr(get_application_name(), '/');
+        exe_basename = exe_basename == NULL ? get_application_name() : exe_basename + 1;
+        deleted = strstr(exe_basename, " (deleted)");
+        len = deleted == NULL ? strlen(exe_basename) : deleted - exe_basename;
+        len = MIN(len, BUFFER_SIZE_ELEMENTS(comm) - 1);
+        memcpy(comm, exe_basename, len);
+        comm[len] = '\0';
+        exe_basename = comm;
     }
     dynamorio_syscall(SYS_prctl, 5, PR_SET_NAME, (ptr_uint_t)exe_basename, 0, 0, 0);
 
@@ -2368,7 +2649,7 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
         entry = (app_pc)exe_ld.ehdr->e_entry + exe_ld.load_delta;
     }
 
-    privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, exe_path);
+    privload_setup_auxv(envp, exe_map, exe_ld.load_delta, interp_map, execfn);
 
     /* The kernel set up this stack for our own ELF, whose PT_GNU_STACK asks for
      * no execute permission.  If the app's asks for an executable stack (e.g.,
