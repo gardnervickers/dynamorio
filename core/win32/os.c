@@ -8765,6 +8765,12 @@ wait_for_event(event_t e, int timeout_ms)
     return os_wait_event(e, timeout_ms, false, NULL, NULL);
 }
 
+bool
+os_timer_counter_readable(void)
+{
+    return true;
+}
+
 timestamp_t
 get_timer_frequency()
 {

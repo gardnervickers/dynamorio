@@ -541,6 +541,20 @@ dr_insert_restore_fpstate(void *drcontext, instrlist_t *ilist, instr_t *where, o
 uint64
 proc_get_timestamp(void)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
-    return 0;
+    uint64 ticks;
+    RDTSC_LL(ticks);
+    return ticks;
+}
+
+uint64
+proc_get_timestamp_frequency(void)
+{
+    uint64 hz;
+    /* EL0 can read CNTFRQ_EL0 when it can read the virtual counter, which Linux
+     * normally allows (directly, or by trapping and emulating the read) but a
+     * thread can deny itself: see os_timer_counter_readable(), which callers check
+     * first.
+     */
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(hz));
+    return hz;
 }

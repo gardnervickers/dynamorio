@@ -348,6 +348,11 @@ emit_detach_callback_final_jmp(dcontext_t *dcontext,
 
 uint64
 proc_get_timestamp(void);
+#ifdef AARCH64
+/* Returns the frequency, in Hz, of the counter proc_get_timestamp() reads. */
+uint64
+proc_get_timestamp_frequency(void);
+#endif
 
 #ifdef WINDOWS
 #    define RDTSC_LL(var) (var = __rdtsc())
@@ -386,9 +391,17 @@ get_stack_ptr(void);
 #        define GET_STACK_PTR(var) \
             asm("mov %%" IF_X64_ELSE("rsp", "esp") ", %0" : "=m"(var))
 #    elif defined(DR_HOST_AARCH64)
-#        define RDTSC_LL(llval)                 \
-            do {                                \
-                (llval) = proc_get_timestamp(); \
+/* The generic timer's virtual count, which is the same on every core.  It can be
+ * read speculatively and out of order with other instructions: the ISB keeps the
+ * read after the code it times, and the "memory" clobber keeps the compiler from
+ * moving memory accesses across it.
+ */
+#        define RDTSC_LL(llval)                                  \
+            do {                                                 \
+                __asm__ __volatile__("isb\n\tmrs %0, cntvct_el0" \
+                                     : "=r"(llval)               \
+                                     :                           \
+                                     : "memory");                \
             } while (0)
 
 #        define GET_FRAME_PTR(var) __asm__ __volatile__("mov %0, x29" : "=r"(var))

@@ -225,6 +225,21 @@ char **our_environ;
 #    define SYSNUM_EXIT_THREAD SYS_exit
 #endif
 
+#if defined(LINUX) && defined(AARCH64)
+/* prctl(PR_SET_TSC) can deny a thread the counter that KSTATS reads (see
+ * os_timer_counter_readable()).
+ */
+#    ifndef PR_GET_TSC
+#        define PR_GET_TSC 25
+#    endif
+#    ifndef PR_SET_TSC
+#        define PR_SET_TSC 26
+#    endif
+#    ifndef PR_TSC_ENABLE
+#        define PR_TSC_ENABLE 1
+#    endif
+#endif
+
 #ifdef ANDROID
 /* Custom prctl flags specific to Android (xref i#1861) */
 #    define PR_SET_VMA 0x53564d41
@@ -1300,9 +1315,40 @@ get_timer_frequency_cpuinfo(void)
     return cpu_mhz * 1000 + cpu_khz;
 }
 
+bool
+os_timer_counter_readable(void)
+{
+#if defined(AARCH64) && defined(LINUX)
+    /* Linux lets EL0 read CNTVCT_EL0 and CNTFRQ_EL0, directly or (for timer
+     * errata) by trapping and emulating the reads, unless the thread has asked
+     * with prctl(PR_SET_TSC, PR_TSC_SIGSEGV) for the reads to raise SIGSEGV, as
+     * record-and-replay tools do.  We trust only an answer from PR_GET_TSC: kernels
+     * before 6.12 have no such prctl on AArch64 (and always allow the reads), but a
+     * seccomp filter can make it fail too, after the thread disabled the counter.
+     * (KSTATS then needs a 6.12 kernel.)  A thread that disables the counter later
+     * stops its kstats first (pre_system_call()).
+     */
+    int mode = 0;
+    return dynamorio_syscall(SYS_prctl, 2, (ptr_uint_t)PR_GET_TSC, (ptr_uint_t)&mode) ==
+        0 &&
+        mode == PR_TSC_ENABLE;
+#else
+    return true;
+#endif
+}
+
 timestamp_t
 get_timer_frequency()
 {
+#ifdef AARCH64
+    /* proc_get_timestamp() counts at the generic timer's frequency rather than
+     * the CPU's, and /proc/cpuinfo has no "cpu MHz" line here.  The caller checks
+     * that the thread can read the counter (os_timer_counter_readable()).
+     */
+    uint64 hz = proc_get_timestamp_frequency();
+    if (hz >= 1000)
+        return hz / 1000;
+#endif
 #ifdef VMX86_SERVER
     if (os_in_vmkernel_userworld()) {
         return vmk_get_timer_frequency();
@@ -5373,6 +5419,11 @@ os_normalized_sysnum(int num_raw, instr_t *gateway, dcontext_t *dcontext)
 static bool
 ignorable_system_call_normalized(int num)
 {
+#if defined(KSTATS) && defined(LINUX) && defined(AARCH64)
+    /* A prctl(PR_SET_TSC) can make the counter our kstats read fault. */
+    if (num == SYS_prctl && DYNAMO_OPTION(kstats))
+        return false;
+#endif
     switch (num) {
 #if defined(SYS_exit_group)
     case SYS_exit_group:
@@ -8370,6 +8421,18 @@ pre_system_call(dcontext_t *dcontext)
     os_syscall_save_app_args(dcontext);
 #    endif
     os_syscall_restart_pre(dcontext);
+#endif
+
+#if defined(KSTATS) && defined(LINUX) && defined(AARCH64)
+    /* prctl(PR_SET_TSC, PR_TSC_SIGSEGV) makes reading the counter fault in this
+     * thread (and the threads it creates after, which check for themselves in
+     * kstat_thread_init()).  Stop its kstats before the syscall, as the next kstat
+     * after it would read the counter.  For good: we do not resume them if the
+     * syscall fails or the thread enables the counter again.
+     */
+    if (dcontext->sys_num == SYS_prctl && (int)sys_param(dcontext, 0) == PR_SET_TSC &&
+        sys_param(dcontext, 1) != PR_TSC_ENABLE)
+        kstat_thread_stop(dcontext);
 #endif
 
     switch (dcontext->sys_num) {

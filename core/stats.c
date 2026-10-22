@@ -181,18 +181,28 @@ kstats_thread_logfile_name(void)
 void
 kstat_init()
 {
+    /* Without -kstats nothing reads the counter, and we must not either: the app
+     * may have made reading it fault (os_timer_counter_readable()).
+     */
+    if (!DYNAMO_OPTION(kstats))
+        return;
+    /* XXX: There is no check for TSC feature and whether CR4.TSD is set
+     * so we can read it at CPL 3
+     */
+    if (!os_timer_counter_readable()) {
+        SYSLOG_INTERNAL_WARNING("-kstats disabled: this thread may not be able to "
+                                "read the timestamp counter");
+        options_make_writable();
+        dynamo_options.kstats = false;
+        options_restore_readonly();
+        return;
+    }
+
     kstat_frequency_per_msec = get_timer_frequency();
     kstat_ignore_context_switch = KSTAT_OUTLIER_THRESHOLD_MS * kstat_frequency_per_msec;
 
     LOG(GLOBAL, LOG_STATS, 1, "Processor speed: " UINT64_FORMAT_STRING "MHz\n",
         kstat_frequency_per_msec / 1000);
-
-    /* FIXME: There is no check for TSC feature and whether CR4.TSD is set
-     * so we can read it at CPL 3
-     */
-
-    if (!DYNAMO_OPTION(kstats))
-        return;
 
     kstat_init_variables(&process_kstats);
 #    ifdef DEBUG
@@ -253,6 +263,11 @@ kstat_thread_init(dcontext_t *dcontext)
     thread_kstats_t *new_thread_kstats;
     if (!DYNAMO_OPTION(kstats))
         return; /* dcontext->thread_kstats stays NULL */
+    /* A thread that may not be able to read the counter is not timed. */
+    if (!os_timer_counter_readable()) {
+        LOG(THREAD, LOG_STATS, 1, "kstats off: thread cannot read the counter\n");
+        return;
+    }
 
     /* allocated on thread heap - use global if timing initialization matters */
     new_thread_kstats =
@@ -350,16 +365,13 @@ kstats_dump_stack(dcontext_t *dcontext)
 }
 #    endif
 
-void
-kstat_thread_exit(dcontext_t *dcontext)
+/* Reports and frees dcontext's thread kstats, merging them into the process's,
+ * without reading the counter.
+ */
+static void
+kstat_thread_release(dcontext_t *dcontext)
 {
     thread_kstats_t *old_thread_kstats = dcontext->thread_kstats;
-    if (old_thread_kstats == NULL)
-        return;
-    LOG(THREAD, LOG_ALL, 2, "kstat_thread_exit: kstats stack is:\n");
-    DOLOG(2, LOG_STATS, { kstats_dump_stack(dcontext); });
-    KSTOP_DC(dcontext, thread_measured);
-    ASSERT(old_thread_kstats->stack_kstats.depth == 1);
     dump_thread_kstats(dcontext);
 
     /* a good time to combine all of these with the global statistics */
@@ -374,6 +386,35 @@ kstat_thread_exit(dcontext_t *dcontext)
     dcontext->thread_kstats = NULL;
     /* We need to free kstats even in non-debug b/c unprot local heap is global. */
     HEAP_TYPE_FREE(dcontext, old_thread_kstats, thread_kstats_t, ACCT_STATS, UNPROTECTED);
+}
+
+void
+kstat_thread_exit(dcontext_t *dcontext)
+{
+    thread_kstats_t *old_thread_kstats = dcontext->thread_kstats;
+    if (old_thread_kstats == NULL)
+        return;
+    LOG(THREAD, LOG_ALL, 2, "kstat_thread_exit: kstats stack is:\n");
+    DOLOG(2, LOG_STATS, { kstats_dump_stack(dcontext); });
+    KSTOP_DC(dcontext, thread_measured);
+    ASSERT(old_thread_kstats->stack_kstats.depth == 1);
+    kstat_thread_release(dcontext);
+}
+
+/* Stops timing dcontext's thread for good, from within it, before it makes the
+ * counter unreadable (os_timer_counter_readable()): what it has measured so far
+ * is reported and merged, and its open kstats are dropped, as reading the counter
+ * to close them could fault once the thread has done so.
+ */
+void
+kstat_thread_stop(dcontext_t *dcontext)
+{
+    ASSERT(dcontext == get_thread_private_dcontext());
+    if (dcontext->thread_kstats == NULL)
+        return;
+    LOG(THREAD, LOG_STATS, 1, "kstats off: thread is disabling the counter\n");
+    DOLOG(2, LOG_STATS, { kstats_dump_stack(dcontext); });
+    kstat_thread_release(dcontext);
 }
 
 #endif /* KSTATS */
