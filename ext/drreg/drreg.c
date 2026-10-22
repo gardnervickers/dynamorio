@@ -107,6 +107,11 @@ typedef struct _reg_info_t {
      * which we did not spill: the slot has an old app value that no one needs.
      */
     bool app_value_stale;
+    /* Unreserved right after a drreg_get_app_value() reload into itself: the reg
+     * holds its app value, so its lazy restore needs no load.  Reserving it again
+     * clears this.
+     */
+    bool holds_app_value;
 
     /* Where is the app value for this reg? */
     bool native;   /* app value is in original app reg */
@@ -1306,6 +1311,7 @@ drreg_reserve_reg_internal(void *drcontext, instrlist_t *ilist, instr_t *where,
 
     ASSERT(!pt->reg[GPR_IDX(reg)].in_use, "overlapping uses");
     pt->reg[GPR_IDX(reg)].in_use = true;
+    pt->reg[GPR_IDX(reg)].holds_app_value = false;
     if (!already_spilled) {
         /* Even if dead now, we need to own a slot in case reserved past dead point */
         if (ops.conservative || gpr_liveness(pt, reg, pt->live_idx) == REG_LIVE) {
@@ -1641,7 +1647,7 @@ static drreg_status_t
 drreg_restore_reg_now(void *drcontext, instrlist_t *ilist, instr_t *inst,
                       per_thread_t *pt, reg_id_t reg)
 {
-    if (pt->reg[GPR_IDX(reg)].ever_spilled) {
+    if (pt->reg[GPR_IDX(reg)].ever_spilled && !pt->reg[GPR_IDX(reg)].holds_app_value) {
         if (pt->reg[GPR_IDX(reg)].xchg != DR_REG_NULL) {
             /* XXX i#511: NYI */
             return DRREG_ERROR_FEATURE_NOT_AVAILABLE;
@@ -1651,10 +1657,12 @@ drreg_restore_reg_now(void *drcontext, instrlist_t *ilist, instr_t *inst,
         restore_reg(drcontext, pt, reg, pt->reg[GPR_IDX(reg)].slot, ilist, inst, true);
     } else {
         /* still need to release slot */
-        LOG(drcontext, DR_LOG_ALL, 3, "%s @%d." PFX ": %s never spilled\n", __FUNCTION__,
+        LOG(drcontext, DR_LOG_ALL, 3,
+            "%s @%d." PFX ": %s never spilled or holds app value\n", __FUNCTION__,
             pt->live_idx, get_where_app_pc(inst), get_register_name(reg));
         pt->slot_use[pt->reg[GPR_IDX(reg)].slot] = DR_REG_NULL;
     }
+    pt->reg[GPR_IDX(reg)].holds_app_value = false;
     pt->reg[GPR_IDX(reg)].native = true;
     return DRREG_SUCCESS;
 }
@@ -1670,17 +1678,23 @@ drreg_unreserve_register(void *drcontext, instrlist_t *ilist, instr_t *where,
         get_where_app_pc(where), get_register_name(reg));
     /* A drreg_get_app_value() reload of reg into itself that the tool did not
      * overwrite before unreserving it does end the spill as far as the value
-     * in reg goes: state restoration may take it for a restore.
+     * in reg goes: state restoration may take it for a restore.  If no label or
+     * branch comes between, every path to where has the reload, and the lazy
+     * restore need not load reg again.
      */
+    bool joined = false;
     for (instr_t *in = where == NULL ? instrlist_last(ilist) : instr_get_prev(where);
          in != NULL && !instr_is_app(in); in = instr_get_prev(in)) {
         if (instr_get_note(in) == GET_APP_VALUE_INPLACE_NOTE &&
             instr_writes_to_exact_reg(in, reg, DR_QUERY_DEFAULT)) {
             instr_set_note(in, NULL);
+            pt->reg[GPR_IDX(reg)].holds_app_value = !joined;
             break;
         }
         if (instr_writes_to_reg(in, reg, DR_QUERY_INCLUDE_ALL))
             break;
+        if (instr_is_label(in) || instr_is_cti(in))
+            joined = true;
     }
     if (drmgr_current_bb_phase(drcontext) != DRMGR_PHASE_INSERTION) {
         /* We have no way to lazily restore.  We do not bother at this point
@@ -1946,6 +1960,7 @@ drreg_spill_aflags(void *drcontext, instrlist_t *ilist, instr_t *where, per_thre
          * them to the aflags TLS slot.
          */
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].in_use = true;
+        pt->reg[DR_REG_XAX - DR_REG_START_GPR].holds_app_value = false;
         pt->reg[DR_REG_XAX - DR_REG_START_GPR].native = false;
         pt->aflags.xchg = DR_REG_XAX;
     }

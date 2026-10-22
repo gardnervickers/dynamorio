@@ -197,12 +197,12 @@ static const int ops_scale_runs[NUM_OPS] = { 1, 1, 1, 52, 52, 52 };
 /* The clean-call modes include the queued-signal check that a5878f53c inserts
  * after every AArch64 clean call: 564 bytes per call (141 instructions, most of
  * them its slow path's inline save and restore of every register).  Without it
- * they would be 212.0, 470.1, 320.0 and 168.0.
+ * they would be 212.0, 469.5, 320.0 and 168.0.
  */
 static const double budgets[NUM_OPS][NUM_MODES] = {
     /* dr, bbhook, progress, progress4, cleancall, cleancall_ool */
-    { 124.0, 124.0, 772.0, 2710.1, 880.0, 728.0 }, /* default */
-    { 124.0, 124.0, 772.0, 2710.1, 880.0, 728.0 }, /* seedbox */
+    { 124.0, 124.0, 772.0, 2709.5, 880.0, 728.0 }, /* default */
+    { 124.0, 124.0, 772.0, 2709.5, 880.0, 728.0 }, /* seedbox */
     { 0, 0, 0, 0, 0, 0 },                          /* private */
     { 0, 0, 0, 0, 0, 0 },                          /* traces */
     { 0, 0, 0, 0, 0, 0 },                          /* ibtraces */
