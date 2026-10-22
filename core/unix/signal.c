@@ -1539,6 +1539,22 @@ resend_pending_signal_at_detach(dcontext_t *dcontext, thread_sig_info_t *info, i
     free_pending_signal(info, sig);
 }
 
+/* Blocks signals for a thread that hands its queued signals back to the kernel at
+ * detach (resend_pending_signal_at_detach()), so they wait for the app's mask.
+ * SIGSEGV stays unblocked, as in our handler (set_handler_sigact()), unless we
+ * re-send one: DR code still runs before the thread returns to the app, and a
+ * SIGSEGV in safe_read() or another probe while it is blocked kills the process.
+ */
+static void
+block_signals_for_detach_resend(thread_sig_info_t *info)
+{
+    kernel_sigset_t block;
+    kernel_sigfillset(&block);
+    if (info->sigpending[SIGSEGV] == NULL)
+        kernel_sigdelset(&block, SIGSEGV);
+    sigprocmask_syscall(SIG_BLOCK, &block, NULL, sizeof(block));
+}
+
 static void
 count_pending_signals(thread_sig_info_t *info, uint counts[SIGARRAY_SIZE])
 {
@@ -1848,9 +1864,7 @@ signal_thread_exit(dcontext_t *dcontext, bool other_thread)
          * mask, installed below): like the others (sig_detach()), it hands the
          * signals we queued for it back to the kernel instead of dropping them.
          */
-        kernel_sigset_t all;
-        kernel_sigfillset(&all);
-        sigprocmask_syscall(SIG_BLOCK, &all, NULL, sizeof(all));
+        block_signals_for_detach_resend(info);
         for (i = 1; i <= MAX_SIGNUM; i++) {
             while (info->sigpending[i] != NULL)
                 resend_pending_signal_at_detach(dcontext, info, i);
@@ -8125,8 +8139,15 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
            info->sighand->action[sig]->handler != (handler_t)SIG_IGN &&
            info->sighand->action[sig]->handler != (handler_t)SIG_DFL);
 
-    RSTATS_INC(num_signals);
-    RSTATS_INC(num_native_signals);
+    /* A detach clears our stats and sets d_r_stats to NULL (statistics_exit())
+     * while native threads keep taking signals: between the macros' check of
+     * d_r_stats and their use of it, it can become NULL.  The counts are cleared
+     * at the end of the detach anyway.
+     */
+    if (!doing_detach) {
+        RSTATS_INC(num_signals);
+        RSTATS_INC(num_native_signals);
+    }
     report_app_problem(dcontext, APPFAULT_FAULT, (byte *)sc->SC_XIP, (byte *)sc->SC_FP,
                        "\nSignal %d delivered to application handler.\n", sig);
 
@@ -10257,16 +10278,13 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
 
     /* Hand the signals we have queued for this thread back to the kernel
      * (resend_pending_signal_at_detach()): otherwise they are freed with its state
-     * after the detach and never delivered.  We block them all first;
+     * after the detach and never delivered.  We block them first;
      * the sigreturn installs the app's mask, and the kernel delivers them then,
      * or keeps those the app blocks pending, as it would have without us.
      * Nothing from here to the sigreturn may fault.
      */
-    if (info->num_pending > 0) {
-        kernel_sigset_t all;
-        kernel_sigfillset(&all);
-        sigprocmask_syscall(SIG_BLOCK, &all, NULL, sizeof(all));
-    }
+    if (info->num_pending > 0)
+        block_signals_for_detach_resend(info);
     for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
         while (info->sigpending[sig] != NULL)
             resend_pending_signal_at_detach(dcontext, info, sig);

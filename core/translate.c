@@ -1623,6 +1623,25 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
                      is_after_syscall_that_rets(tdcontext, mcontext->pc + INT_LENGTH))) {
         /* suspended inside kernel at syscall
          * all registers have app values for syscall */
+#ifdef UNIX
+        if (is_after_syscall_that_rets(tdcontext, mcontext->pc + INT_LENGTH) &&
+            was_sigreturn_syscall(tdcontext)) {
+            /* At the syscall instruction of a sigreturn, which cannot have been
+             * interrupted and so is not yet issued.  This is no app state to restart
+             * from: handle_sigreturn() has rewritten the app's frame to return to
+             * fcache_return with our TLS base in the stolen register, and
+             * POST_SYSCALL_PC is where that frame returns to, not the instruction
+             * after the syscall.  Whatever precedes it would run with the restorer's
+             * registers and stack, and if it is a syscall instruction, as it is just
+             * after a pthread_kill(), it issues the sigreturn into DR after a detach
+             * has torn the thread's DR state down.  Let the sigreturn complete and
+             * retry from where it takes the thread.
+             */
+            LOG(THREAD_GET, LOG_INTERP | LOG_SYNCH, 2,
+                "recreate_app: at an unissued sigreturn, not translatable\n");
+            return RECREATE_FAILURE;
+        }
+#endif
         LOG(THREAD_GET, LOG_INTERP | LOG_SYNCH, 2,
             "recreate_app pc = after_syscall, translating\n");
 #ifdef WINDOWS

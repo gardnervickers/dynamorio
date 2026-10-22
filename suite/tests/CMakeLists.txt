@@ -3357,6 +3357,8 @@ if (UNIX AND NOT RISCV64)
   if (X64) # TODO i#4664: Fix crash in vsyscall hook under native threads.
     tobuild_api(api.detach_signal api/detach_signal.cpp "" "" OFF OFF OFF)
     link_with_pthread(api.detach_signal)
+    tobuild_api(api.detach_signal_repeat api/detach_signal_repeat.c "" "" OFF OFF OFF)
+    link_with_pthread(api.detach_signal_repeat)
   endif ()
 endif ()
 if (NOT WIN32 AND NOT RISCV64) # XXX i#2611: fix for Windows
