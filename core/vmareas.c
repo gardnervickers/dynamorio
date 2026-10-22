@@ -858,8 +858,14 @@ vm_area_vector_check_size(vm_area_vector_t *v)
             v->buf = (vm_area_t *)global_heap_alloc(
                 v->size * sizeof(struct vm_area_t) HEAPACCT(ACCT_VMAREAS));
         } else {
-            /* FIXME: case 4471 we should be doubling size here */
-            int new_size = (INTERNAL_OPTION(vmarea_increment_size) + v->length);
+            /* Grow by half, so that a vector of many areas (one for each page of
+             * a JIT's code with -sw_flush_granule) is not copied each time it
+             * gains another vmarea_increment_size of them (case 4471).
+             */
+            int grow = v->length / 2;
+            if (grow < (int)INTERNAL_OPTION(vmarea_increment_size))
+                grow = INTERNAL_OPTION(vmarea_increment_size);
+            int new_size = v->length + grow;
             STATS_INC(num_vmareas_resized);
             v->buf = global_heap_realloc(v->buf, v->size, new_size,
                                          sizeof(struct vm_area_t) HEAPACCT(ACCT_VMAREAS));
@@ -935,8 +941,20 @@ add_vm_area(vm_area_vector_t *v, app_pc start, app_pc end, uint vm_flags, uint f
                                       ? " all_memory_areas"
                                       : (v == dynamo_areas ? " dynamo_areas" : ""))),
         start, end, comment);
+    /* The areas that end before start can neither overlap the new area nor be
+     * adjacent to it, and the loop would only walk past them: start at the first
+     * that does not (the vector is sorted).
+     */
+    int lo = 0, hi = v->length;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (v->buf[mid].end < start)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
     /* N.B.: new area could span multiple existing areas! */
-    for (i = 0; i < v->length; i++) {
+    for (i = lo; i < v->length; i++) {
         /* look for overlap, or adjacency of same type (including all flags, and never
          * merge adjacent if keeping write counts)
          */
@@ -1492,6 +1510,73 @@ remove_vm_area(vm_area_vector_t *v, app_pc start, app_pc end, bool restore_prot)
     return true;
 }
 
+/* Sets [*first, *last) to the indices of the areas of v that overlap [start, end).
+ * Assumes caller holds v->lock, if necessary.
+ */
+static void
+vm_area_overlap_indices(vm_area_vector_t *v, app_pc start, app_pc end, int *first,
+                        int *last)
+{
+    /* The vector is sorted and its areas do not overlap, so both ends of the run
+     * are binary searches: the first area that ends after start, and the first
+     * at or after it that starts at or after end.
+     */
+    int lo = 0, hi = v->length;
+    ASSERT_VMAREA_VECTOR_PROTECTED(v, READWRITE);
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (v->buf[mid].end <= start)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    *first = lo;
+    hi = v->length;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (v->buf[mid].start < end)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    *last = lo;
+}
+
+/* Removes the areas [first, last) of a vector of fragment lists, as
+ * remove_vm_area() does an area that it removes completely, with one shift of the
+ * areas after them.  Removing the areas of a flush one at a time with
+ * remove_vm_area() searched the vector from its start for each, which with an
+ * area for every page of a JIT's code was quadratic.  The caller must clear any
+ * last_area that points into the vector.
+ */
+static void
+vm_area_remove_index_range(vm_area_vector_t *v, int first, int last)
+{
+    int i, diff = last - first;
+    ASSERT_VMAREA_VECTOR_PROTECTED(v, WRITE);
+    ASSERT(TESTANY(VECTOR_FRAGMENT_LIST, v->flags) && v != executable_areas);
+    ASSERT(first >= 0 && first <= last && last <= v->length);
+    if (diff == 0)
+        return;
+    for (i = first; i < last; i++) {
+        LOG(GLOBAL, LOG_VMAREAS, 3, "\tcompletely removing " PFX "-" PFX " %s\n",
+            v->buf[i].start, v->buf[i].end, v->buf[i].comment);
+        if (v->free_payload_func != NULL)
+            v->free_payload_func(v->buf[i].custom.client);
+#ifdef DEBUG
+        global_heap_free(v->buf[i].comment,
+                         strlen(v->buf[i].comment) + 1 HEAPACCT(ACCT_VMAREAS));
+#endif
+        /* frags list should always be null here (flush should have happened) */
+        ASSERT(v->buf[i].custom.frags == NULL);
+    }
+    memmove(&v->buf[first], &v->buf[last], (v->length - last) * sizeof(vm_area_t));
+#ifdef DEBUG
+    memset(v->buf + v->length - diff, 0, diff * sizeof(vm_area_t));
+#endif
+    v->length -= diff;
+}
+
 /* Returns true if start..end overlaps any area in v.
  * If end==NULL, assumes that end is very top of address space (wraparound).
  * If area!=NULL, sets *area to an overlapping area in v
@@ -1588,13 +1673,30 @@ vm_area_overlap(vm_area_vector_t *v, app_pc start, app_pc end)
 
 /*********************** EXPORTED ROUTINES **********************/
 
+/* Returns the most code that the fragment list of a region of code other than an
+ * unmodified image covers (see check_thread_vm_area()), or 0 for whole executable
+ * areas.  Such regions must then not merge with their neighbors.
+ */
+static size_t
+vm_area_flush_granule(void)
+{
+    size_t granule = INTERNAL_OPTION(sw_flush_granule);
+    if (INTERNAL_OPTION(hw_cache_consistency) || granule == 0 ||
+        (granule & (granule - 1)) != 0 /* not a power of 2 */)
+        return 0;
+    return granule < PAGE_SIZE ? PAGE_SIZE : granule;
+}
+
 /* thread-shared initialization that should be repeated after a reset */
 void
 vm_areas_reset_init(void)
 {
     memset(shared_data, 0, sizeof(*shared_data));
-    VMVECTOR_INITIALIZE_VECTOR(&shared_data->areas, VECTOR_SHARED | VECTOR_FRAGMENT_LIST,
-                               shared_vm_areas);
+    VMVECTOR_INITIALIZE_VECTOR(
+        &shared_data->areas,
+        VECTOR_SHARED | VECTOR_FRAGMENT_LIST |
+            (vm_area_flush_granule() > 0 ? VECTOR_NEVER_MERGE_ADJACENT : 0),
+        shared_vm_areas);
 }
 
 void
@@ -1850,7 +1952,11 @@ vm_areas_thread_reset_init(dcontext_t *dcontext)
 {
     thread_data_t *data = (thread_data_t *)dcontext->vm_areas_field;
     memset(dcontext->vm_areas_field, 0, sizeof(thread_data_t));
-    VMVECTOR_INITIALIZE_VECTOR(&data->areas, VECTOR_FRAGMENT_LIST, thread_vm_areas);
+    VMVECTOR_INITIALIZE_VECTOR(
+        &data->areas,
+        VECTOR_FRAGMENT_LIST |
+            (vm_area_flush_granule() > 0 ? VECTOR_NEVER_MERGE_ADJACENT : 0),
+        thread_vm_areas);
     /* data->areas.lock is never used, but we may want to grab it one day,
        e.g. to print other thread areas */
 }
@@ -8274,8 +8380,22 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
 #    endif
 #endif
 
-        add_vm_area(&data->areas, area->start, area->end, area->vm_flags,
-                    area->frag_flags, NULL _IF_DEBUG(area->comment));
+        app_pc list_start = area->start, list_end = area->end;
+        size_t granule = vm_area_flush_granule();
+        if (granule > 0 && !TESTANY(VM_UNMOD_IMAGE, area->vm_flags)) {
+            /* Without hardware cache consistency the app flushes code a line at a
+             * time, and a flush deletes the fragments of every region of ours that it
+             * overlaps: keep the region small (-sw_flush_granule).
+             */
+            app_pc granule_start = (app_pc)ALIGN_BACKWARD(pc, granule);
+            app_pc granule_end = (app_pc)ALIGN_FORWARD(pc + 1, granule);
+            if (granule_start > list_start)
+                list_start = granule_start;
+            if (granule_end > granule_start /* no overflow */ && granule_end < list_end)
+                list_end = granule_end;
+        }
+        add_vm_area(&data->areas, list_start, list_end, area->vm_flags, area->frag_flags,
+                    NULL _IF_DEBUG(area->comment));
         /* get area for actual pc (new area could have been split up) */
         ok = lookup_addr(&data->areas, pc, &local_area);
         ASSERT(ok);
@@ -8330,6 +8450,11 @@ check_thread_vm_area(dcontext_t *dcontext, app_pc pc, app_pc tag, void **vmlist,
     *flags |= frag_flags;
     if (stop != NULL) {
         *stop = area->end;
+        /* A block that continues past our region must be on the next one's list
+         * too, so it must check the next one.
+         */
+        if (vm_area_flush_granule() > 0 && local_area->end < *stop)
+            *stop = local_area->end;
         ASSERT(*stop != NULL);
 #ifdef LINUX
         if (!vmvector_empty(d_r_rseq_areas)) {
@@ -9556,12 +9681,19 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
     LOG(thread_log, LOG_FRAGMENT | LOG_VMAREAS, 2,
         "vm_area_unlink_fragments " PFX ".." PFX "\n", start, end);
 
-    /* walk backwards to avoid O(n^2)
-     * FIXME case 9819: could use executable_area_overlap_bounds() to avoid linear walk
+    /* Only the areas that overlap the flush, which are a run in the sorted vector:
+     * with an area for each page of a JIT's code (-sw_flush_granule), walking the
+     * whole vector for each flush of a line was most of its cost.
      */
-    for (i = data->areas.length - 1; i >= 0; i--) {
-        /* look for overlap */
-        if (start < data->areas.buf[i].end && end > data->areas.buf[i].start) {
+    int first, last;
+    /* The shared areas' fragments, as one pending-deletion entry for the flush
+     * rather than one for each area.
+     */
+    vm_area_t pending = { 0 };
+    vm_area_overlap_indices(&data->areas, start, end, &first, &last);
+    for (i = last - 1; i >= first; i--) {
+        ASSERT(start < data->areas.buf[i].end && end > data->areas.buf[i].start);
+        {
             LOG(thread_log, LOG_FRAGMENT | LOG_VMAREAS, 2,
                 "\tmarking region " PFX ".." PFX
                 " for deletion & unlinking all its frags\n",
@@ -9675,33 +9807,30 @@ vm_area_unlink_fragments(dcontext_t *dcontext, app_pc start, app_pc end,
             });
             if (data == shared_data) {
                 if (data->areas.buf[i].custom.frags != NULL) {
-                    /* add area's fragments as a new entry in the pending deletion list */
-                    add_to_pending_list(
-                        dcontext, data->areas.buf[i].custom.frags, pending_delete_threads,
-                        flushtime_global _IF_DEBUG(data->areas.buf[i].start)
-                            _IF_DEBUG(data->areas.buf[i].end));
+                    /* the area's fragments join the flush's pending deletion entry */
+                    vm_area_merge_fraglists(&pending, &data->areas.buf[i]);
                     /* frags are moved over completely */
                     data->areas.buf[i].custom.frags = NULL;
                     STATS_INC(num_shared_flush_regions);
                 }
-
-                /* ASSUMPTION: remove_vm_area, given exact bounds, simply shifts later
-                 * areas down in vector!
-                 */
-                LOG(thread_log, LOG_VMAREAS, 3, "Before removing vm area:\n");
-                DOLOG(3, LOG_VMAREAS, { print_vm_areas(&data->areas, thread_log); });
                 LOG(thread_log, LOG_VMAREAS, 2,
                     "Removing shared vm area " PFX "-" PFX "\n", data->areas.buf[i].start,
                     data->areas.buf[i].end);
-                remove_vm_area(&data->areas, data->areas.buf[i].start,
-                               data->areas.buf[i].end, false);
-                LOG(thread_log, LOG_VMAREAS, 3, "After removing vm area:\n");
-                DOLOG(3, LOG_VMAREAS, { print_vm_areas(&data->areas, thread_log); });
             }
         }
     }
 
     if (data == shared_data) {
+        if (pending.custom.frags != NULL) {
+            add_to_pending_list(dcontext, pending.custom.frags, pending_delete_threads,
+                                flushtime_global _IF_DEBUG(start) _IF_DEBUG(end));
+        }
+        /* The overlapping areas are now empty: remove them all at once. */
+        LOG(thread_log, LOG_VMAREAS, 3, "Before removing vm areas:\n");
+        DOLOG(3, LOG_VMAREAS, { print_vm_areas(&data->areas, thread_log); });
+        vm_area_remove_index_range(&data->areas, first, last);
+        LOG(thread_log, LOG_VMAREAS, 3, "After removing vm areas:\n");
+        DOLOG(3, LOG_VMAREAS, { print_vm_areas(&data->areas, thread_log); });
         SHARED_VECTOR_RWLOCK(&data->areas, write, unlock);
         release_recursive_lock(&change_linking_lock);
         d_r_mutex_unlock(&shared_delete_lock);
@@ -10014,17 +10143,23 @@ vm_area_flush_fragments(dcontext_t *dcontext, fragment_t *was_I_flushed)
                 num++;
             }
             v->buf[i].custom.frags = NULL;
-            /* could just remove flush region...but we flushed entire vm region
-             * ASSUMPTION: remove_vm_area, given exact bounds, simply shifts later
-             * areas down in vector!
-             */
-            LOG(THREAD, LOG_VMAREAS, 3, "Before removing vm area:\n");
-            DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
-            remove_vm_area(v, v->buf[i].start, v->buf[i].end, false);
-            LOG(THREAD, LOG_VMAREAS, 3, "After removing vm area:\n");
-            DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
         }
     }
+    /* Remove the emptied areas, each run of them with one shift, rather than one
+     * remove_vm_area() search and shift each (quadratic with many areas).
+     */
+    LOG(THREAD, LOG_VMAREAS, 3, "Before removing vm areas:\n");
+    DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
+    for (i = v->length - 1; i >= 0; i--) {
+        if (TESTANY(VM_DELETE_ME, v->buf[i].vm_flags)) {
+            int run_end = i + 1;
+            while (i > 0 && TESTANY(VM_DELETE_ME, v->buf[i - 1].vm_flags))
+                i--;
+            vm_area_remove_index_range(v, i, run_end);
+        }
+    }
+    LOG(THREAD, LOG_VMAREAS, 3, "After removing vm areas:\n");
+    DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
 
 #ifdef WINDOWS
     /* The relink needs a real thread dcontext, so don't pass a GLOBAL_DCONTEXT
@@ -10232,11 +10367,14 @@ vm_area_allsynch_flush_fragments(dcontext_t *dcontext, dcontext_t *del_dcontext,
     }
 
     SHARED_VECTOR_RWLOCK(v, write, lock);
-    /* walk backwards to avoid O(n^2)
-     * FIXME case 9819: could use executable_area_overlap_bounds() to avoid linear walk
+    /* Only the run of areas that overlap the flush; they are removed at once
+     * below (one remove_vm_area() each searched the vector from its start).
      */
-    for (i = v->length - 1; i >= 0; i--) {
-        if (start < v->buf[i].end && end > v->buf[i].start) {
+    int first, last;
+    vm_area_overlap_indices(v, start, end, &first, &last);
+    for (i = last - 1; i >= first; i--) {
+        ASSERT(start < v->buf[i].end && end > v->buf[i].start);
+        {
             if (v->buf[i].start < start || v->buf[i].end > end) {
                 /* see comments in vm_area_unlink_fragments() */
                 LOG(THREAD, LOG_FRAGMENT | LOG_VMAREAS, 2,
@@ -10297,22 +10435,20 @@ vm_area_allsynch_flush_fragments(dcontext_t *dcontext, dcontext_t *del_dcontext,
                 if (dcontext == del_dcontext)
                     v->buf[i].custom.frags = NULL;
             }
-            if (dcontext == del_dcontext && remove_shared_vm_area) {
-                /* could just remove flush region...but we flushed entire vm region
-                 * ASSUMPTION: remove_vm_area, given exact bounds, simply shifts later
-                 * areas down in vector!
-                 */
-                LOG(THREAD, LOG_VMAREAS, 3, "Before removing vm area:\n");
-                DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
-                remove_vm_area(v, v->buf[i].start, v->buf[i].end, false);
-                LOG(THREAD, LOG_VMAREAS, 3, "After removing vm area:\n");
-                DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
-            } else {
+            if (!(dcontext == del_dcontext && remove_shared_vm_area)) {
                 ASSERT(dcontext != del_dcontext ||
                        /* should only not flush for special hotp case 9995 */
                        start + 1 == end);
             }
         }
+    }
+    if (dcontext == del_dcontext && remove_shared_vm_area) {
+        /* could just remove flush region...but we flushed entire vm regions */
+        LOG(THREAD, LOG_VMAREAS, 3, "Before removing vm areas:\n");
+        DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
+        vm_area_remove_index_range(v, first, last);
+        LOG(THREAD, LOG_VMAREAS, 3, "After removing vm areas:\n");
+        DOLOG(3, LOG_VMAREAS, { print_vm_areas(v, THREAD); });
     }
 
     if (dcontext == del_dcontext)

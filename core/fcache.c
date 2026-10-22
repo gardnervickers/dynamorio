@@ -516,6 +516,10 @@ typedef struct _fcache {
     bool record_wset;
 
     free_list_header_t *free_list[FREE_LIST_SIZES_NUM];
+    /* An upper bound on the sizes of the slots on each free list, so a request
+     * that none of them fits skips the walk of the list (find_free_list_slot()).
+     */
+    uint free_list_max_size[FREE_LIST_SIZES_NUM];
 #ifdef DEBUG
     uint free_stats_freed[FREE_LIST_SIZES_NUM];     /* occurrences */
     uint free_stats_reused[FREE_LIST_SIZES_NUM];    /* occurrences */
@@ -1609,6 +1613,7 @@ fcache_cache_init(dcontext_t *dcontext, uint flags, bool initial_unit)
     cache->record_wset = false;
     if (cache->is_shared) { /* else won't use free list */
         memset(cache->free_list, 0, sizeof(cache->free_list));
+        memset(cache->free_list_max_size, 0, sizeof(cache->free_list_max_size));
         DODEBUG({
             memset(cache->free_stats_freed, 0, sizeof(cache->free_stats_freed));
             memset(cache->free_stats_reused, 0, sizeof(cache->free_stats_reused));
@@ -2968,8 +2973,11 @@ remove_from_free_list(fcache_t *cache, uint bucket,
         free_list_header_t *prev_writable =
             (free_list_header_t *)vmcode_get_writable_addr((byte *)header->prev);
         prev_writable->next = header->next;
-    } else
+    } else {
         cache->free_list[bucket] = header->next;
+        if (header->next == NULL)
+            cache->free_list_max_size[bucket] = 0;
+    }
     if (header->next != NULL) {
         free_list_header_t *next_writable =
             (free_list_header_t *)vmcode_get_writable_addr((byte *)header->next);
@@ -3138,6 +3146,8 @@ add_to_free_list(dcontext_t *dcontext, fcache_t *cache, fcache_unit_t *unit,
         list_writable->prev = header;
     }
     cache->free_list[bucket] = header;
+    if (size > cache->free_list_max_size[bucket])
+        cache->free_list_max_size[bucket] = size;
     /* FIXME: case 7318 we should keep sorted */
 
     DOSTATS({
@@ -3181,7 +3191,14 @@ find_free_list_slot(dcontext_t *dcontext, fcache_t *cache, fragment_t *f, uint s
      * used to have a scheme for FREE_LIST_BOTTOM_BUCKET_MARGIN)
      */
     for (bucket = find_free_list_bucket(size); bucket < FREE_LIST_SIZES_NUM; bucket++) {
-        if (cache->free_list[bucket] == NULL)
+        uint max_size = 0;
+        /* A list can collect many slots smaller than the requests that search it:
+         * the top bucket has no upper limit, and the end of each full unit becomes
+         * a slot (extend_unit_end()), smaller than the request that did not fit
+         * there.  Walking all of those on every request made building a large
+         * block cost time in proportion to the size of the cache.
+         */
+        if (cache->free_list[bucket] == NULL || cache->free_list_max_size[bucket] < size)
             continue;
 
         /* search for first entry larger than size in current bucket */
@@ -3195,10 +3212,14 @@ find_free_list_slot(dcontext_t *dcontext, fcache_t *cache, fragment_t *f, uint s
             /* FIXME: if we want to coalesce here we can act on any
              * fragment while walking list and make sure that it is
              * coalesced */
+            if (header->size > max_size)
+                max_size = header->size;
             header = header->next;
         }
         if (header != NULL)
             break;
+        /* None is big enough: tighten the bound to the largest. */
+        cache->free_list_max_size[bucket] = max_size;
     }
     if (bucket >= FREE_LIST_SIZES_NUM)
         return false;

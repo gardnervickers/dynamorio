@@ -1214,6 +1214,73 @@ unlink_branch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
     return keep;
 }
 
+#ifdef X64
+#    define INCOMING_PREV_NONE 0
+#    define INCOMING_PREV_UNKNOWN INT_MIN
+#endif
+
+/* Records prev as the entry before dl on its incoming list (NULL if dl is first).
+ * Every change to an incoming list must keep this up to date for the entries it
+ * changes the predecessor of: a removal reads the recorded predecessor.
+ */
+static inline void
+incoming_set_prev(common_direct_linkstub_t *dl, linkstub_t *prev)
+{
+#ifdef X64
+    ptr_int_t diff;
+    if (prev == NULL) {
+        dl->prev_incoming_offs = INCOMING_PREV_NONE;
+        return;
+    }
+    diff = (byte *)prev - (byte *)dl;
+    if (diff == 0 || diff % 4 != 0 || diff / 4 > INT_MAX || diff / 4 <= INT_MIN)
+        dl->prev_incoming_offs = INCOMING_PREV_UNKNOWN;
+    else
+        dl->prev_incoming_offs = (int)(diff / 4);
+#endif
+}
+
+/* Returns whether the entry before dl on its incoming list is known, in *prev (NULL
+ * if dl is first).  The caller must check it against the list.
+ */
+static inline bool
+incoming_get_prev(common_direct_linkstub_t *dl, linkstub_t **prev /*OUT*/)
+{
+#ifdef X64
+    if (dl->prev_incoming_offs == INCOMING_PREV_UNKNOWN)
+        return false;
+    *prev = dl->prev_incoming_offs == INCOMING_PREV_NONE
+        ? NULL
+        : (linkstub_t *)((byte *)dl + (ptr_int_t)dl->prev_incoming_offs * 4);
+    return true;
+#else
+    return false;
+#endif
+}
+
+#ifdef DEBUG
+/* Checks that the recorded predecessor of dl, if any, is prev. */
+static void
+incoming_check_prev(common_direct_linkstub_t *dl, linkstub_t *prev)
+{
+    linkstub_t *recorded;
+    if (incoming_get_prev(dl, &recorded))
+        ASSERT(recorded == prev && "incoming list predecessor out of date");
+}
+
+/* Checks the recorded predecessor of every entry of an incoming list. */
+static void
+incoming_check_list(common_direct_linkstub_t *head)
+{
+    linkstub_t *prev = NULL;
+    common_direct_linkstub_t *dl;
+    for (dl = head; dl != NULL; dl = (common_direct_linkstub_t *)dl->next_incoming) {
+        incoming_check_prev(dl, prev);
+        prev = (linkstub_t *)dl;
+    }
+}
+#endif
+
 static inline bool
 incoming_direct_linkstubs_match(common_direct_linkstub_t *dl1,
                                 common_direct_linkstub_t *dl2)
@@ -1299,6 +1366,20 @@ incoming_remove_link_nosearch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l
     /* no links across caches so only checking f's sharedness is enough */
     ASSERT(!NEED_SHARED_LOCK(f->flags) || self_owns_recursive_lock(&change_linking_lock));
 
+    if (dl->next_incoming != NULL) {
+        incoming_set_prev((common_direct_linkstub_t *)dl->next_incoming,
+                          (linkstub_t *)dprev);
+        DODEBUG({
+            incoming_check_prev((common_direct_linkstub_t *)dl->next_incoming,
+                                (linkstub_t *)dprev);
+        });
+    }
+    DODEBUG({
+        if (dprev != NULL)
+            ASSERT(dprev->next_incoming == l);
+        else
+            ASSERT((linkstub_t *)*inlist == l);
+    });
     if (dprev != NULL)
         dprev->next_incoming = dl->next_incoming;
     else {
@@ -1333,6 +1414,8 @@ incoming_remove_link_nosearch(dcontext_t *dcontext, fragment_t *f, linkstub_t *l
         *inlist = (common_direct_linkstub_t *)dl->next_incoming;
     }
     dl->next_incoming = NULL;
+    incoming_set_prev(dl, NULL);
+    DOCHECK(CHKLVL_DEFAULT + 1, { incoming_check_list(*inlist); });
     if (LINKSTUB_COARSE_PROXY(l->flags)) {
         /* We don't have any place to keep l so we free now.  We'll
          * re-alloc if we lazily re-link.
@@ -1391,8 +1474,23 @@ incoming_remove_link(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
     if (TEST(FRAG_COARSE_GRAIN, targetf->flags)) {
         coarse_remove_incoming(dcontext, f, l, targetf);
     } else {
-        if (incoming_remove_link_search(dcontext, f, l, targetf,
-                                        FRAG_INCOMING_ADDR(targetf)))
+        common_direct_linkstub_t **inlist = FRAG_INCOMING_ADDR(targetf);
+        linkstub_t *prevl;
+        /* l itself is on the list unless it is a fake linkstub_t to match by value
+         * (a coarse-grain source).  If we know its predecessor, and the list
+         * confirms it, unlink it without walking the list.
+         */
+        if (!LINKSTUB_FAKE(l) &&
+            incoming_get_prev((common_direct_linkstub_t *)l, &prevl) &&
+            (prevl == NULL ? (linkstub_t *)*inlist == l
+                           : (LINKSTUB_DIRECT(prevl->flags) &&
+                              ((common_direct_linkstub_t *)prevl)->next_incoming == l))) {
+            DOCHECK(CHKLVL_DEFAULT,
+                    { ASSERT(incoming_link_exists(dcontext, f, l, targetf)); });
+            incoming_remove_link_nosearch(dcontext, f, l, targetf, prevl, inlist);
+            return;
+        }
+        if (incoming_remove_link_search(dcontext, f, l, targetf, inlist))
             return;
         DODEBUG({
             ASSERT(targetf != NULL && targetf->tag == EXIT_TARGET_TAG(dcontext, f, l));
@@ -1430,7 +1528,13 @@ add_to_incoming_list(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
         ASSERT(!LINKSTUB_FAKE(l) || LINKSTUB_COARSE_PROXY(l->flags));
         ASSERT(!is_empty_fragment(linkstub_fragment(dcontext, l)));
         dl->next_incoming = (linkstub_t *)*inlist;
+        incoming_set_prev(dl, NULL);
+        if (*inlist != NULL) {
+            incoming_set_prev(*inlist, l);
+            DODEBUG({ incoming_check_prev(*inlist, l); });
+        }
         *inlist = dl;
+        DOCHECK(CHKLVL_DEFAULT + 1, { incoming_check_list(*inlist); });
     }
 }
 
@@ -3269,6 +3373,10 @@ coarse_unit_unlink(dcontext_t *dcontext, coarse_info_t *info)
                 common_direct_linkstub_t *dl = (common_direct_linkstub_t *)last_l;
                 ASSERT(last_l != NULL);
                 dl->next_incoming = future->incoming_stubs;
+                if (future->incoming_stubs != NULL) {
+                    incoming_set_prev((common_direct_linkstub_t *)future->incoming_stubs,
+                                      last_l);
+                }
                 future->incoming_stubs = e->in.fine_l;
             }
         }
