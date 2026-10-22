@@ -1425,6 +1425,16 @@ signal_thread_inherit(dcontext_t *dcontext, void *clone_record)
 #endif
             /* i#61/PR 211530: the signal we use for nudges */
             info->sighand->we_intercept[NUDGESIG_SIGNUM] = true;
+            /* signal_info_init_sigaction() counted this thread as unmasking only
+             * the signals emulated before these were chosen, and its exit uncounts
+             * every emulated one.
+             */
+            for (i = 1; i <= MAX_SIGNUM; i++) {
+                if (EMULATE_SIGMASK(info, i)) {
+                    info->sighand->threads_unmasked[i] =
+                        kernel_sigismember(&info->app_sigblocked, i) ? 0 : 1;
+                }
+            }
         }
 
         /* should be 1st thread */
@@ -3296,22 +3306,115 @@ signal_syscall_kernel_sigmask(dcontext_t *dcontext)
 #endif
 }
 
-/* The mask for a real signalfd: the signals the kernel keeps pending for the app.
- * Returns NULL to pass the app's arguments through unchanged (the kernel fails
- * invalid ones).
+/* Decides how the app's signalfd/signalfd4 syscall is handled, returning a
+ * SIGNALFD_ROUTE_* value.
+ *
+ * With -intercept_all_signals the kernel keeps the signals the app blocks pending
+ * (see signal_sync_kernel_mask()), so a real signalfd sees them, except those
+ * of !sig_kernel_blockable(), which we receive and hold ourselves.  By the mask,
+ * without SIGKILL and SIGSTOP (which the kernel ignores there):
+ * + only kernel-held signals, or none: a real signalfd;
+ * + only signals we hold: a pipe we write them to as they arrive
+ *   (handle_pre_signalfd(), notify_signalfd());
+ * + both: a real signalfd for the kernel-held ones (*kmask,
+ *   SIGNALFD_ROUTE_KERNEL_MASK), so it does not take our own signals from the
+ *   kernel's pending sets.
+ *   XXX i#1189: the signals we hold of such a mask never reach the fd; they wait
+ *   with us as for no signalfd (sigpending(), sigtimedwait() and unblocking see
+ *   them).  A pipe for the whole mask would have to take the kernel-held signals
+ *   from the kernel as they arrive, losing the kernel's semantics for them.
+ * A real signalfd stays one when its mask changes, to any mask but one of only
+ * signals we hold, and a pipe stays a pipe: changing between those kinds fails
+ * with EINVAL (*error), as neither can become the other.  XXX i#1189: natively
+ * such a change succeeds.
+ *
+ * Without -intercept_all_signals every new signalfd is a pipe, as before.
+ *
+ * The kernel checks the flags, size and mask before the fd, so for invalid ones
+ * we pass the app's arguments through and it fails them for our pipes too.  For
+ * SIGNALFD_ROUTE_EMULATE, *mask holds a copy of the app's mask.
  */
-kernel_sigset_t *
-signal_signalfd_kernel_set(dcontext_t *dcontext, kernel_sigset_t *mask, size_t sizemask)
+#ifdef LINUX
+int
+signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
+                      size_t sizemask, int flags, kernel_sigset_t *mask,
+                      kernel_sigset_t **kmask, int *error)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    if (sizemask != sizeof(kernel_sigset_t) || mask == NULL ||
-        !d_r_safe_read(mask, sizeof(kernel_sigset_t), &info->syscall_kernel_sigmask))
-        return NULL;
-    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
-        if (!sig_kernel_blockable(sig))
-            kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
+    bool held = false, kernel_held = false;
+    *kmask = NULL;
+    if (TESTANY(~(SFD_CLOEXEC | SFD_NONBLOCK), flags) ||
+        sizemask != sizeof(kernel_sigset_t) || app_mask == NULL ||
+        !d_r_safe_read(app_mask, sizeof(*mask), mask))
+        return SIGNALFD_ROUTE_KERNEL;
+    bool emulated = fd != -1 && signal_is_emulated_signalfd(fd);
+    if (!DYNAMO_OPTION(intercept_all_signals)) {
+        return (fd == -1 || emulated) ? SIGNALFD_ROUTE_EMULATE
+                                      : SIGNALFD_ROUTE_KERNEL;
     }
-    return &info->syscall_kernel_sigmask;
+    info->syscall_kernel_sigmask = *mask;
+    for (int sig = 1; sig <= MAX_SIGNUM; sig++) {
+        if (!kernel_sigismember(mask, sig) || sig == SIGKILL || sig == SIGSTOP)
+            continue;
+        if (sig_kernel_blockable(sig))
+            kernel_held = true;
+        else {
+            held = true;
+            kernel_sigdelset(&info->syscall_kernel_sigmask, sig);
+        }
+    }
+    if (emulated) {
+        if (kernel_held) {
+            *error = EINVAL;
+            return SIGNALFD_ROUTE_FAIL;
+        }
+        return SIGNALFD_ROUTE_EMULATE;
+    }
+    if (fd == -1 && held && !kernel_held)
+        return SIGNALFD_ROUTE_EMULATE;
+    if (fd != -1 && held && !kernel_held) {
+        /* As the kernel, fail a closed fd with EBADF. */
+        *error = dynamorio_syscall(SYS_fcntl, 2, fd, F_GETFD) < 0 ? EBADF : EINVAL;
+        return SIGNALFD_ROUTE_FAIL;
+    }
+    *kmask = &info->syscall_kernel_sigmask;
+    return SIGNALFD_ROUTE_KERNEL_MASK;
+}
+#endif
+
+/* Returns in *siginfo the first instance of sig that we hold for this thread while
+ * the app blocks it, if any: for an emulated signalfd created after the signal
+ * arrived.  signal_drop_held_signal() then removes it, as
+ * handle_pre_sigtimedwait() does.  Our handler only appends to the queue, so the
+ * first instance stays first.
+ */
+bool
+signal_peek_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    sigpending_t *p = info->sigpending[sig];
+    if (p == NULL || p->unblocked_at_receipt ||
+        !kernel_sigismember(&info->app_sigblocked, sig))
+        return false;
+    *siginfo = p->rt_frame.info;
+    return true;
+}
+
+void
+signal_drop_held_signal(dcontext_t *dcontext, int sig)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    sigpending_t *p = info->sigpending[sig];
+    ASSERT(p != NULL);
+    block_in_kernel_ahead(dcontext, NULL);
+    info->accessing_sigpending = true;
+    __asm__ __volatile__("" : : : "memory");
+    info->sigpending[sig] = p->next;
+    special_heap_free(info->sigheap, p);
+    info->num_pending--;
+    __asm__ __volatile__("" : : : "memory");
+    info->accessing_sigpending = false;
+    signal_sync_kernel_mask(dcontext);
 }
 
 /* After a sigsuspend syscall returns: if no signal ended it through
@@ -5531,6 +5634,23 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
         !TESTANY(SA_RESTART, info->sighand->action[sig]->flags)) {
         return false;
     }
+#ifdef LINUX
+    /* A signal with a handler ends these waits with EINTR whatever its SA_RESTART
+     * (-ERESTARTNOHAND), and restarting from sc would issue the mask argument we
+     * passed the kernel as the app's.
+     */
+    if (!not_issued && os_syscall_is_masked_wait(dcontext))
+        return false;
+    /* Nor do they restart one we issued again after our own signal: restarting it
+     * from sc would also issue our arguments for it (a remaining timeout in our
+     * buffer, which a wait in the handler can reuse) as the app's.
+     */
+    if (!not_issued && os_syscall_reissued_wait_ends_with_eintr(dcontext)) {
+        LOG(THREAD, LOG_ASYNCH, 2, "%s: not restarting syscall %d we issued again\n",
+            __FUNCTION__, dcontext->sys_num);
+        return false;
+    }
+#endif
     /* XXX i#1145: some syscalls are never restarted when interrupted by a signal.
      * We check those that are simple to distinguish below, but not all are.  We have
      * this under an option so it can be disabled if necessary.
@@ -5605,6 +5725,33 @@ adjust_syscall_for_restart(dcontext_t *dcontext, thread_sig_info_t *info, int si
     } else {
         ASSERT_NOT_REACHED(); /* Inlined syscalls no longer come here. */
     }
+#if defined(LINUX) && (defined(AARCH64) || (defined(X86) && defined(X64)))
+    /* Restarting from the app's syscall instruction, we handle the syscall again
+     * from the start: give it the app's arguments, not the ones its pre-syscall
+     * handling replaced with ours (a mask or timeout buffer of this thread's, which
+     * a syscall in the signal handler can reuse), whether or not we issued it again.
+     * XXX: not done on x86-32 or ARM32, where pre_system_call() does not save them.
+     */
+    reg_t app_arg[6];
+    for (int i = 0; i < 6; i++) {
+        if (!os_syscall_app_arg(dcontext, i, &app_arg[i]))
+            app_arg[i] = 0;
+    }
+#    ifdef AARCH64
+    for (int i = 0; i < 6; i++)
+        sc->regs[i] = app_arg[i];
+#    elif defined(X86) && defined(X64)
+    sc->SC_XDI = app_arg[0];
+    sc->SC_XSI = app_arg[1];
+    sc->SC_XDX = app_arg[2];
+    sc->SC_FIELD(r10) = app_arg[3];
+    sc->SC_FIELD(r8) = app_arg[4];
+    sc->SC_FIELD(r9) = app_arg[5];
+#    endif
+    os_syscall_note_restart_after_signal(dcontext);
+    LOG(THREAD, LOG_ASYNCH, 2, "%s: restarting syscall %d with the app's arguments\n",
+        __FUNCTION__, dcontext->sys_num);
+#endif
 #if defined(AARCHXX) || defined(RISCV64)
     /* dr_reg_stolen is holding DR's TLS on receiving a signal,
      * so we need to put the app's reg value into the ucontext instead.
@@ -5746,13 +5893,16 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
 
 #if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
 /* Returns whether pc is on our way from d_r_dispatch into do_syscall for a syscall
- * that we deliver pending signals before (one that is ignorable or an unbounded
- * wait: see handle_system_call()), but before its syscall instruction: in
- * fcache_enter, after its check for pending signals, or in do_syscall ahead of the
- * syscall instruction.  If so, returns that instruction's address in *syscall_pc.
+ * that we deliver pending signals before (one that is ignorable or a wait of
+ * os_syscall_is_wait_to_deliver_before(): see handle_system_call()) or that a
+ * pending signal fails (*fail_eintr: a wait of os_syscall_is_masked_wait()), but
+ * before its syscall instruction: in fcache_enter, after its check for pending
+ * signals, or in do_syscall ahead of the syscall instruction.  If so, returns that
+ * instruction's address in *syscall_pc.
  */
 static bool
-is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *syscall_pc)
+is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *syscall_pc,
+                     bool *fail_eintr)
 {
     generated_code_t *code = THREAD_GENCODE(dcontext);
     if (code == NULL || dcontext->next_tag != code->do_syscall)
@@ -5761,10 +5911,15 @@ is_before_do_syscall(dcontext_t *dcontext, byte *pc, int syslen, cache_pc *sysca
     if (!((pc >= code->fcache_enter && pc < code->fcache_return) ||
           (pc >= code->do_syscall && pc < svc)))
         return false;
-    if (is_sigreturn_syscall_number(dcontext->sys_num) ||
-        (!ignorable_system_call(dcontext->sys_num, NULL, dcontext) &&
-         !os_syscall_is_unbounded_wait(dcontext)))
+    if (is_sigreturn_syscall_number(dcontext->sys_num))
         return false;
+    *fail_eintr = false;
+    if (!ignorable_system_call(dcontext->sys_num, NULL, dcontext) &&
+        !os_syscall_is_wait_to_deliver_before(dcontext)) {
+        if (!os_syscall_is_masked_wait(dcontext))
+            return false;
+        *fail_eintr = true;
+    }
     *syscall_pc = svc;
     return true;
 }
@@ -5903,7 +6058,7 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             "blocked signal: process-wide=%d (code=%d), #-unmasked=%d\n",
             signal_is_process_wide(dcontext, &frame->info, pc, xsp), frame->info.si_code,
             atomic_aligned_read_int(&info->sighand->threads_unmasked[sig]));
-        if (signal_is_process_wide(dcontext, &frame->info, pc, xsp) &&
+        if (!handled && signal_is_process_wide(dcontext, &frame->info, pc, xsp) &&
             !signal_is_fault(dcontext, sig, pc, (byte *)sc->SC_XSP, &frame->info) &&
             atomic_aligned_read_int(&info->sighand->threads_unmasked[sig]) > 0 &&
             (!sig_is_alarm_signal(sig) ||
@@ -5923,6 +6078,12 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
     /* The value of blocked may have changed, so we re-start the if-else chain. */
     if (blocked) {
         /* No reroute needed so no action needed. */
+#ifdef LINUX
+        /* A blocked signal does not interrupt a wait natively, whether it goes to
+         * a signalfd or waits with us.
+         */
+        restart_syscall_interrupted_by_us(dcontext, ucxt);
+#endif
     } else if (dcontext->currently_stopped) {
         /* We have no way to delay for a currently-native thread. */
         if (reroute) {
@@ -6051,7 +6212,8 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
              */
 #if defined(LINUX) && (defined(AARCH64) || defined(X86_64))
             cache_pc syscall_pc;
-            if (is_before_do_syscall(dcontext, pc, syslen, &syscall_pc)) {
+            bool fail_eintr;
+            if (is_before_do_syscall(dcontext, pc, syslen, &syscall_pc, &fail_eintr)) {
                 /* The signal arrived after fcache_enter checked for pending signals,
                  * on the way to the syscall instruction.  Left queued, it would be
                  * blocked in the kernel while the syscall, e.g. a read of an empty
@@ -6059,7 +6221,11 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                  * syscall, which then runs: put the thread at the syscall instruction
                  * with the app state fcache_enter is restoring (all of it is in the
                  * mcontext), treat the syscall as interrupted there, and restart it
-                 * after the handler whatever its SA_RESTART.
+                 * after the handler whatever its SA_RESTART.  A wait with a temporary
+                 * mask instead fails with EINTR, as natively for a signal pending at
+                 * its entry (see handle_system_call(), including its XXX): put the
+                 * thread after the syscall instruction with that result, so the
+                 * post-syscall handler restores the app's mask and arguments.
                  */
                 priv_mcontext_t *mc = get_mcontext(dcontext);
                 LOG(THREAD, LOG_ASYNCH, 2,
@@ -6080,9 +6246,30 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
                 dcontext->local_state->spill_space.reg_stolen = app_stolen;
                 set_sigcxt_stolen_reg(sc, tls_base);
 #    endif
-                sc->SC_XIP = (reg_t)syscall_pc;
-                pc = syscall_pc;
-                orig_retval_reg = sc->SC_RETURN_REG;
+                if (fail_eintr) {
+                    sc->SC_XIP = (reg_t)(syscall_pc + syslen);
+                    sc->SC_RETURN_REG = -EINTR;
+                    pc = syscall_pc + syslen;
+                } else {
+                    sc->SC_XIP = (reg_t)syscall_pc;
+                    pc = syscall_pc;
+                    orig_retval_reg = sc->SC_RETURN_REG;
+                    syscall_not_issued = true;
+                }
+            } else if (is_after_syscall_address(dcontext, pc + syslen) &&
+                       os_syscall_unissued_at_syscall_instr(
+                           dcontext, sc->SC_SYSNUM_REG,
+                           IF_AARCH64_ELSE(sc->regs[1], sc->SC_XSI),
+                           IF_AARCH64_ELSE(sc->regs[3], sc->SC_R10))) {
+                /* At the syscall instruction of a sleep on its first attempt: the
+                 * kernel never puts one back there, so it was not issued yet.
+                 * Restart it after the handler, as natively it runs after a signal
+                 * that arrives before it, rather than failing it with EINTR without
+                 * its remaining time.
+                 */
+                LOG(THREAD, LOG_ASYNCH, 2,
+                    "signal %d at the syscall instruction of unissued syscall %d\n", sig,
+                    dcontext->sys_num);
                 syscall_not_issued = true;
             }
 #endif
@@ -9281,8 +9468,9 @@ timeval_to_usec(struct timeval *t1)
 static inline void
 usec_to_timeval(uint64 usec, struct timeval *t1)
 {
-    t1->tv_sec = (long)usec / 1000000;
-    t1->tv_usec = (long)usec % 1000000;
+    /* Divide before narrowing: a 32-bit long holds only about 35 minutes of usec. */
+    t1->tv_sec = (long)(usec / 1000000);
+    t1->tv_usec = (long)(usec % 1000000);
 }
 
 static void
@@ -9308,6 +9496,16 @@ init_itimer(dcontext_t *dcontext, bool first)
     memset(info->itimer, 0, sizeof(*info->itimer));
     for (i = 0; i < NUM_ITIMERS; i++) {
         ASSIGN_INIT_RECURSIVE_LOCK_FREE((*info->itimer)[i].lock, shared_itimer_lock);
+#ifdef DEADLOCK_AVOIDANCE
+        /* The first acquisition of a lock puts it on the list of all locks, which
+         * takes innermost_lock.  We do it now, while no other thread can see the
+         * lock, rather than in itimer_lock() with signals blocked, where waiting
+         * for innermost_lock could deadlock: its holder could have been suspended
+         * by a thread whose alarm handler then waits for our itimer lock.
+         */
+        acquire_recursive_lock(&(*info->itimer)[i].lock);
+        release_recursive_lock(&(*info->itimer)[i].lock);
+#endif
     }
     if (first) {
         /* see if app has set up an itimer before we were loaded */
@@ -9330,10 +9528,21 @@ init_itimer(dcontext_t *dcontext, bool first)
  * Never wait with those signals blocked, and never invoke a client or access
  * application memory while holding the lock.  SIGSEGV/SIGBUS remain available
  * for DR's fault handling.  Private timers need the mask too, for reentrancy.
+ *
+ * Acquiring must take no other lock either: init_itimer() puts the locks on the
+ * debug build's list of all locks, which would otherwise take innermost_lock on
+ * the first acquisition, with signals blocked (a thread suspended while holding
+ * innermost_lock would then block us, and its suspender's alarm handler would
+ * wait for us).
  */
 static void
 itimer_lock(thread_sig_info_t *info, int which, kernel_sigset_t *prior_mask)
 {
+#ifdef DEADLOCK_AVOIDANCE
+    /* Registered by init_itimer(), so that acquiring takes no other lock. */
+    ASSERT(!info->shared_itimer ||
+           (*info->itimer)[which].lock.lock.prev_process_lock != NULL);
+#endif
     for (;;) {
         block_all_noncrash_signals_except(prior_mask, 0);
         if (!info->shared_itimer || try_recursive_lock(&(*info->itimer)[which].lock))
@@ -9634,6 +9843,10 @@ handle_alarm(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt)
     if (invoke_cb) {
         /* Keep the original interrupted context and signal-handler invocation,
          * but no timer lock or transaction mask across arbitrary client code.
+         * This means the callback can run after another thread disabled or
+         * replaced this timer (as documented for dr_set_itimer()), and cb and
+         * cb_api are the ones we read under the lock, not necessarily the current
+         * ones.
          */
         dr_mcontext_t dmc;
         dr_mcontext_init(&dmc);
@@ -10099,7 +10312,11 @@ is_signal_for_us(kernel_siginfo_t *siginfo, int sig_expecting)
 static void
 restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
 {
-#    if defined(AARCH64) || (defined(X86) && defined(X64)) /* Other syscall ABIs remain NYI. */
+    /* XXX: NYI for other syscall ABIs (other argument registers): there, our
+     * suspend signal or a signal the app ignores or blocks still interrupts a wait
+     * with EINTR.
+     */
+#    if defined(AARCH64) || (defined(X86) && defined(X64))
     sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
     reg_t x0, value;
     int param;
@@ -10118,6 +10335,7 @@ restart_syscall_interrupted_by_us(dcontext_t *dcontext, kernel_ucontext_t *ucxt)
         return;
     LOG(THREAD, LOG_ASYNCH, 2, "restarting syscall %d interrupted by our signal\n",
         dcontext->sys_num);
+    os_syscall_note_reissue(dcontext);
 #        ifdef AARCH64
     sc->SC_RETURN_REG = x0;
     if (param > 0)

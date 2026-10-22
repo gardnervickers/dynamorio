@@ -5471,6 +5471,8 @@ ignorable_system_call_normalized(int num)
 #endif
 #ifdef LINUX
     case SYS_dup3:
+    /* For signalfd bookkeeping (signal_handle_dup()). */
+    case SYS_dup:
 #endif
 #ifdef MACOS
     case SYS_fcntl_nocancel:
@@ -5690,16 +5692,24 @@ os_syscall_restart_pre(dcontext_t *dcontext)
     int ts_param = -1; /* The parameter holding a relative timespec timeout. */
     ostd->syscall_restart_param = -1;
     ostd->syscall_timeout_valid = false;
+    ostd->syscall_reissued_by_us = false;
+    ostd->syscall_restart_hides_eintr = false;
+    ostd->syscall_rem_param = -1;
+    int rem_param = -1;
     switch (dcontext->sys_num) {
 #    ifdef SYS_nanosleep
     case SYS_nanosleep:
         relative = true;
         ts_param = 0;
+        rem_param = 1;
         break;
 #    endif
     case SYS_clock_nanosleep:
         relative = !TESTANY(RESTART_TIMER_ABSTIME, (int)sys_param(dcontext, 1));
         ts_param = 2;
+        /* An absolute sleep does not fill in its remaining time. */
+        if (relative)
+            rem_param = 3;
         break;
     case SYS_futex:
         relative = ((int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK) ==
@@ -5723,6 +5733,20 @@ os_syscall_restart_pre(dcontext_t *dcontext)
         break;
     default: break;
     }
+#    if defined(AARCH64) || (defined(X86) && defined(X64))
+    /* Where we issue sleeps again: see os_syscall_restart_args(). */
+    if (rem_param > 0 && sys_param(dcontext, rem_param) != 0) {
+        /* The kernel fills in a sleep's remaining time whenever a signal interrupts
+         * it, ours included, and fails with EFAULT if it cannot.  Give it our own
+         * buffer, and give the app what it holds only when the app sees the sleep
+         * interrupted (os_syscall_restart_post()).
+         */
+        ostd->syscall_rem_param = rem_param;
+        ostd->syscall_rem_app = sys_param(dcontext, rem_param);
+        memset(&ostd->syscall_rem_shadow, 0, sizeof(ostd->syscall_rem_shadow));
+        set_syscall_param(dcontext, rem_param, (reg_t)&ostd->syscall_rem_shadow);
+    }
+#    endif
     if (relative) {
         ostd->syscall_start_ns = restart_clock_ns();
         struct timespec ts;
@@ -5794,30 +5818,115 @@ os_syscall_may_wait_restartably(int sysnum, reg_t arg0)
     }
 }
 
-/* Returns whether the syscall about to run may wait with no timeout and has no
- * temporary signal mask or other pre-syscall handling that could not be repeated
- * (handle_system_call()).
+/* Returns whether the syscall about to run may wait and has no temporary signal
+ * mask or other pre-syscall handling that could not be repeated, so that a signal
+ * pending as we issue it is delivered first (handle_system_call()).
+ *
+ * A timeout does not bound the delay usefully: a signal we hold is blocked in the
+ * kernel until we deliver it, so it cannot interrupt the wait, which runs its
+ * whole timeout (years, for a sleep standing in for an indefinite wait) before
+ * the handler that natively ends it gets to run.
  */
 bool
-os_syscall_is_unbounded_wait(dcontext_t *dcontext)
+os_syscall_is_wait_to_deliver_before(dcontext_t *dcontext)
 {
     switch (dcontext->sys_num) {
+    /* Our pre-syscall handling for timed waits only notes when they start
+     * (os_syscall_restart_pre()).
+     */
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep:
+#    endif
+    case SYS_clock_nanosleep: return true;
     case SYS_futex: {
         int cmd = (int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK;
-        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
-            sys_param(dcontext, 3) == 0;
+        return cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET;
     }
 #    ifdef SYS_epoll_wait
-    case SYS_epoll_wait: return (int)sys_param(dcontext, 3) < 0;
+    case SYS_epoll_wait: return true;
 #    endif
-    case SYS_epoll_pwait: return sys_param(dcontext, 4) == 0 && (int)sys_param(dcontext, 3) < 0;
+    /* The app's mask argument, saved by the pre-syscall handler: the register may
+     * hold the mask we pass the kernel instead, or NULL.
+     */
+    case SYS_epoll_pwait:
 #    ifdef SYS_epoll_pwait2
-    case SYS_epoll_pwait2: return sys_param(dcontext, 4) == 0 && sys_param(dcontext, 3) == 0;
+    case SYS_epoll_pwait2:
 #    endif
-    case SYS_ppoll: return sys_param(dcontext, 3) == 0 && sys_param(dcontext, 2) == 0;
-    case SYS_pselect6: return dcontext->sys_param4 == 0 && sys_param(dcontext, 4) == 0;
+    case SYS_pselect6: return dcontext->sys_param4 == 0;
+    case SYS_ppoll: return dcontext->sys_param3 == 0;
     default: return false;
     }
+}
+
+/* Returns whether the syscall about to run is a wait with a temporary signal mask
+ * that its pre-syscall handler installed (ppoll, pselect6, epoll_pwait{,2}).  A
+ * signal pending as we issue one fails it with EINTR, as natively for a signal
+ * pending at its entry: handle_system_call() and is_before_do_syscall().
+ */
+bool
+os_syscall_is_masked_wait(dcontext_t *dcontext)
+{
+    switch (dcontext->sys_num) {
+    case SYS_epoll_pwait:
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
+    case SYS_pselect6: return dcontext->sys_param4 != 0;
+    case SYS_ppoll: return dcontext->sys_param3 != 0;
+    default: return false;
+    }
+}
+
+static inline void
+set_failure_return_val(dcontext_t *dcontext, uint errno_val);
+
+/* Makes the syscall about to run return EINTR without running. */
+void
+os_syscall_fail_eintr(dcontext_t *dcontext)
+{
+    set_failure_return_val(dcontext, EINTR);
+    DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+}
+
+/* Returns whether a signal that finds the syscall about to run at its syscall
+ * instruction, with the live syscall number and arguments sysnum, arg1 and arg3,
+ * must have arrived before the kernel entered it.  The kernel puts a thread back at
+ * the instruction to restart an interrupted syscall only for the -ERESTARTSYS,
+ * -ERESTARTNOINTR and (without a handler) -ERESTARTNOHAND results.  These sleeps
+ * give none of them: an interrupted one fails with EINTR with a handler, or
+ * becomes restart_syscall after a stop (-ERESTART_RESTARTBLOCK).  We put the
+ * thread back there ourselves to issue a syscall again after our own signal
+ * (restart_syscall_interrupted_by_us()), with its timeout already advanced.
+ */
+bool
+os_syscall_unissued_at_syscall_instr(dcontext_t *dcontext, reg_t sysnum, reg_t arg1,
+                                     reg_t arg3)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (sysnum != (reg_t)dcontext->sys_num || ostd->syscall_reissued_by_us)
+        return false;
+    switch (dcontext->sys_num) {
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep: return true;
+#    endif
+    /* An absolute sleep gives -ERESTARTNOHAND. */
+    case SYS_clock_nanosleep: return !TESTANY(RESTART_TIMER_ABSTIME, (int)arg1);
+    case SYS_futex: {
+        int cmd = (int)arg1 & RESTART_FUTEX_CMD_MASK;
+        /* Without a timeout an interrupted wait gives -ERESTARTSYS. */
+        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
+            arg3 != 0;
+    }
+    default: return false;
+    }
+}
+
+/* restart_syscall_interrupted_by_us() is issuing the current syscall again. */
+void
+os_syscall_note_reissue(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    ostd->syscall_reissued_by_us = true;
 }
 
 /* For a syscall at our do_syscall gencode that returned -EINTR because our suspend
@@ -5934,6 +6043,108 @@ os_syscall_restart_post(dcontext_t *dcontext)
         set_syscall_param(dcontext, ostd->syscall_restart_param,
                           ostd->syscall_restart_app_value);
         ostd->syscall_restart_param = -1;
+    }
+    if (ostd->syscall_rem_param > 0) {
+        set_syscall_param(dcontext, ostd->syscall_rem_param, ostd->syscall_rem_app);
+        if ((ptr_int_t)MCXT_SYSCALL_RES(get_mcontext(dcontext)) == -EINTR &&
+            !ostd->syscall_restart_hides_eintr &&
+            !safe_write_ex((void *)ostd->syscall_rem_app,
+                           sizeof(ostd->syscall_rem_shadow), &ostd->syscall_rem_shadow,
+                           NULL)) {
+            /* As the kernel, for a remaining time it cannot write. */
+            set_failure_return_val(dcontext, EFAULT);
+        }
+        ostd->syscall_rem_param = -1;
+    }
+    ostd->syscall_restart_hides_eintr = false;
+}
+
+/* For a syscall that is not issued after all (handle_system_call() delivering a
+ * signal first): puts back the arguments os_syscall_restart_pre() changed.
+ */
+void
+os_syscall_restart_undo_pre(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (ostd->syscall_rem_param > 0) {
+        set_syscall_param(dcontext, ostd->syscall_rem_param, ostd->syscall_rem_app);
+        ostd->syscall_rem_param = -1;
+    }
+}
+
+/* Saves the app's arguments to the syscall about to run, before its pre-syscall
+ * handling replaces any with ours: a mask of ours for rt_sigsuspend, ppoll,
+ * pselect6, epoll_pwait{,2}, rt_sigtimedwait and signalfd, our remaining-time
+ * buffer for a sleep, and the arguments we issue a syscall with again.
+ */
+void
+os_syscall_save_app_args(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    for (int i = 0; i < OS_SYSCALL_APP_ARGS; i++)
+        ostd->syscall_app_args[i] = sys_param(dcontext, i);
+}
+
+/* For the current syscall about to be restarted from the app's syscall instruction
+ * after a signal handler (from a signal context): returns in *value the app's
+ * value of argument param.  Its pre-syscall handling runs again from the start,
+ * so the context must hold what the app passed, not what we passed the kernel:
+ * our buffers are per-thread, and a syscall in the handler can reuse them.
+ */
+bool
+os_syscall_app_arg(dcontext_t *dcontext, int param, reg_t *value)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (param < 0 || param >= OS_SYSCALL_APP_ARGS)
+        return false;
+    *value = ostd->syscall_app_args[param];
+    return true;
+}
+
+/* The -EINTR the current syscall returns is about to become a restart after the
+ * signal handler, so the app does not see it (adjust_syscall_for_restart()).
+ */
+void
+os_syscall_note_restart_after_signal(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    ostd->syscall_restart_hides_eintr = true;
+}
+
+/* Whether the current syscall is a wait we issued again after our own signal
+ * interrupted it (os_syscall_note_reissue()) that an app signal with a handler ends
+ * with EINTR natively whatever its SA_RESTART: -ERESTARTNOHAND,
+ * -ERESTART_RESTARTBLOCK, or plain EINTR.
+ */
+bool
+os_syscall_reissued_wait_ends_with_eintr(dcontext_t *dcontext)
+{
+    os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
+    if (!ostd->syscall_reissued_by_us)
+        return false;
+    switch (dcontext->sys_num) {
+#    ifdef SYS_nanosleep
+    case SYS_nanosleep:
+#    endif
+    case SYS_clock_nanosleep:
+    case SYS_ppoll:
+    case SYS_pselect6:
+#    ifdef SYS_epoll_wait
+    case SYS_epoll_wait:
+#    endif
+    case SYS_epoll_pwait:
+#    ifdef SYS_epoll_pwait2
+    case SYS_epoll_pwait2:
+#    endif
+    case SYS_rt_sigsuspend:
+    case SYS_rt_sigtimedwait: return true;
+    case SYS_futex: {
+        /* Without a timeout an interrupted wait gives -ERESTARTSYS. */
+        int cmd = (int)sys_param(dcontext, 1) & RESTART_FUTEX_CMD_MASK;
+        return (cmd == RESTART_FUTEX_WAIT || cmd == RESTART_FUTEX_WAIT_BITSET) &&
+            sys_param(dcontext, 3) != 0;
+    }
+    default: return false;
     }
 }
 #endif /* LINUX */
@@ -7890,7 +8101,16 @@ pre_system_call(dcontext_t *dcontext)
     }
 #endif
 
-    IF_LINUX(os_syscall_restart_pre(dcontext));
+#ifdef LINUX
+#    if defined(AARCH64) || (defined(X86) && defined(X64))
+    /* Before any handler below swaps an argument for something of ours.  Only
+     * where a restart from a signal restores them: on x86-32 reading the sixth
+     * would be an unchecked read of the app's stack.
+     */
+    os_syscall_save_app_args(dcontext);
+#    endif
+    os_syscall_restart_pre(dcontext);
+#endif
 
     switch (dcontext->sys_num) {
 
@@ -8503,20 +8723,25 @@ pre_system_call(dcontext_t *dcontext)
         else
 #    endif
             dcontext->sys_param3 = sys_param(dcontext, 3);
-        if (DYNAMO_OPTION(intercept_all_signals)) {
-            /* The kernel keeps the signals the app blocks pending (see
-             * signal_sync_kernel_mask()), so a real signalfd sees them.
-             */
-            kernel_sigset_t *kset = signal_signalfd_kernel_set(
-                dcontext, (kernel_sigset_t *)dcontext->sys_param1,
-                (size_t)dcontext->sys_param2);
-            if (kset != NULL)
-                set_syscall_param(dcontext, 1, (reg_t)kset);
+        kernel_sigset_t mask, *kmask;
+        int error = 0;
+        int route = signal_signalfd_route(
+            dcontext, (int)dcontext->sys_param0, (kernel_sigset_t *)dcontext->sys_param1,
+            (size_t)dcontext->sys_param2, (int)dcontext->sys_param3, &mask, &kmask,
+            &error);
+        if (route == SIGNALFD_ROUTE_KERNEL_MASK) {
+            set_syscall_param(dcontext, 1, (reg_t)kmask);
+            break;
+        } else if (route == SIGNALFD_ROUTE_KERNEL)
+            break;
+        else if (route == SIGNALFD_ROUTE_FAIL) {
+            set_failure_return_val(dcontext, error);
+            DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+            execute_syscall = false;
             break;
         }
-        new_result = handle_pre_signalfd(
-            dcontext, (int)dcontext->sys_param0, (kernel_sigset_t *)dcontext->sys_param1,
-            (size_t)dcontext->sys_param2, (int)dcontext->sys_param3);
+        new_result = handle_pre_signalfd(dcontext, (int)dcontext->sys_param0, &mask,
+                                         (int)dcontext->sys_param3);
         execute_syscall = false;
         /* since non-Mac, we can use this even if the call failed */
         set_success_return_val(dcontext, new_result);
@@ -8873,6 +9098,12 @@ pre_system_call(dcontext_t *dcontext)
 #endif
         break;
     }
+#ifdef LINUX
+    case SYS_dup:
+        /* For signal_handle_dup(). */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        break;
+#endif
 #if defined(SYS_dup2) || defined(SYS_dup3)
 #    ifdef SYS_dup3
     case SYS_dup3:
@@ -8882,6 +9113,9 @@ pre_system_call(dcontext_t *dcontext)
 #    endif
     {
         file_t newfd = (file_t)sys_param(dcontext, 1);
+        /* For signal_handle_dup(). */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = newfd;
         if (fd_is_dr_owned(newfd)) {
             SYSLOG_INTERNAL_WARNING_ONCE("app trying to dup-close DR file(s)");
             LOG(THREAD, LOG_TOP | LOG_SYSCALLS, 1,
@@ -10070,9 +10304,8 @@ post_system_call(dcontext_t *dcontext)
     case SYS_signalfd:
 #    endif
     case SYS_signalfd4:
-        /* Restore the mask pointer we replaced for the kernel. */
-        if (DYNAMO_OPTION(intercept_all_signals))
-            set_syscall_param(dcontext, 1, dcontext->sys_param1);
+        /* Restore the mask pointer we may have replaced for the kernel. */
+        set_syscall_param(dcontext, 1, dcontext->sys_param1);
         break;
 #endif
 #if defined(LINUX) && !defined(X64)
@@ -10138,16 +10371,16 @@ post_system_call(dcontext_t *dcontext)
     /****************************************************************************/
     /* FILES */
 
-#ifdef SYS_dup2
-    case SYS_dup2: IF_LINUX(case SYS_dup3:) {
-#    ifdef LINUX
-            if (success) {
-                signal_handle_dup(dcontext, (file_t)sys_param(dcontext, 1),
-                                  (file_t)result);
-            }
+#ifdef LINUX
+#    ifdef SYS_dup2
+    case SYS_dup2:
 #    endif
-            break;
-        }
+    case SYS_dup3:
+    case SYS_dup:
+        /* The source, saved pre-syscall: the result has replaced the register. */
+        if (success)
+            signal_handle_dup(dcontext, (file_t)dcontext->sys_param0, (file_t)result);
+        break;
 #endif
 
 #ifdef MACOS

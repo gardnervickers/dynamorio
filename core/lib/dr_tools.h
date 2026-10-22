@@ -2283,6 +2283,12 @@ DR_API
  *
  * Additional itimer signals are blocked while in our signal handler.
  *
+ * Disabling or replacing the timer does not wait for callbacks already
+ * under way: one that another thread's timer signal started before this
+ * call can run, or keep running, after this call returns, with the
+ * function previously installed.  A client that frees state that \p func
+ * uses after disabling the timer must synchronize with \p func itself.
+ *
  * The return value indicates whether the timer was successfully
  * installed (or uninstalled if 0 was passed for \p millisec).
  *

@@ -22,3 +22,41 @@ about to read from 1st fd for signal 44
 successful read: signal = 44, source is this process
 about to read from 2nd fd for signal 44
 successful read: signal = 44, source is this process
+signal 11: read from 2nd fd after closing 1st: 11
+signal 11: read from dup: 11
+signal 11: read from F_DUPFD_CLOEXEC dup: 11
+signal 11: read from dup3: 11
+signal 10: read from 2nd fd after closing 1st: 10
+signal 10: read from dup: 10
+signal 10: read from F_DUPFD_CLOEXEC dup: 10
+signal 10: read from dup3: 10
+signal 11: pending after closing its fd unread: yes
+signal 10: pending after closing its fd unread: yes
+signal 11: read of one pending before the fd: 11
+signal 10: read of one pending before the fd: 10
+signal 11: 1000 queued: first read 0, in order with none missing: yes
+signal 11: pending after a close racing sends, every time: yes
+ignored signal 12: read: 12
+signal 11: update to signal 7 returns the fd: yes
+signal 7: read after the update: 7
+signal 11: readable after the update: no
+signal 11: still pending: yes
+update with a NULL mask: EFAULT
+update with a bad size: EINVAL
+update with bad flags: EINVAL
+create with bad flags: EINVAL
+signal 10: update to signal 12 returns the fd: yes
+signal 12: read after the update: 12
+signal 10: readable after the update: no
+signal 10: still pending: yes
+update with a NULL mask: EFAULT
+update with a bad size: EINVAL
+update with bad flags: EINVAL
+create with bad flags: EINVAL
+mixed mask: read of signal 12: 12
+mixed mask: signal 11 read or still pending: yes
+update of a signal 11 fd to signal 10 too: ok
+update of a signal 11 fd to signal 10 instead: ok
+update of a signal 10 fd to signal 11 too: ok
+update of a signal 10 fd to signal 11 instead: ok
+update of a signal 11 fd to signal 7 instead: ok

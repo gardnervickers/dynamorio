@@ -104,7 +104,7 @@ set(main_run_list
   "SHORT::-code_api"
   # no_intercept_all_signals tests.
   # TODO i#5261: Remove this suite when -intercept_all_signals is deprecated.
-  "SHORT::LIN::ONLY::sigaction$::-no_code_api -no_intercept_all_signals"
+  "SHORT::LIN::ONLY::sigaction$|signal_waits_single$|signal_racesys$::-no_code_api -no_intercept_all_signals"
   # sanity check: run single app to make sure these options aren't totally broken
   # i#1575: ARM doesn't yet support -coarse_units
   "SHORT::X86::ONLY::client.events$::-code_api -opt_memory"
@@ -2679,6 +2679,11 @@ if (UNIX)
     tobuild_ci(client.nudge_test client-interface/nudge_test.runall "" "" "")
     # We disable traces to get bb prefixes for testing i#4669.
     tobuild_ci(client.timer client-interface/timer.c "" "-disable_traces" "")
+    if (LINUX)
+      # DR's itimer locks under contention from app threads and alarms.
+      tobuild_ci(client.itimer_threads client-interface/itimer_threads.c "" "" "")
+      link_with_pthread(client.itimer_threads)
+    endif ()
     if (X64)
       tobuild_ci(client.mangle_suspend client-interface/mangle_suspend.c ""
         "-vm_base 0x100000000 -no_vm_base_near_app" "")
@@ -5509,6 +5514,7 @@ if (UNIX)
     if (NOT ANDROID)
       tobuild(linux.threadexit2 linux/threadexit2.c) # XXX i#1874: hangs on Android
       tobuild(linux.signalfd linux/signalfd.c) # XXX i#1874: fails natively on Android
+      link_with_pthread(linux.signalfd)
     endif ()
   endif ()
   # i#784: test app behavior on alarm
@@ -5521,6 +5527,18 @@ if (UNIX)
     endif ()
     tobuild(linux.signal_racesys linux/signal_racesys.c)
     target_link_libraries(linux.signal_racesys rt)
+    if (AARCH64 OR X86) # The test's other thread runs code it writes.
+      tobuild(linux.signal_waits linux/signal_waits.c)
+      target_link_libraries(linux.signal_waits rt)
+      link_with_pthread(linux.signal_waits)
+      # Without its other thread, for -no_intercept_all_signals (see main_run_list).
+      torunonly(linux.signal_waits_single linux.signal_waits linux/signal_waits.c ""
+        "noflush")
+      # Each unmap of code its other thread ran resets DR's caches, suspending this
+      # thread in its waits, which DR then issues again.
+      torunonly(linux.signal_waits_reset linux.signal_waits linux/signal_waits.c
+        "-enable_reset -reset_every_nth_pending 1" "")
+    endif ()
 
     tobuild(linux.signal_pre_syscall linux/signal_pre_syscall.c)
     target_link_libraries(linux.signal_pre_syscall rt)

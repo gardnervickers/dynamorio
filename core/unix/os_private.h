@@ -247,6 +247,21 @@ typedef struct _os_thread_data_t {
     bool syscall_timeout_valid;
     struct timespec syscall_restart_timeout;
     int syscall_restart_param;
+    /* Whether we issued the current syscall again after our own signal interrupted
+     * it (restart_syscall_interrupted_by_us()): cleared by os_syscall_restart_pre().
+     */
+    bool syscall_reissued_by_us;
+    /* A sleep's remaining-time argument (syscall_rem_param, or -1), which we
+     * point at syscall_rem_shadow: the app's is syscall_rem_app.
+     */
+    int syscall_rem_param;
+    reg_t syscall_rem_app;
+    struct timespec syscall_rem_shadow;
+    /* The syscall's -EINTR is to become a restart after a signal handler. */
+    bool syscall_restart_hides_eintr;
+    /* The app's arguments to the current syscall (os_syscall_save_app_args()). */
+#    define OS_SYSCALL_APP_ARGS 6
+    reg_t syscall_app_args[OS_SYSCALL_APP_ARGS];
     reg_t syscall_restart_app_value;
 #endif
 #ifdef X86
@@ -457,8 +472,23 @@ handle_pre_sigtimedwait(dcontext_t *dcontext, kernel_sigset_t *set,
 void
 handle_post_sigpending(dcontext_t *dcontext, kernel_sigset_t *set, size_t sigsetsize);
 
-kernel_sigset_t *
-signal_signalfd_kernel_set(dcontext_t *dcontext, kernel_sigset_t *mask, size_t sizemask);
+enum {
+    SIGNALFD_ROUTE_KERNEL,      /* Issue the syscall as the app made it. */
+    SIGNALFD_ROUTE_KERNEL_MASK, /* Issue it with the mask we return. */
+    SIGNALFD_ROUTE_EMULATE,     /* handle_pre_signalfd(). */
+    SIGNALFD_ROUTE_FAIL,        /* Fail it with the errno we return. */
+};
+
+int
+signal_signalfd_route(dcontext_t *dcontext, int fd, kernel_sigset_t *app_mask,
+                      size_t sizemask, int flags, kernel_sigset_t *mask,
+                      kernel_sigset_t **kmask, int *error);
+
+bool
+signal_peek_held_signal(dcontext_t *dcontext, int sig, kernel_siginfo_t *siginfo);
+
+void
+signal_drop_held_signal(dcontext_t *dcontext, int sig);
 
 kernel_sigset_t *
 signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
@@ -466,14 +496,16 @@ signal_sigtimedwait_kernel_set(dcontext_t *dcontext, kernel_sigset_t *set,
 
 #ifdef LINUX
 ptr_int_t
-handle_pre_signalfd(dcontext_t *dcontext, int fd, kernel_sigset_t *mask, size_t sizemask,
-                    int flags);
+handle_pre_signalfd(dcontext_t *dcontext, int fd, const kernel_sigset_t *mask, int flags);
 
 void
 signal_handle_dup(dcontext_t *dcontext, file_t src, file_t dst);
 
 void
 signal_handle_close(dcontext_t *dcontext, file_t fd);
+
+bool
+signal_is_emulated_signalfd(file_t fd);
 void
 signal_handle_close_range(dcontext_t *dcontext, uint first, uint last);
 #endif

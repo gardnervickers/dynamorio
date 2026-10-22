@@ -482,7 +482,26 @@ typedef struct _kernel_sigset_t {
 void
 receive_pending_signal(dcontext_t *dcontext);
 bool
-os_syscall_is_unbounded_wait(dcontext_t *dcontext);
+os_syscall_is_wait_to_deliver_before(dcontext_t *dcontext);
+bool
+os_syscall_is_masked_wait(dcontext_t *dcontext);
+void
+os_syscall_fail_eintr(dcontext_t *dcontext);
+bool
+os_syscall_unissued_at_syscall_instr(dcontext_t *dcontext, reg_t sysnum, reg_t arg1,
+                                     reg_t arg3);
+void
+os_syscall_note_reissue(dcontext_t *dcontext);
+void
+os_syscall_restart_undo_pre(dcontext_t *dcontext);
+void
+os_syscall_save_app_args(dcontext_t *dcontext);
+bool
+os_syscall_app_arg(dcontext_t *dcontext, int param, reg_t *value);
+void
+os_syscall_note_restart_after_signal(dcontext_t *dcontext);
+bool
+os_syscall_reissued_wait_ends_with_eintr(dcontext_t *dcontext);
 bool
 os_syscall_may_wait_restartably(int sysnum, reg_t arg0);
 bool

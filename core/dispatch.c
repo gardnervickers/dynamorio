@@ -2138,6 +2138,7 @@ handle_system_call(dcontext_t *dcontext)
         set_at_syscall(dcontext, true);
         KSTART_DC(dcontext, syscall_fcache); /* stopped in dispatch_exit_fcache_stats */
         bool is_ignorable = ignorable_system_call(sysnum, NULL, dcontext);
+        IF_LINUX(bool fail_masked_wait = false;)
         do {
 #ifdef UNIX
             /* It is difficult to undo some pre-syscall handling, especially for
@@ -2155,13 +2156,28 @@ handle_system_call(dcontext_t *dcontext)
                     !was_thread_create_syscall(dcontext)) ||
                    !is_ignorable);
             if (!is_ignorable && dcontext->signals_pending > 0) {
-                /* A wait that may block indefinitely would hold the signal back
-                 * for that long, with further instances blocked in the kernel while
-                 * we hold this one.  Its pre-syscall handling is safe to repeat, so
-                 * deliver the signal first, as natively, and issue it again after.
+                /* A wait would hold the signal back until it ends by itself, as
+                 * the kernel blocks the signal (and further instances) while we
+                 * hold it.  Its pre-syscall handling is safe to repeat, so deliver
+                 * the signal first, as natively, and issue it again after.
                  */
-                if (IF_LINUX_ELSE(os_syscall_is_unbounded_wait(dcontext), false))
+                if (IF_LINUX_ELSE(os_syscall_is_wait_to_deliver_before(dcontext), false))
                     break;
+#    ifdef LINUX
+                /* A wait with a temporary mask fails with EINTR when a signal is
+                 * pending at its entry, as its pre-syscall handler does for one
+                 * pending when it installs the mask.
+                 * XXX: an approximation, as is that handler's: natively an fd
+                 * already ready, a zero timeout or an invalid argument can take
+                 * precedence.  Handing a kernel-blockable signal back to the
+                 * kernel, blocked until the wait's mask unblocks it, and issuing
+                 * the wait would let the kernel decide.
+                 */
+                if (os_syscall_is_masked_wait(dcontext)) {
+                    fail_masked_wait = true;
+                    break;
+                }
+#    endif
                 dcontext->signals_pending = -1;
             }
 #    endif
@@ -2178,18 +2194,33 @@ handle_system_call(dcontext_t *dcontext)
                 break;
 #endif
         } while (repeat);
+#ifdef LINUX
+        if (fail_masked_wait) {
+            LOG(THREAD, LOG_DISPATCH, 2,
+                "Signal pending at a wait with a temporary mask: failing it\n");
+            KSTOP(syscall_fcache);
+            dcontext->whereami = DR_WHERE_DISPATCH;
+            os_syscall_fail_eintr(dcontext);
+            /* Restores the app's mask and arguments; the signal is then delivered
+             * after the syscall, with the app's mask for its frame.
+             */
+            handle_post_system_call(dcontext);
+        } else
+#endif
 #ifdef UNIX
-        if (dcontext->signals_pending != 0) {
+            if (dcontext->signals_pending != 0) {
             /* i#2019: see comments in dispatch_enter_fcache() */
             KSTOP(syscall_fcache);
             dcontext->whereami = DR_WHERE_DISPATCH;
             set_at_syscall(dcontext, false);
             dcontext->next_tag = saved_next_tag;
             set_next_tag_to_prior_syscall(dcontext);
+            /* The app issues it again after the handler. */
+            IF_LINUX(os_syscall_restart_undo_pre(dcontext));
             /* This only happens for ignorable syscalls and the waits of
-             * os_syscall_is_unbounded_wait(), so there is no pre-syscall handling to
-             * undo or worry about duplicating when we re-attempt to execute it after
-             * the app's signal handler.
+             * os_syscall_is_wait_to_deliver_before(), so there is no pre-syscall
+             * handling to undo or worry about duplicating when we re-attempt to
+             * execute it after the app's signal handler.
              */
             LOG(THREAD, LOG_DISPATCH, 2,
                 "Signal arrived in DR: aborting ignorable syscall enter; interrupted " PFX

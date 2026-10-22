@@ -1,0 +1,21 @@
+nanosleep: ok
+nanosleep (SA_RESTART): ok
+SYS_nanosleep: ok
+SYS_nanosleep (SA_RESTART): ok
+ppoll: ok
+ppoll (SA_RESTART): ok
+ppoll with mask: ok
+ppoll with mask (SA_RESTART): ok
+epoll_pwait with mask: ok
+epoll_pwait with mask (SA_RESTART): ok
+pselect with mask: ok
+pselect with mask (SA_RESTART): ok
+futex wait: ok
+futex wait (SA_RESTART): ok
+long SYS_nanosleep: ok
+long SYS_nanosleep (SA_RESTART): ok
+sigsuspend: ok
+sigsuspend (SA_RESTART): ok
+sleeps with an unwritable or NULL rem: ok
+sleep with rem == req: ok
+all done
