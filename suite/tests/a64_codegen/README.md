@@ -23,7 +23,7 @@ From a build directory configured with `-DBUILD_TESTS=ON` on AArch64 Linux:
     ninja a64_codegen_tests
     ctest -L a64_codegen -V        # -V shows the benchmark lines
 
-Release builds take a couple of minutes. To benchmark or investigate, run the binaries directly. `suite/tests/bin/api.a64_codegen_ir -reps 10 -bench-only` gives steadier numbers. `suite/tests/bin/api.a64_codegen_build -modes progress -ops seedbox -blocks 20000` runs one configuration on a bigger chain. Both print usage for unknown arguments. Benchmark numbers from a release build are the ones that matter; debug DR's are dominated by its checks.
+Release builds take a couple of minutes. To benchmark or investigate, run the binaries directly. `suite/tests/bin/api.a64_codegen_ir -reps 10 -bench-only` gives steadier numbers. `suite/tests/bin/api.a64_codegen_build -modes progress -ops seedbox -blocks 20000` runs one configuration on a bigger chain, and `-fault-blocks 0` leaves out the faults guard. Both print usage for unknown arguments. Benchmark numbers from a release build are the ones that matter; debug DR's are dominated by its checks.
 
 ## api.a64_codegen_ir
 
@@ -83,6 +83,7 @@ The chain is a sequence of distinct blocks. Each block has `-len` pseudo-random 
 | `build` | The first run of fresh copies of the chain, minus native time, per block and per instruction. Best of `-reps`, then the first, median and last, then every rep in order. Each copy is built into a bigger code cache than the one before, so a cost that grows with the cache makes later reps dearer, which the best hides: a `note` says so when the last rep costs over 1.5x the first. |
 | `exec` | Repeated runs of a built copy, per block, as a multiple of native |
 | `size` | Code-cache bytes per block (`dr_fragment_size()`) |
+| `fault` | Time per fault of the built fault chain (see the faults guard): DR's signal delivery and translation, with native's alongside |
 
 **Guards**
 
@@ -90,6 +91,7 @@ The chain is a sequence of distinct blocks. Each block has `-len` pseudo-random 
 - **fragments:** after a build, every block has a fragment, and the basic block count rose by at least the number of blocks.
 - **size:** the bytes per block are within `budgets[]` in `api/a64_codegen_build.c`, for the default chain. A change that grows the code must raise the budget on purpose. A change that shrinks it is told to lower the budget, which ratchets the gain in.
 - **verbatim:** on a copy built with a marker (the client stores each block's code-cache address to a table), every application instruction is in its fragment bit for bit. It must sit at a code-cache address that `dr_app_pc_from_cache_pc()` translates back to its own application address. This guards encode-at-emit shortcuts and translation recording. It applies to every mode except `dr`, which has no client events to insert the marker.
+- **faults:** DR's fault translation through each client's instrumentation. A separate chain of `-fault-blocks` blocks (default 324; ctest on debug DR uses 162) has one faulting load or store per block, to a guard page. Every 81 blocks cover each of the 9 positions (before each of the 8 instructions, or before the CBNZ) with each of 9 kinds: `ldr`/`str`/`ldp`/`stp` of GPRs, `ldr` of a Q register, a `str` through sp, and the stolen register x28 as base, data and destination. The blocks of the second and fourth 81 also have the marker, which leaves drreg spills pending a lazy restore at the fault. The chain runs natively, then twice under DR (as DR builds it, then built), with a SIGSEGV handler that records the frame and resumes after the faulting instruction. Every frame under DR must equal the native one: signal, `si_code`, `si_addr`, pc, sp, PSTATE, FAR, ESR, x0–x30, FPSR, FPCR and v0–v31. Only PSTATE.SSBS is masked, because it is not deterministic in a frame even natively. Each fault resumes from its native frame, so a wrong frame is reported once rather than in every later block, and the run's result must still match native's. The guard is part of the default mode, not of the scaling, patch or ibl modes.
 
 **Scaling mode (`-scale N`)**
 
@@ -139,7 +141,8 @@ Every worker checks its first call and every patch, and synchronizes with `ldar;
 
 `api.a64_codegen_ibl` checks that no ibl table entry outlives a flush. A function made a trace head (a stub after it branches back to it) is called indirectly until it is hot, from the hot loop and from a block of its own, then rewritten and invalidated (a flush with all threads synched), then the cache is churned with a fresh chain and the function called indirectly again, first from a block outside any trace: it must return the new value. It is a smoke test: nothing checks that the trace is in both the trace and the bb ibl tables at the flush, and it passed with the ibl walk skipped regardless of traces, so it does not cover a trace's bb-table entry outliving the trace (which is why the walk stays on with traces). With `-ops ibtraces_shared` (traces on, in the bb ibl tables too, both table kinds shared; `-no_xl8_code_copy`, as blocks that keep a copy of writable code do not join traces) the function becomes a trace, which the test checks. It also runs under the seedbox options. `-ops ibtraces` (shared bb and private trace ibl tables) crashes in this test, on 62f76c5f4 as well, so the ctest leaves it out; debug DR runs only the seedbox options, as `-ops ibtraces_shared` trips a debug assert there (monitor.c's `unlink_ibt_trace_head()`: a private trace head with shared bb ibl tables), on 62f76c5f4 as well.
 
-Two things matter if you change the test:
+Three things matter if you change the test:
 
 - **The fragment queries run with the thread native**, after `dr_app_stop()` and before `dr_app_cleanup()`. Under static DR, DR's own code runs from the code cache. A lookup made there would take the fragment table lock, and then wait for that same lock when DR builds the lookup's next block.
-- **The marker must stay set once it is used.** Translation instruments the block again, and it must produce the same code.
+- **The marker must stay set once it is used.** Translation instruments the block again, and it must produce the same code. The fault chain's marker is decided by the block alone and is set before DR starts.
+- **The fault chain is entered with every register fixed.** `a64cg_fault_enter()` loads x0–x30, sp, v0–v31, FPSR and FPCR from fixed values. The chain, its data, its stack and its guard pages are mapped before the children fork, so every address in a frame is the same natively and in each child.

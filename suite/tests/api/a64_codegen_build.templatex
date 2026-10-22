@@ -1,3 +1,4 @@
 chain: [ -~]*
-((build|exec|size|note|scale|patch|ibl) [ -~]*
+(faults: [ -~]*
+)?((build|exec|size|note|scale|patch|ibl|fault) [ -~]*
 )*a64_codegen_build: done

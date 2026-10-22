@@ -90,6 +90,19 @@
  *               through a second, writable mapping) that it puts back before the
  *               emit; and encoding a decoded B.EQ whose predicate the client set to
  *               NE gives B.NE
+ *   faults      a separate, smaller chain whose blocks each have one faulting
+ *               load or store (to a guard page, at every position in the
+ *               block, through x0, x18, sp and the stolen register x28) runs
+ *               twice (as DR builds it, then built) with a SIGSEGV handler
+ *               that records the frame and skips the instruction.  Every
+ *               frame must be the native one: the signal, si_addr, pc, sp,
+ *               PSTATE (but SSBS), FAR, ESR, x0-x30, FPSR, FPCR and v0-v31,
+ *               all of which the chain is entered with from fixed values.
+ *               This is DR's (and drreg's) fault translation through each
+ *               client's instrumentation.  Half the blocks also have the
+ *               marker, which leaves drreg spills to restore lazily.  Each
+ *               fault resumes from its native frame, so a wrong frame is
+ *               reported once and the run's result still has to match.
  *
  * Scaling mode (-scale N): instead of the above, each configuration builds N
  * distinct blocks, as -slice-sized chains run one after another, and reports
@@ -112,7 +125,8 @@
  * test if that is over N blocks per flush.
  *
  * Usage: api.a64_codegen_build [-blocks N] [-len N] [-reps N] [-runs N]
- *                              [-modes m1,m2,...] [-ops o1,o2,...|all]
+ *                              [-fault-blocks N] [-modes m1,m2,...]
+ *                              [-ops o1,o2,...|all]
  *                              [-scale N [-bucket N] [-slice N] [-limit X]
  *                               [-scale-guard] [-layout l1,l2,...]
  *                               [-flushes K [-flush-limit N]]]
@@ -128,6 +142,7 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -138,6 +153,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 /***************************************************************************
@@ -213,6 +229,9 @@ static const double budgets[NUM_OPS][NUM_MODES] = {
 
 #define DEFAULT_BLOCKS 4000
 #define DEFAULT_LEN 8
+/* Four of each position of the faulting instruction with each kind. */
+#define DEFAULT_FAULT_BLOCKS (4 * (DEFAULT_LEN + 1) * NUM_FAULT_KINDS)
+#define FAULT_SEED 0xfa0175eedULL
 #define DEFAULT_SEED 0x5eedb0c5ULL
 #define PROGRESS_BUDGET 50000 /* Seedbox's instructions per progress call. */
 
@@ -346,6 +365,75 @@ gen_body_instr(uint64_t *s)
     }
 }
 
+/* The fault chain's faulting instructions.  Its scratch area ends at a guard
+ * page (so x0 + SCRATCH_WORDS * 8 faults), x18 holds that page's address, and
+ * sp and the stolen register x28 hold the address of a second guard page,
+ * above the chain's stack (fault_area_t).
+ */
+#define REG_GUARD 18
+#define REG_STOLEN 28
+#define REG_SP 31
+enum {
+    FAULT_LDR,        /* ldr xd, [x0, #guard] */
+    FAULT_STR,        /* str xd, [x0, #guard] */
+    FAULT_LDP,        /* ldp xd, xm, [x18, #k] */
+    FAULT_STP,        /* stp xd, xm, [x18, #k] */
+    FAULT_LDR_Q,      /* ldr qd, [x18, #k] */
+    FAULT_STR_W_SP,   /* str wd, [sp, #k] */
+    FAULT_LDR_X28,    /* ldr xd, [x28, #k]: the stolen register as the base */
+    FAULT_STR_X28,    /* str x28, [x18, #k]: as the data */
+    FAULT_LDR_TO_X28, /* ldr x28, [x18, #k]: as the destination */
+    NUM_FAULT_KINDS
+};
+static const char *const fault_kind_names[NUM_FAULT_KINDS] = {
+    "ldr",      "str",          "ldp",     "stp",        "ldr-q",
+    "str-w-sp", "ldr-x28-base", "str-x28", "ldr-to-x28",
+};
+
+/* Block b of a fault chain of blocks of len instructions faults at position
+ * fault_pos() (0..len, the instructions before it) with kind fault_kind(), so
+ * that every NUM_FAULT_KINDS * (len + 1) blocks cover every position with
+ * every kind.
+ */
+static int
+fault_pos(int b, int len)
+{
+    return b % (len + 1);
+}
+
+static int
+fault_kind(int b, int len)
+{
+    return b / (len + 1) % NUM_FAULT_KINDS;
+}
+
+/* Whether block b of a fault chain has the marker (fault_marker_block()). */
+static bool
+fault_marked(int b, int len)
+{
+    return b / ((len + 1) * NUM_FAULT_KINDS) % 2 == 1;
+}
+
+static uint32_t
+gen_fault_instr(uint64_t *s, int kind)
+{
+    uint d = dreg(s), m = dreg(s);
+    uint k = rnd(s, 63);
+    if (m == d)
+        m = d % NUM_DATA_REGS + 1;
+    switch (kind) {
+    case FAULT_LDR: return 0xf9400000 | (SCRATCH_WORDS + k) << 10 | REG_BASE << 5 | d;
+    case FAULT_STR: return 0xf9000000 | (SCRATCH_WORDS + k) << 10 | REG_BASE << 5 | d;
+    case FAULT_LDP: return 0xa9400000 | k << 15 | m << 10 | REG_GUARD << 5 | d;
+    case FAULT_STP: return 0xa9000000 | k << 15 | m << 10 | REG_GUARD << 5 | d;
+    case FAULT_LDR_Q: return 0x3dc00000 | k << 10 | REG_GUARD << 5 | rnd(s, 32);
+    case FAULT_STR_W_SP: return 0xb9000000 | k << 10 | REG_SP << 5 | d;
+    case FAULT_LDR_X28: return 0xf9400000 | k << 10 | REG_STOLEN << 5 | d;
+    case FAULT_STR_X28: return 0xf9000000 | k << 10 | REG_GUARD << 5 | REG_STOLEN;
+    default: return 0xf9400000 | k << 10 | REG_GUARD << 5 | REG_STOLEN;
+    }
+}
+
 #define BRK 0xd4200020
 #define RET 0xd65f03c0
 
@@ -406,16 +494,17 @@ block_at(const chain_t *c, int pos)
  * fall-through, which never runs (with LAYOUT_HUB, a CBZ on x0 to the hub, and
  * the fall-through is the next block).  Copies made from the same seed are the
  * same code at different addresses.  Without layout flags the chain is one
- * contiguous mapping: entry, blocks, exit.
+ * contiguous mapping: entry, blocks, exit.  With faults, each block also
+ * has a faulting instruction, at fault_pos(), to run with fault_run().
  */
 static void
-chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout)
+chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout, bool faults)
 {
     bool sparse = TESTANY(LAYOUT_SPARSE, layout), hub = TESTANY(LAYOUT_HUB, layout);
     bool perpage = TESTANY(LAYOUT_PERPAGE, layout), fanin = TESTANY(LAYOUT_FANIN, layout);
     size_t exit_words = EXIT_WORDS + (fanin ? 1 : 0);
     c->blocks = blocks;
-    c->stride = len + (hub || fanin ? 1 : 2);
+    c->stride = len + (hub || fanin ? 1 : 2) + (faults ? 1 : 0);
     c->reverse = TESTANY(LAYOUT_REVERSE, layout);
     if (sparse) {
         c->per_region = PAGE_WORDS / c->stride;
@@ -474,8 +563,13 @@ chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout)
     *p++ = BRK;
     for (int b = 0; b < blocks; b++) {
         p = block_at(c, c->reverse ? blocks - 1 - b : b);
-        for (int i = 0; i < len; i++)
+        for (int i = 0; i < len; i++) {
+            if (faults && i == fault_pos(b, len))
+                *p++ = gen_fault_instr(&seed, fault_kind(b, len));
             *p++ = gen_body_instr(&seed);
+        }
+        if (faults && fault_pos(b, len) == len)
+            *p++ = gen_fault_instr(&seed, fault_kind(b, len));
         uint32_t *next = b + 1 == blocks
             ? exit_block
             : block_at(c, c->reverse ? blocks - 2 - b : b + 1);
@@ -603,6 +697,333 @@ prov_run(int fn)
 }
 
 /***************************************************************************
+ * Running the fault chain
+ */
+
+/* The state the fault chain is entered with: every register is fixed, so that
+ * a fault frame under DR can be compared with the native one in full.  The
+ * chain's entry block then loads x1-x17 from the scratch area at x0.
+ */
+typedef struct {
+    uint64_t x[31]; /* x17 is the chain's entry, x30 a64cg_fault_return */
+    uint64_t sp;
+    uint64_t host_sp; /* Set by a64cg_fault_enter(). */
+    uint64_t pad;
+    __uint128_t q[32];
+} fault_in_t;
+
+__attribute__((visibility("hidden"))) fault_in_t a64cg_fault_in;
+
+/* Saves the callee-saved registers, enters the chain with the state in
+ * *in (a64cg_fault_in), and returns when the chain's exit block returns to
+ * a64cg_fault_return, with FPCR restored.
+ */
+void
+a64cg_fault_enter(fault_in_t *in);
+void
+a64cg_fault_return(void);
+
+__asm__(".text\n"
+        ".global a64cg_fault_enter\n"
+        ".type a64cg_fault_enter, %function\n"
+        ".p2align 2\n"
+        "a64cg_fault_enter:\n"
+        "  stp x29, x30, [sp, #-176]!\n"
+        "  mov x29, sp\n"
+        "  stp x19, x20, [sp, #16]\n"
+        "  stp x21, x22, [sp, #32]\n"
+        "  stp x23, x24, [sp, #48]\n"
+        "  stp x25, x26, [sp, #64]\n"
+        "  stp x27, x28, [sp, #80]\n"
+        "  stp d8, d9, [sp, #96]\n"
+        "  stp d10, d11, [sp, #112]\n"
+        "  stp d12, d13, [sp, #128]\n"
+        "  stp d14, d15, [sp, #144]\n"
+        "  mrs x2, fpcr\n"
+        "  str x2, [sp, #160]\n"
+        "  mov x2, sp\n"
+        "  str x2, [x0, #256]\n"
+        "  msr fpcr, xzr\n"
+        "  msr fpsr, xzr\n"
+        "  add x1, x0, #272\n"
+        "  ldp q0, q1, [x1, #0]\n"
+        "  ldp q2, q3, [x1, #32]\n"
+        "  ldp q4, q5, [x1, #64]\n"
+        "  ldp q6, q7, [x1, #96]\n"
+        "  ldp q8, q9, [x1, #128]\n"
+        "  ldp q10, q11, [x1, #160]\n"
+        "  ldp q12, q13, [x1, #192]\n"
+        "  ldp q14, q15, [x1, #224]\n"
+        "  ldp q16, q17, [x1, #256]\n"
+        "  ldp q18, q19, [x1, #288]\n"
+        "  ldp q20, q21, [x1, #320]\n"
+        "  ldp q22, q23, [x1, #352]\n"
+        "  ldp q24, q25, [x1, #384]\n"
+        "  ldp q26, q27, [x1, #416]\n"
+        "  ldp q28, q29, [x1, #448]\n"
+        "  ldp q30, q31, [x1, #480]\n"
+        "  ldr x1, [x0, #248]\n"
+        "  mov sp, x1\n"
+        "  ldp x1, x2, [x0, #8]\n"
+        "  ldp x3, x4, [x0, #24]\n"
+        "  ldp x5, x6, [x0, #40]\n"
+        "  ldp x7, x8, [x0, #56]\n"
+        "  ldp x9, x10, [x0, #72]\n"
+        "  ldp x11, x12, [x0, #88]\n"
+        "  ldp x13, x14, [x0, #104]\n"
+        "  ldp x15, x16, [x0, #120]\n"
+        "  ldp x17, x18, [x0, #136]\n"
+        "  ldp x19, x20, [x0, #152]\n"
+        "  ldp x21, x22, [x0, #168]\n"
+        "  ldp x23, x24, [x0, #184]\n"
+        "  ldp x25, x26, [x0, #200]\n"
+        "  ldp x27, x28, [x0, #216]\n"
+        "  ldp x29, x30, [x0, #232]\n"
+        "  ldr x0, [x0]\n"
+        "  br x17\n"
+        ".global a64cg_fault_return\n"
+        "a64cg_fault_return:\n"
+        "  adrp x1, a64cg_fault_in\n"
+        "  add x1, x1, :lo12:a64cg_fault_in\n"
+        "  ldr x2, [x1, #256]\n"
+        "  mov sp, x2\n"
+        "  ldr x2, [sp, #160]\n"
+        "  msr fpcr, x2\n"
+        "  ldp x19, x20, [sp, #16]\n"
+        "  ldp x21, x22, [sp, #32]\n"
+        "  ldp x23, x24, [sp, #48]\n"
+        "  ldp x25, x26, [sp, #64]\n"
+        "  ldp x27, x28, [sp, #80]\n"
+        "  ldp d8, d9, [sp, #96]\n"
+        "  ldp d10, d11, [sp, #112]\n"
+        "  ldp d12, d13, [sp, #128]\n"
+        "  ldp d14, d15, [sp, #144]\n"
+        "  ldp x29, x30, [sp], #176\n"
+        "  ret\n"
+        ".size a64cg_fault_enter, .-a64cg_fault_enter\n");
+
+/* The fault chain's data, in one mapping made before the children fork, so
+ * that every address (and so every register in a fault frame) is the same
+ * natively and in each child: the scratch area at the end of a page, the
+ * guard page x0 + SCRATCH_WORDS * 8 and x18 point to, the chain's stack, and
+ * the guard page above it that sp and x28 point to.
+ */
+#define FAULT_STACK (256 * 1024)
+typedef struct {
+    uint64_t *scratch;
+    byte *guard, *stack_top; /* The two guard pages. */
+} fault_area_t;
+
+/* One fault frame, as the handler saw it. */
+typedef struct {
+    int signo, code;
+    uint64_t addr, pc, sp, pstate, fault_address, esr;
+    int has_esr, has_fp;
+    uint64_t x[31];
+    uint32_t fpsr, fpcr;
+    __uint128_t v[32];
+} frame_t;
+
+typedef struct {
+    int n, max;
+    frame_t *f;
+} fault_log_t;
+
+static fault_area_t fault_area;
+static chain_t *volatile fault_chain_cur;
+static fault_log_t *volatile fault_log_cur;
+/* If set, the native frames: each fault resumes from its native frame rather
+ * than its own, so that a frame DR got wrong is reported once and does not
+ * carry into the following blocks' frames.
+ */
+static fault_log_t *volatile fault_resume_from;
+/* For the handler's failure report: the configuration, or "native". */
+static const char *volatile fault_who = "native";
+
+static void
+fault_area_make(void)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t bytes = page + page + FAULT_STACK + page;
+    byte *m =
+        mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
+    }
+    fault_area.guard = m + page;
+    fault_area.scratch = (uint64_t *)fault_area.guard - SCRATCH_WORDS;
+    fault_area.stack_top = fault_area.guard + page + FAULT_STACK;
+    if (mprotect(fault_area.guard, page, PROT_NONE) != 0 ||
+        mprotect(fault_area.stack_top, page, PROT_NONE) != 0) {
+        perror("mprotect");
+        exit(1);
+    }
+}
+
+/* A signal frame record (struct _aarch64_ctx and its kinds). */
+struct rec_head {
+    uint32_t magic, size;
+};
+#define FPSIMD_MAGIC_ 0x46508001
+#define ESR_MAGIC_ 0x45535201
+#define EXTRA_MAGIC_ 0x45585401
+struct fpsimd_rec {
+    struct rec_head h;
+    uint32_t fpsr, fpcr;
+    __uint128_t v[32];
+};
+struct esr_rec {
+    struct rec_head h;
+    uint64_t esr;
+};
+struct extra_rec {
+    struct rec_head h;
+    uint64_t datap;
+    uint32_t size;
+};
+
+static struct rec_head *
+find_rec(ucontext_t *uc, uint32_t magic)
+{
+    byte *p = (byte *)uc->uc_mcontext.__reserved;
+    byte *end = p + sizeof(uc->uc_mcontext.__reserved);
+    for (int n = 0; n < 64 && p + sizeof(struct rec_head) <= end; n++) {
+        struct rec_head *h = (struct rec_head *)p;
+        if (h->magic == 0)
+            break;
+        if (h->magic == magic)
+            return h;
+        if (h->magic == EXTRA_MAGIC_) {
+            struct extra_rec *e = (struct extra_rec *)h;
+            p = (byte *)(uintptr_t)e->datap;
+            end = p + e->size;
+            continue;
+        }
+        if (h->size == 0)
+            break;
+        p += h->size;
+    }
+    return NULL;
+}
+
+/* Records the frame of a fault in the fault chain and resumes after the
+ * faulting instruction.  Anything else is reported and ends the process.
+ */
+static void
+fault_handler(int sig, siginfo_t *si, void *ucv)
+{
+    ucontext_t *uc = (ucontext_t *)ucv;
+    uint64_t pc = uc->uc_mcontext.pc;
+    chain_t *c = fault_chain_cur;
+    fault_log_t *log = fault_log_cur;
+    if (c == NULL || log == NULL || pc < (uint64_t)c->code ||
+        pc >= (uint64_t)(c->code + c->words) || log->n >= log->max) {
+        char buf[256];
+        int len =
+            snprintf(buf, sizeof(buf),
+                     "FAIL %s: signal %d at pc %p (addr %p) outside the fault "
+                     "chain or after %d faults\n",
+                     fault_who, sig, (void *)pc, si->si_addr, log == NULL ? -1 : log->n);
+        if (write(1, buf, len) < 0) {
+            /* Nothing more to do. */
+        }
+        _exit(1);
+    }
+    frame_t *f = &log->f[log->n++];
+    memset(f, 0, sizeof(*f));
+    f->signo = sig;
+    f->code = si->si_code;
+    f->addr = (uint64_t)si->si_addr;
+    f->pc = pc;
+    f->sp = uc->uc_mcontext.sp;
+    f->pstate = uc->uc_mcontext.pstate;
+    f->fault_address = uc->uc_mcontext.fault_address;
+    memcpy(f->x, uc->uc_mcontext.regs, sizeof(f->x));
+    struct fpsimd_rec *fp = (struct fpsimd_rec *)find_rec(uc, FPSIMD_MAGIC_);
+    if (fp != NULL) {
+        f->has_fp = 1;
+        f->fpsr = fp->fpsr;
+        f->fpcr = fp->fpcr;
+        memcpy(f->v, fp->v, sizeof(f->v));
+    }
+    struct esr_rec *er = (struct esr_rec *)find_rec(uc, ESR_MAGIC_);
+    if (er != NULL) {
+        f->has_esr = 1;
+        f->esr = er->esr;
+    }
+    fault_log_t *from = fault_resume_from;
+    if (from != NULL && log->n <= from->n) {
+        f = &from->f[log->n - 1];
+        pc = f->pc;
+        memcpy(uc->uc_mcontext.regs, f->x, sizeof(f->x));
+        uc->uc_mcontext.sp = f->sp;
+        uc->uc_mcontext.pstate = f->pstate;
+        if (fp != NULL) {
+            fp->fpsr = f->fpsr;
+            fp->fpcr = f->fpcr;
+            memcpy(fp->v, f->v, sizeof(fp->v));
+        }
+    }
+    uc->uc_mcontext.pc = pc + 4;
+}
+
+static void
+fault_handler_set(bool on)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    if (on) {
+        sa.sa_sigaction = fault_handler;
+        sa.sa_flags = SA_SIGINFO;
+    } else
+        sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+}
+
+static void
+fault_log_init(fault_log_t *log, int blocks)
+{
+    log->n = 0;
+    log->max = 2 * blocks + 8;
+    log->f = calloc(log->max, sizeof(*log->f));
+}
+
+/* Runs fault chain c from the fixed state, with its frames logged to log, and
+ * returns the hash of the scratch area.
+ */
+static uint64_t
+fault_run(chain_t *c, fault_log_t *log)
+{
+    uint64_t *scratch = fault_area.scratch;
+    memcpy(scratch, scratch_init, sizeof(scratch_init));
+    fault_in_t *in = &a64cg_fault_in;
+    uint64_t seed = 0xfa017;
+    for (int r = 0; r < 31; r++)
+        in->x[r] = xorshift64(&seed);
+    in->x[0] = (uint64_t)scratch;
+    in->x[17] = (uint64_t)c->code;
+    in->x[REG_GUARD] = (uint64_t)fault_area.guard;
+    in->x[REG_STOLEN] = (uint64_t)fault_area.stack_top;
+    in->x[30] = (uint64_t)a64cg_fault_return;
+    in->sp = (uint64_t)fault_area.stack_top;
+    for (int r = 0; r < 32; r++)
+        in->q[r] = (__uint128_t)xorshift64(&seed) << 64 | xorshift64(&seed);
+    log->n = 0;
+    fault_chain_cur = c;
+    fault_log_cur = log;
+    a64cg_fault_enter(in);
+    fault_log_cur = NULL;
+    fault_chain_cur = NULL;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (int i = 0; i < SCRATCH_WORDS; i++)
+        h = (h ^ scratch[i]) * 0x100000001b3ULL;
+    return h;
+}
+
+/***************************************************************************
  * The client
  */
 
@@ -615,6 +1036,14 @@ static uint tls_offs;
  */
 static chain_t *volatile marker_chain;
 static app_pc *marker_table;
+
+/* The fault chain, made before the children fork.  Its blocks in the second
+ * and fourth of every four covers of positions and kinds have the marker too,
+ * from the start, so that faults also land where drreg has a spilled register
+ * still to restore lazily (the marker does not ask for the app values back).
+ */
+static chain_t fault_chain;
+static app_pc *fault_marker_table;
 
 static ptr_int_t *
 budget_slot(void)
@@ -795,6 +1224,20 @@ event_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
     return DR_EMIT_DEFAULT;
 }
 
+/* The block index of a tag in the fault chain that has the marker, or -1. */
+static int
+fault_marker_block(app_pc tag)
+{
+    chain_t *c = &fault_chain;
+    if (c->blocks == 0 || tag < block_tag(c, 0) || tag >= block_tag(c, c->blocks))
+        return -1;
+    size_t off = (uint32_t *)tag - c->first_block;
+    if (off % c->stride != 0)
+        return -1;
+    int b = (int)(off / c->stride);
+    return fault_marked(b, c->stride - 3 /* the block length */) ? b : -1;
+}
+
 typedef struct {
     uint length, points, index, next;
 } plan_t;
@@ -831,6 +1274,8 @@ event_insertion(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
             int b = marker_block(tag);
             if (b >= 0)
                 insert_marker(drcontext, bb, inst, &marker_table[b]);
+            else if ((b = fault_marker_block(tag)) >= 0)
+                insert_marker(drcontext, bb, inst, &fault_marker_table[b]);
             if (client_mode == MODE_CLEANCALL)
                 dr_insert_clean_call(drcontext, bb, inst, (void *)empty_callee, false, 0);
             else if (client_mode == MODE_CLEANCALL_OOL) {
@@ -880,6 +1325,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
  */
 
 static int num_blocks = DEFAULT_BLOCKS, block_len = DEFAULT_LEN, reps = 5, runs = 200;
+static int fault_blocks = DEFAULT_FAULT_BLOCKS;
 static bool default_chain;
 static uint64_t expected_hash;
 static double native_ns_per_block;
@@ -903,6 +1349,11 @@ static bool scale_descending;
 static bool scale_range_flush;
 /* DR's -sw_flush_granule, read after DR is set up (0 if unknown). */
 static uint64 sw_flush_granule;
+
+/* The fault chain's native run, made before the children fork. */
+static fault_log_t fault_native;
+static uint64_t fault_hash;
+static double fault_native_ns;
 
 #define FAIL(...)                                  \
     do {                                           \
@@ -1022,6 +1473,113 @@ check_verbatim(chain_t *c)
     }
 }
 
+/* PSTATE.SSBS (bit 12) is not deterministic in a signal frame, even natively:
+ * on a CPU without FEAT_SSBS, the kernel's spectre-v4 mitigation can set it in
+ * the saved PSTATE on a context switch.
+ */
+#define PSTATE_SSBS 0x1000ULL
+
+/* Appends to buf each field in which DR's frame d differs from the native
+ * frame n, and returns how many do.
+ */
+static int
+frame_diff(char *buf, size_t size, const frame_t *n, const frame_t *d)
+{
+    int bad = 0;
+    size_t len = strlen(buf);
+#define FRAME_DIFF(name, nv, dv)                                                         \
+    do {                                                                                 \
+        if ((nv) != (dv)) {                                                              \
+            bad++;                                                                       \
+            if (len < size)                                                              \
+                len +=                                                                   \
+                    snprintf(buf + len, size - len, " %s native 0x%llx dr 0x%llx", name, \
+                             (unsigned long long)(nv), (unsigned long long)(dv));        \
+        }                                                                                \
+    } while (0)
+    FRAME_DIFF("signo", n->signo, d->signo);
+    FRAME_DIFF("si_code", n->code, d->code);
+    FRAME_DIFF("si_addr", n->addr, d->addr);
+    FRAME_DIFF("pc", n->pc, d->pc);
+    FRAME_DIFF("sp", n->sp, d->sp);
+    FRAME_DIFF("pstate", n->pstate & ~PSTATE_SSBS, d->pstate & ~PSTATE_SSBS);
+    FRAME_DIFF("far", n->fault_address, d->fault_address);
+    FRAME_DIFF("has_esr", n->has_esr, d->has_esr);
+    FRAME_DIFF("esr", n->esr, d->esr);
+    FRAME_DIFF("has_fp", n->has_fp, d->has_fp);
+    FRAME_DIFF("fpsr", n->fpsr, d->fpsr);
+    FRAME_DIFF("fpcr", n->fpcr, d->fpcr);
+    for (int r = 0; r < 31; r++) {
+        char name[8];
+        snprintf(name, sizeof(name), "x%d", r);
+        FRAME_DIFF(name, n->x[r], d->x[r]);
+    }
+    for (int r = 0; r < 32; r++) {
+        char name[16];
+        snprintf(name, sizeof(name), "v%d.lo", r);
+        FRAME_DIFF(name, (uint64_t)n->v[r], (uint64_t)d->v[r]);
+        snprintf(name, sizeof(name), "v%d.hi", r);
+        FRAME_DIFF(name, (uint64_t)(n->v[r] >> 64), (uint64_t)(d->v[r] >> 64));
+    }
+#undef FRAME_DIFF
+    return bad;
+}
+
+/* The faults guard: two runs of the fault chain under DR, the first building
+ * its blocks, each with the native frames and result.  Returns the time of
+ * the second run.
+ */
+static double
+check_faults(void)
+{
+    fault_log_t log;
+    static char who[64];
+    fault_log_init(&log, fault_blocks);
+    snprintf(who, sizeof(who), "%s/%s", cfg_ops, cfg_mode);
+    fault_who = who;
+    fault_resume_from = &fault_native;
+    fault_handler_set(true);
+    double run_ns = 0;
+    for (int run = 0; run < 2; run++) {
+        const char *what = run == 0 ? "fault run (building)" : "fault run (built)";
+        double t = now_ns();
+        uint64_t h = fault_run(&fault_chain, &log);
+        run_ns = now_ns() - t;
+        if (h != fault_hash) {
+            FAIL("%s: result %016llx, expected %016llx", what, (unsigned long long)h,
+                 (unsigned long long)fault_hash);
+        }
+        if (log.n != fault_native.n)
+            FAIL("%s: %d faults, natively %d", what, log.n, fault_native.n);
+        int bad = 0;
+        for (int i = 0; i < log.n && i < fault_native.n; i++) {
+            char buf[1024] = "";
+            if (frame_diff(buf, sizeof(buf), &fault_native.f[i], &log.f[i]) == 0)
+                continue;
+            if (++bad <= 10) {
+                int b = i; /* Natively, fault i is block i's. */
+                FAIL("%s: fault %d (block %d, tag %p, %s at position %d%s):%s", what, i,
+                     b, block_tag(&fault_chain, b),
+                     fault_kind_names[fault_kind(b, block_len)], fault_pos(b, block_len),
+                     fault_marked(b, block_len) ? ", marker" : "", buf);
+            }
+        }
+        if (bad > 10)
+            FAIL("%s: %d of %d fault frames differ from native", what, bad, log.n);
+    }
+    fault_handler_set(false);
+    if (client_mode != MODE_DR) {
+        for (int b = 0; b < fault_blocks; b++) {
+            if (fault_marked(b, block_len) && fault_marker_table[b] == NULL) {
+                FAIL("fault chain block %d did not run its marker", b);
+                break;
+            }
+        }
+    }
+    free(log.f);
+    return run_ns;
+}
+
 static int
 cmp_double(const void *a, const void *b)
 {
@@ -1075,9 +1633,9 @@ child(int mode, int ops)
     /* The chains are made before DR starts, as code the app had loaded. */
     chain_t *build = malloc(reps * sizeof(*build));
     for (int r = 0; r < reps; r++)
-        chain_make(&build[r], num_blocks, block_len, DEFAULT_SEED, 0);
+        chain_make(&build[r], num_blocks, block_len, DEFAULT_SEED, 0, false);
     chain_t marked;
-    chain_make(&marked, num_blocks, block_len, DEFAULT_SEED, 0);
+    chain_make(&marked, num_blocks, block_len, DEFAULT_SEED, 0, false);
     marker_table = calloc(num_blocks, sizeof(*marker_table));
     if (mode != MODE_DR)
         prov_make();
@@ -1124,6 +1682,10 @@ child(int mode, int ops)
         check_result(&marked, chain_run(&marked), "marked run");
         check_provenance();
     }
+    TRACE("marked");
+    /* faults: the frames of the fault chain's faults. */
+    double fault_ns = fault_blocks > 0 ? check_faults() : 0;
+    TRACE("faulted");
 
     /* The fragment queries take DR locks, so they are made with the thread
      * native: under DR, this (static) DR's own code would run from the code
@@ -1183,6 +1745,10 @@ child(int mode, int ops)
         }
     } else
         printf("\n");
+    if (fault_blocks > 0) {
+        printf("fault %-9s %-7s %9.2f us/fault (native %.2f)\n", cfg_mode, cfg_ops,
+               fault_ns / 1000 / fault_blocks, fault_native_ns / 1000 / fault_blocks);
+    }
     fflush(stdout);
     return failures > 0 ? 1 : 0;
 }
@@ -1386,12 +1952,12 @@ scale_child(int mode, int ops)
         chain_t probe;
         /* Its own mapping, without the shared hub, so a page more each. */
         chain_make(&probe, slice_blocks, block_len, DEFAULT_SEED,
-                   layout & ~(LAYOUT_ONEMAP | LAYOUT_FANIN));
+                   layout & ~(LAYOUT_ONEMAP | LAYOUT_FANIN), false);
         munmap(probe.code, probe.map_bytes);
         arena_make((probe.map_bytes + page_bytes) * slices);
     }
     for (int i = 0; i < slices; i++)
-        chain_make(&ch[i], slice_blocks, block_len, DEFAULT_SEED, layout);
+        chain_make(&ch[i], slice_blocks, block_len, DEFAULT_SEED, layout, false);
     make_icache_sync();
 
     char extra[512] = "";
@@ -1962,7 +2528,7 @@ ibl_child(int mode, int ops)
      */
     chain_t *churn = malloc(ibl_rounds * sizeof(*churn));
     for (int round = 0; round < ibl_rounds; round++)
-        chain_make(&churn[round], num_blocks, block_len, DEFAULT_SEED, 0);
+        chain_make(&churn[round], num_blocks, block_len, DEFAULT_SEED, 0, false);
     if (start_dr(ops, "") == NULL)
         return 1;
     uint64 v_traces, v_includes, v_shared_bb, v_shared_trace;
@@ -2057,7 +2623,7 @@ static int
 usage(const char *name)
 {
     fprintf(stderr,
-            "usage: %s [-blocks N] [-len N] [-reps N] [-runs N] "
+            "usage: %s [-blocks N] [-len N] [-reps N] [-runs N] [-fault-blocks N] "
             "[-modes m1,m2,...] [-ops o1,o2,...|all]\n"
             "       [-scale N [-bucket N] [-slice N] [-limit X] [-scale-guard] "
             "[-layout l1,...] [-descending]\n"
@@ -2084,6 +2650,8 @@ main(int argc, char *argv[])
             reps = atoi(argv[++i]);
         else if (strcmp(argv[i], "-runs") == 0 && i + 1 < argc)
             runs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-fault-blocks") == 0 && i + 1 < argc)
+            fault_blocks = atoi(argv[++i]);
         else if (strcmp(argv[i], "-modes") == 0 && i + 1 < argc) {
             if (!parse_list(argv[++i], mode_names, NUM_MODES, &want_mode))
                 return 1;
@@ -2128,8 +2696,12 @@ main(int argc, char *argv[])
     if (num_blocks < 1 || block_len < 1 || reps < 1 || runs < 1 || scale_blocks < 0 ||
         slice_blocks < 1 || scale_limit <= 1 || patch_count < 0 ||
         patch_count > 4095 /* an ADD immediate */ || patch_threads < 0 ||
-        patch_threads > PATCH_MAX_THREADS || ibl_rounds < 0 || ibl_rounds > 65535)
+        patch_threads > PATCH_MAX_THREADS || ibl_rounds < 0 || ibl_rounds > 65535 ||
+        fault_blocks < 0)
         return usage(argv[0]);
+    /* The faults guard is part of the default mode. */
+    if (scale_blocks > 0 || patch_count > 0 || ibl_rounds > 0)
+        fault_blocks = 0;
     if (want_mode == 0)
         want_mode = (1u << NUM_MODES) - 1;
     if (scale_blocks > 0) {
@@ -2171,7 +2743,7 @@ main(int argc, char *argv[])
 
     /* The native result and time, on a warm copy. */
     chain_t native;
-    chain_make(&native, num_blocks, block_len, DEFAULT_SEED, 0);
+    chain_make(&native, num_blocks, block_len, DEFAULT_SEED, 0, false);
     expected_hash = chain_run(&native);
     double best = 1e300;
     for (int k = 0; k < 20; k++) {
@@ -2188,6 +2760,39 @@ main(int argc, char *argv[])
     native_ns_per_block = best / num_blocks;
     printf("chain: %d blocks of %d instructions, native %.2f ns/block\n", num_blocks,
            block_len, native_ns_per_block);
+
+    /* The fault chain's native frames, and a check that each block faulted
+     * once, at its faulting instruction.
+     */
+    if (fault_blocks > 0) {
+        chain_make(&fault_chain, fault_blocks, block_len, FAULT_SEED, 0, true);
+        fault_marker_table = calloc(fault_blocks, sizeof(*fault_marker_table));
+        fault_area_make();
+        fault_log_init(&fault_native, fault_blocks);
+        fault_handler_set(true);
+        double t = now_ns();
+        fault_hash = fault_run(&fault_chain, &fault_native);
+        fault_native_ns = now_ns() - t;
+        fault_handler_set(false);
+        if (fault_native.n != fault_blocks) {
+            printf("FAIL: the fault chain faulted %d times natively, not %d\n",
+                   fault_native.n, fault_blocks);
+            return 1;
+        }
+        for (int b = 0; b < fault_blocks; b++) {
+            app_pc pc = block_tag(&fault_chain, b) + 4 * fault_pos(b, block_len);
+            frame_t *f = &fault_native.f[b];
+            if (f->pc != (uint64_t)pc || f->signo != SIGSEGV || !f->has_fp ||
+                !f->has_esr) {
+                printf("FAIL: native fault %d is signal %d at %p (fpsimd %d, esr %d), "
+                       "not SIGSEGV at %p with both records\n",
+                       b, f->signo, (void *)f->pc, f->has_fp, f->has_esr, pc);
+                return 1;
+            }
+        }
+        printf("faults: %d blocks of %d+1 instructions, native %.2f us/fault\n",
+               fault_blocks, block_len, fault_native_ns / 1000 / fault_blocks);
+    }
     fflush(stdout);
 
     int failed = 0;

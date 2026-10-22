@@ -57,14 +57,20 @@ set(api.a64_codegen_ir_shared_timeout ${api.a64_codegen_ir_timeout})
 
 # Building and running chains of blocks under static DR, in a child per client
 # mode and DR option set.
-tobuild_api(api.a64_codegen_build api/a64_codegen_build.c "" "" OFF ON OFF)
-use_DynamoRIO_extension(api.a64_codegen_build drmgr_static)
-use_DynamoRIO_extension(api.a64_codegen_build drreg_static)
 if (DEBUG)
+  # Debug DR builds the fault chain's blocks (and the blocks from each fault to
+  # the end of its block) slowly: half the fault chain, which still has every
+  # position and kind of fault once without the marker and once with it.
+  set(a64_codegen_build_ops "-fault-blocks;162")
   set(api.a64_codegen_build_timeout 900)
 else ()
+  set(a64_codegen_build_ops "")
   set(api.a64_codegen_build_timeout 300)
 endif ()
+tobuild_api(api.a64_codegen_build api/a64_codegen_build.c "" "${a64_codegen_build_ops}"
+  OFF ON OFF)
+use_DynamoRIO_extension(api.a64_codegen_build drmgr_static)
+use_DynamoRIO_extension(api.a64_codegen_build drreg_static)
 
 # The scaling test: the same binary building 300k blocks per configuration in
 # release, with Seedbox's options.  The code is all in one writable mapping, as a
