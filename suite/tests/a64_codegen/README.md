@@ -11,7 +11,9 @@ Each test prints benchmark lines, which are never compared, and fails only on a 
 | --- | --- |
 | `api.a64_codegen_ir` | Decode, encode and flags queries over libc's executable text and over pseudo-random words |
 | `api.a64_codegen_build` | Builds and runs chains of distinct blocks under static DR, in one child per client mode and DR option set |
-| `api.a64_codegen_scale` | The same binary in its scaling mode: whether the cost per block grows as the code cache does |
+| `api.a64_codegen_scale` | The same binary in its scaling mode: whether the cost per block grows as the code cache does, and how far a flush of one line reaches |
+| `api.a64_codegen_patch` | The same binary patching a block across a page boundary while other threads run it: no stale code |
+| `api.a64_codegen_ibl` | The same binary patching a hot indirect-branch target: no ibl table entry outlives a flush |
 
 ## Running
 
@@ -95,7 +97,9 @@ The free-list bug fixed in 62f76c5f4 made emit's cost per block grow with the si
 - the median and mean over its chains of thread CPU time per built block (CLOCK_THREAD_CPUTIME_ID, which counts DR's time on the thread and not other processes'), and
 - with a KSTATS build of DR (`-DKSTATS=ON`), each phase's ticks per block: `bb` is `bb_building`, which includes `decode`, `client`, `mangle` and `emit`; `trace` is `trace_building`; `other` is the CPU time outside `bb_building` (dispatch, linking a block in, context switches). The test reads these with `dr_kstat_get()` (`core/stats.c`), which exists only in KSTATS builds and which the test finds with a weak reference, and passes `-kstats` and a temporary `-logdir` itself.
 
-Any metric whose last bucket costs more than `-limit` (1.5) times its first, by more than a floor that keeps noise in small numbers out (300 ns of CPU, 3 ticks), is reported as `GROWS`. With `-scale-guard`, the test fails if the cheapest chain of the last bucket costs more than `-limit` times the median of the first bucket. Noise only adds time, so this does not fail by chance. The ctest `api.a64_codegen_scale` runs 300k blocks in release, modes `dr` and `progress`, Seedbox's options, with the guard. With 62f76c5f4 reverted it fails: progress costs 29, 51 and 71 µs per block in buckets of 100k, and the guard's ratio is 2.05. Debug runs it small, without the guard.
+Any metric whose last bucket costs more than `-limit` (1.5) times its first, by more than a floor that keeps noise in small numbers out (300 ns of CPU, 3 ticks), is reported as `GROWS`. With `-scale-guard`, the test fails if the cheapest chain of the last bucket costs more than `-limit` times the median of the first bucket. That rides out a noisy chain or two, but not a slowdown of the whole last bucket (throttling, a slower core, contention for memory: the shared VM often sits at a load of 50–150), so it is for a quiet machine. With 62f76c5f4 reverted it fails: progress costs 29, 51 and 71 µs per block in buckets of 100k, and the guard's ratio is 2.05.
+
+The ctest `api.a64_codegen_scale` gates on what does not depend on timing. It runs 300k blocks in release, modes `dr` and `progress`, Seedbox's options, with all chains in one writable mapping and every block calling one shared stub (`-layout onemap,rwx,fanin`, as a JIT's code cache), and flushes a line in 4 chains after each bucket with `-flush-limit auto`. Without `-sw_flush_granule` a flush takes every block of the mapping, and the limit fails it. The timing guard is added only when CMake's `A64_CODEGEN_TIMING_GUARD` is on. Debug runs it small.
 
 `-layout` (a comma-separated list) lays the code out to exercise structures that the default chains do not:
 
@@ -104,15 +108,35 @@ Any metric whose last bucket costs more than `-limit` (1.5) times its first, by 
 | `sparse` | Each page of blocks is its own mapping, between inaccessible pages, so DR tracks a region for each |
 | `rwx` | The code is writable, as a JIT's |
 | `onemap` | All the chains are in one mapping, as a JIT's code cache is |
-| `hub` | Each block ends in a CBZ to one block that never runs, and falls through to the next, so the hub's future fragment collects an incoming link from every block |
+| `perpage` | Each block on a page of its own, so a few blocks span many pages (with `-sw_flush_granule`, a fragment-list region each) |
+| `hub` | Each block ends in a CBZ to one block of its chain that never runs, and falls through to the next, so each chain's hub collects an incoming link from each of its blocks (the fan-in stays at `-slice`) |
+| `fanin` | Each block ends in a BL to one stub shared by all chains (a RET) that returns to the next block, as a JIT's code calls its runtime stubs, so the stub's incoming list grows with every block built (`onemap` only; the flush lines report the fan-in) |
 | `reverse` | The blocks are in reverse order, so each branches backward to the next and is a trace head (forced by `-ops traces`) |
 
-`-flushes K` makes the app invalidate one line in each of K chains after each bucket, as a JIT does after changing code. The chains are spread from the newest to the oldest, as blocks of different ages sit at different places in lists such as the hub's incoming links. Under the seedbox options that is `dc cvau; dsb; ic ivau; dsb; isb`, which DR handles itself (`-no_hw_cache_consistency`). With hardware cache consistency it is a write to writable code (`rwx`), or else an mprotect. The test reports the CPU time of each flush, and how many blocks the flushed chains and the bucket's build again afterward, which is how far the flush reached.
+`-flushes K` makes the app invalidate one line in each of K chains after each bucket, as a JIT does after changing code. The chains are spread from the newest to the oldest, as blocks of different ages sit at different places in lists such as the hub's incoming links. Under the seedbox options that is `dc cvau; dsb; ic ivau; dsb; isb`, which DR handles itself (`-no_hw_cache_consistency`). With hardware cache consistency it is a write to writable code (`rwx`), or else an mprotect. After each flush the test runs every chain built so far and counts the blocks that build again, which is how far that flush reached; it reports the mean and the most. That count does not depend on timing: `-flush-limit N` fails the test if any one flush is over N, and `-flush-limit auto` sets N to twice the blocks of a `-sw_flush_granule` region (at least a page, read with `dr_get_integer_option()`), plus 8.
+
+`-range-flush` (with `onemap`) ends the run by flushing the whole mapping three ways: a line on each page (a flush per page), every line (DR joins them into one flush), and the mapping's munmap. `-descending` runs the chains from the highest address down, so each new fragment-list region goes before all the others in DR's sorted vectors. With `perpage` these show the cost of flushes and inserts with many regions.
+
+The page size is the host's (`sysconf`), for the layouts and the protection changes.
 
 For example:
 
     api.a64_codegen_build -scale 1000000 -modes dr -ops default,seedbox,private
-    api.a64_codegen_build -scale 300000 -modes dr -ops seedbox -layout onemap,rwx -flushes 3
+    api.a64_codegen_build -scale 300000 -modes dr -ops seedbox -layout onemap,rwx,fanin -flushes 4 -flush-limit auto
+    api.a64_codegen_build -scale 32768 -slice 4096 -bucket 8192 -modes dr -ops seedbox -layout onemap,rwx,perpage -range-flush
+
+**Patch test (`-patch N`)**
+
+`api.a64_codegen_patch` checks that code patched as a JIT patches it does not run stale, in two tests, as the architecture allows two ways of patching code other threads run. Both use a block that crosses a page boundary, so it is on the fragment lists of both pages, and invalidate the patched line (`dc cvau; dsb; ic ivau; dsb; isb`). The patching thread must get the new code at once.
+
+- **Phased:** a four-instruction function returns A + B, with the adds on either side of the boundary. An ADD may not be rewritten while another thread may execute it, so patch t (1 to N) waits until every worker has checked t-1 and is waiting, rewrites A or B (alternating) so that the function returns t, and publishes t. Each worker waits for t, synchronizes, calls, must get t, and acknowledges it.
+- **Concurrent:** a B on the far side of the boundary, which may be rewritten while other threads execute it, is pointed at one of 64 targets in turn while the workers keep calling. A worker that has seen patch s published must get s or a later one (never an earlier one, never anything else); the patching thread waits for every worker to have checked a patch before making the next.
+
+Every worker checks its first call and every patch, and synchronizes with `ldar; cbnz; isb` in one asm block, so the ISB depends on the loaded patch number at any optimization level. Without the check that a block crossing into another fragment-list region is put on its list (`check_thread_vm_area()`'s stop), every far-side patch runs stale and the test fails. The ctest runs 1000 patches with 3 workers in modes `dr` and `progress`, under both option sets (with hardware cache consistency DR finds the change from the write). Traces are off in both.
+
+**ibl test (`-ibl N`)**
+
+`api.a64_codegen_ibl` checks that no ibl table entry outlives a flush. A function made a trace head (a stub after it branches back to it) is called indirectly until it is hot, from the hot loop and from a block of its own, then rewritten and invalidated (a flush with all threads synched), then the cache is churned with a fresh chain and the function called indirectly again, first from a block outside any trace: it must return the new value. It is a smoke test: nothing checks that the trace is in both the trace and the bb ibl tables at the flush, and it passed with the ibl walk skipped regardless of traces, so it does not cover a trace's bb-table entry outliving the trace (which is why the walk stays on with traces). With `-ops ibtraces_shared` (traces on, in the bb ibl tables too, both table kinds shared; `-no_xl8_code_copy`, as blocks that keep a copy of writable code do not join traces) the function becomes a trace, which the test checks. It also runs under the seedbox options. `-ops ibtraces` (shared bb and private trace ibl tables) crashes in this test, on 62f76c5f4 as well, so the ctest leaves it out; debug DR runs only the seedbox options, as `-ops ibtraces_shared` trips a debug assert there (monitor.c's `unlink_ibt_trace_head()`: a private trace head with shared bb ibl tables), on 62f76c5f4 as well.
 
 Two things matter if you change the test:
 

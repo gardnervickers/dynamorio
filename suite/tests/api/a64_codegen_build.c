@@ -108,13 +108,14 @@
  * after changing code (IC IVAU under the seedbox options, which DR handles
  * itself; with hardware cache consistency, a write to writable code, or else
  * an mprotect), and reports the cost of each flush and how many blocks the
- * flushed chains and the bucket's then build again.
+ * flushed chains and the bucket's then build again; -flush-limit N fails the
+ * test if that is over N blocks per flush.
  *
  * Usage: api.a64_codegen_build [-blocks N] [-len N] [-reps N] [-runs N]
  *                              [-modes m1,m2,...] [-ops o1,o2,...|all]
  *                              [-scale N [-bucket N] [-slice N] [-limit X]
  *                               [-scale-guard] [-layout l1,l2,...]
- *                               [-flushes K]]
+ *                               [-flushes K [-flush-limit N]]]
  * With A64_CODEGEN_TRACE set in the environment, each child reports its
  * phases on stderr.
  */
@@ -125,6 +126,8 @@
 #include "drreg.h"
 
 #include <dirent.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -154,9 +157,18 @@ static const char *const mode_names[NUM_MODES] = { "dr",        "bbhook",
                                                    "progress",  "progress4",
                                                    "cleancall", "cleancall_ool" };
 
-enum { OPS_DEFAULT, OPS_SEEDBOX, OPS_PRIVATE, OPS_TRACES, NUM_OPS };
-static const char *const ops_names[NUM_OPS] = { "default", "seedbox", "private",
-                                                "traces" };
+enum {
+    OPS_DEFAULT,
+    OPS_SEEDBOX,
+    OPS_PRIVATE,
+    OPS_TRACES,
+    OPS_IBTRACES,
+    OPS_IBTRACES_SHARED,
+    NUM_OPS
+};
+static const char *const ops_names[NUM_OPS] = {
+    "default", "seedbox", "private", "traces", "ibtraces", "ibtraces_shared"
+};
 static const char *const ops_values[NUM_OPS] = {
     "-disable_traces",
     "-opt_speed -disable_traces -ldstex2cas -no_hw_cache_consistency -fake_ctr_dic",
@@ -165,9 +177,17 @@ static const char *const ops_values[NUM_OPS] = {
      * passes -trace_threshold (50) runs.
      */
     "-enable_traces",
+    /* Traces in the bb ibl tables too, without hardware cache consistency (the
+     * ibl test): as resolved, shared bb and private trace ibl tables, and with
+     * both shared.
+     */
+    "-enable_traces -bb_ibl_targets -bb_ibt_table_includes_traces "
+    "-no_hw_cache_consistency -no_xl8_code_copy",
+    "-enable_traces -bb_ibl_targets -bb_ibt_table_includes_traces "
+    "-no_hw_cache_consistency -no_xl8_code_copy -shared_trace_ibt_tables",
 };
 /* Runs of each chain in the scaling mode: enough to build the traces. */
-static const int ops_scale_runs[NUM_OPS] = { 1, 1, 1, 52 };
+static const int ops_scale_runs[NUM_OPS] = { 1, 1, 1, 52, 52, 52 };
 
 /* Code-cache bytes per block of the default chain (DEFAULT_BLOCKS blocks of
  * DEFAULT_LEN instructions from DEFAULT_SEED), by option set and mode.  0 is no
@@ -185,6 +205,8 @@ static const double budgets[NUM_OPS][NUM_MODES] = {
     { 124.0, 124.0, 772.0, 2710.1, 880.0, 728.0 }, /* seedbox */
     { 0, 0, 0, 0, 0, 0 },                          /* private */
     { 0, 0, 0, 0, 0, 0 },                          /* traces */
+    { 0, 0, 0, 0, 0, 0 },                          /* ibtraces */
+    { 0, 0, 0, 0, 0, 0 },                          /* ibtraces_shared */
 };
 
 #define TESTANY(mask, var) (((mask) & (var)) != 0)
@@ -194,8 +216,8 @@ static const double budgets[NUM_OPS][NUM_MODES] = {
 #define DEFAULT_SEED 0x5eedb0c5ULL
 #define PROGRESS_BUDGET 50000 /* Seedbox's instructions per progress call. */
 
-/* Layouts of a chain (-layout), which may be combined but for hub with sparse
- * or reverse.
+/* Layouts of a chain (-layout), which may be combined but for hub and fanin
+ * (whose blocks fall through to the next) with sparse, perpage or reverse.
  */
 enum {
     /* A mapping of its own for each page of blocks, between inaccessible
@@ -215,8 +237,17 @@ enum {
     LAYOUT_REVERSE = 0x8,
     /* All the chains in one mapping, as a JIT's code cache. */
     LAYOUT_ONEMAP = 0x10,
+    /* Each block on a page of its own: few blocks over many pages. */
+    LAYOUT_PERPAGE = 0x20,
+    /* Each block ends in a BL to one hub block shared by every chain (a RET; with
+     * LAYOUT_ONEMAP only), as a JIT's code calls its runtime stubs, so the hub's
+     * incoming list grows with every block built.  The return lands on the next
+     * block.
+     */
+    LAYOUT_FANIN = 0x40,
 };
-static const char *const layout_names[] = { "sparse", "rwx", "hub", "reverse", "onemap" };
+static const char *const layout_names[] = { "sparse", "rwx",     "hub",  "reverse",
+                                            "onemap", "perpage", "fanin" };
 #define NUM_LAYOUT_FLAGS (sizeof(layout_names) / sizeof(layout_names[0]))
 
 /***************************************************************************
@@ -231,7 +262,9 @@ static const char *const layout_names[] = { "sparse", "rwx", "hub", "reverse", "
 #define WORK_LAST 59
 #define SCRATCH_WORDS 64
 
-#define PAGE_WORDS 1024
+/* The host's page size: 4K, 16K or 64K on AArch64 Linux. */
+static size_t page_bytes = 4096;
+#define PAGE_WORDS (page_bytes / 4)
 #define ENTRY_WORDS (2 + NUM_DATA_REGS + 2)
 #define EXIT_WORDS (NUM_DATA_REGS + 1)
 
@@ -331,20 +364,33 @@ branch(uint32_t op, int bits, uint32_t *from, uint32_t *to)
 #define CBNZ_X0(from, to) branch(0xb5000000, 19, from, to)
 #define CBZ_X0(from, to) branch(0xb4000000, 19, from, to)
 #define B(from, to) branch(0x14000000, 26, from, to)
+#define BL(from, to) branch(0x94000000, 26, from, to)
 
-/* The mapping that LAYOUT_ONEMAP chains are made in. */
+/* The mapping that LAYOUT_ONEMAP chains are made in.  Its first page holds the
+ * LAYOUT_FANIN hub.
+ */
 static byte *arena;
 static size_t arena_bytes, arena_used;
+static uint32_t *fanin_hub;
 
 static void
 arena_make(size_t bytes)
 {
-    arena_bytes = bytes;
-    arena = mmap(NULL, bytes, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    arena_bytes = bytes + page_bytes;
+    arena = mmap(NULL, arena_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                 -1, 0);
     if (arena == MAP_FAILED) {
         perror("mmap");
         exit(1);
     }
+    fanin_hub = (uint32_t *)arena;
+    *fanin_hub = RET;
+    if (mprotect(arena, arena_bytes, PROT_READ | PROT_EXEC) != 0) {
+        perror("mprotect");
+        exit(1);
+    }
+    __builtin___clear_cache((char *)arena, (char *)arena + 4);
+    arena_used = page_bytes;
 }
 
 static uint32_t *
@@ -366,12 +412,17 @@ static void
 chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout)
 {
     bool sparse = TESTANY(LAYOUT_SPARSE, layout), hub = TESTANY(LAYOUT_HUB, layout);
+    bool perpage = TESTANY(LAYOUT_PERPAGE, layout), fanin = TESTANY(LAYOUT_FANIN, layout);
+    size_t exit_words = EXIT_WORDS + (fanin ? 1 : 0);
     c->blocks = blocks;
-    c->stride = len + (hub ? 1 : 2);
+    c->stride = len + (hub || fanin ? 1 : 2);
     c->reverse = TESTANY(LAYOUT_REVERSE, layout);
     if (sparse) {
         c->per_region = PAGE_WORDS / c->stride;
         c->region_words = 2 * PAGE_WORDS;
+    } else if (perpage) {
+        c->per_region = 1;
+        c->region_words = PAGE_WORDS;
     } else {
         c->per_region = blocks;
         c->region_words = (size_t)blocks * c->stride;
@@ -380,10 +431,12 @@ chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout)
     /* The entry block, and the exit block in reverse order, come first; with
      * sparse, in a page of their own.
      */
-    size_t head = sparse ? PAGE_WORDS : ENTRY_WORDS + (c->reverse ? EXIT_WORDS : 0);
-    size_t body = sparse ? regions * c->region_words : (size_t)blocks * c->stride;
-    c->words = head + body + (c->reverse ? 0 : EXIT_WORDS) + (hub ? 1 : 0);
-    c->map_bytes = (c->words * 4 + 4095) & ~(size_t)4095;
+    size_t head =
+        sparse || perpage ? PAGE_WORDS : ENTRY_WORDS + (c->reverse ? exit_words : 0);
+    size_t body =
+        sparse || perpage ? regions * c->region_words : (size_t)blocks * c->stride;
+    c->words = head + body + (c->reverse ? 0 : exit_words) + (hub ? 1 : 0);
+    c->map_bytes = (c->words * 4 + page_bytes - 1) & ~(page_bytes - 1);
     if (TESTANY(LAYOUT_ONEMAP, layout)) {
         if (arena_used + c->map_bytes > arena_bytes) {
             fprintf(stderr, "the chains do not fit in the arena\n");
@@ -407,13 +460,14 @@ chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout)
         c->code[i] = BRK;
     c->first_block = c->code + head;
     uint32_t *exit_block = c->reverse ? c->code + ENTRY_WORDS : c->first_block + body;
-    c->hub = hub ? exit_block + EXIT_WORDS : NULL;
+    c->hub = hub ? exit_block + exit_words : fanin ? fanin_hub : NULL;
     uint32_t *p = c->code;
     /* cmp x0, x0; ldr xr, [x0, #8*(r-1)] for x1-x17; nop; branch; brk */
     *p++ = 0xeb000000 | REG_BASE << 16 | REG_BASE << 5 | XZR;
     for (uint r = 1; r <= NUM_DATA_REGS; r++)
         *p++ = 0xf9400000 | (r - 1) << 10 | REG_BASE << 5 | r;
-    *p++ = 0xd503201f;
+    /* nop, or with fanin mov x18, x30 to keep the return address from the BLs */
+    *p++ = fanin ? 0xaa1e03f2 : 0xd503201f;
     uint32_t *block0 = block_at(c, c->reverse ? blocks - 1 : 0);
     *p = c->reverse ? B(p, block0) : CBNZ_X0(p, block0);
     p++;
@@ -425,17 +479,19 @@ chain_make(chain_t *c, int blocks, int len, uint64_t seed, uint layout)
         uint32_t *next = b + 1 == blocks
             ? exit_block
             : block_at(c, c->reverse ? blocks - 2 - b : b + 1);
-        if (hub) {
+        if (hub || fanin) {
             if (next != p + 1) {
-                fprintf(stderr, "hub layout needs each block to fall through\n");
+                fprintf(stderr, "hub layouts need each block to fall through\n");
                 exit(1);
             }
-            *p = CBZ_X0(p, c->hub);
+            *p = hub ? CBZ_X0(p, c->hub) : BL(p, c->hub);
         } else
             *p = CBNZ_X0(p, next);
     }
-    /* str xr, [x0, #8*(r-1)] for x1-x17 */
+    /* (with fanin, mov x30, x18;) str xr, [x0, #8*(r-1)] for x1-x17 */
     p = exit_block;
+    if (fanin)
+        *p++ = 0xaa1203fe;
     for (uint r = 1; r <= NUM_DATA_REGS; r++)
         *p++ = 0xf9000000 | (r - 1) << 10 | REG_BASE << 5 | r;
     *p++ = RET;
@@ -835,6 +891,18 @@ static double scale_limit = 1.5;
 static bool scale_guard;
 static uint scale_layout;
 static int scale_flushes;
+/* Fail when a flush makes the chains rebuild more blocks than this (0: no limit;
+ * -1, "auto": twice the blocks of a -sw_flush_granule region, plus a few).
+ */
+static int scale_flush_limit;
+/* Run the chains from the highest address down (-descending), so each new
+ * fragment-list region goes before all the others in DR's sorted vectors.
+ */
+static bool scale_descending;
+/* Flush the whole onemap mapping at the end (-range-flush). */
+static bool scale_range_flush;
+/* DR's -sw_flush_granule, read after DR is set up (0 if unknown). */
+static uint64 sw_flush_granule;
 
 #define FAIL(...)                                  \
     do {                                           \
@@ -988,6 +1056,8 @@ start_dr(int ops, const char *extra)
         return NULL;
     }
     void *drcontext = dr_get_current_drcontext();
+    if (!dr_get_integer_option("sw_flush_granule", &sw_flush_granule))
+        sw_flush_granule = 0;
     dr_app_start();
     if (!dr_app_running_under_dynamorio()) {
         FAIL("could not start DR");
@@ -1133,8 +1203,8 @@ dr_kstat_get(void *drcontext, const char *name, uint64 *count, uint64 *ticks,
  * bb_building: dispatch, linking a block in, the context switches.
  */
 static const char *const phase_names[] = {
-    "bb_building", "bb_decoding",    "bb_client",    "mangling",      "emit",
-    "trace_building", "flush_region", "synchall_flush",
+    "bb_building", "bb_decoding",    "bb_client",    "mangling",
+    "emit",        "trace_building", "flush_region", "synchall_flush",
 };
 #define NUM_PHASES (sizeof(phase_names) / sizeof(phase_names[0]))
 #define PHASE_BB_BUILDING 0
@@ -1156,6 +1226,7 @@ static uint64 ticks_per_ms;
 static void
 take_snap(snap_t *s)
 {
+    memset(s->ticks, 0, sizeof(s->ticks));
     s->wall = now_ns();
     s->cpu = cpu_ns();
     for (uint p = 0; have_kstats && p < NUM_PHASES; p++) {
@@ -1190,19 +1261,35 @@ make_icache_sync(void)
 {
     static const uint32_t code[] = { 0xd50b7b20, 0xd5033b9f, 0xd50b7520,
                                      0xd5033b9f, 0xd5033fdf, RET };
-    void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1,
-                   0);
+    void *p = mmap(NULL, page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                   -1, 0);
     if (p == MAP_FAILED) {
         perror("mmap");
         exit(1);
     }
     memcpy(p, code, sizeof(code));
-    if (mprotect(p, 4096, PROT_READ | PROT_EXEC) != 0) {
+    if (mprotect(p, page_bytes, PROT_READ | PROT_EXEC) != 0) {
         perror("mprotect");
         exit(1);
     }
     __builtin___clear_cache((char *)p, (char *)p + sizeof(code));
     icache_sync = (void (*)(void *))p;
+}
+
+/* Invalidates [start, end) as a JIT does after writing code there, a line every
+ * step bytes: DR (without -hw_cache_consistency) joins lines that continue the
+ * range it has pending and flushes the range at the DSB, or flushes the pending
+ * range when a line does not continue it.
+ */
+static void
+icache_sync_range(byte *start, byte *end, size_t step)
+{
+    for (byte *p = start; p < end; p += step)
+        __asm__ __volatile__("dc cvau, %0" : : "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish" : : : "memory");
+    for (byte *p = start; p < end; p += step)
+        __asm__ __volatile__("ic ivau, %0" : : "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish\n\tisb" : : : "memory");
 }
 
 /* Makes DR flush the code at pc as an app would after changing it. */
@@ -1222,9 +1309,9 @@ flush_line(chain_t *c, app_pc pc, int ops)
         return;
     }
     /* Read-only code: the app changes its protection to write it. */
-    void *page = (void *)((ptr_uint_t)pc & ~(ptr_uint_t)4095);
-    if (mprotect(page, 4096, c->prot & ~PROT_EXEC) != 0 ||
-        mprotect(page, 4096, c->prot) != 0)
+    void *page = (void *)((ptr_uint_t)pc & ~(ptr_uint_t)(page_bytes - 1));
+    if (mprotect(page, page_bytes, c->prot & ~PROT_EXEC) != 0 ||
+        mprotect(page, page_bytes, c->prot) != 0)
         FAIL("mprotect for a flush failed");
 }
 
@@ -1288,6 +1375,8 @@ scale_child(int mode, int ops)
     client_mode = mode;
     uint layout = scale_layout | (ops == OPS_TRACES ? LAYOUT_REVERSE : 0);
     int slices = scale_blocks / slice_blocks;
+    /* The chain run n-th. */
+#define CHAIN(n) (&ch[scale_descending ? slices - 1 - (n) : (n)])
     int per_bucket = bucket_blocks / slice_blocks;
     int buckets = slices / per_bucket;
     int runs_per_slice = ops_scale_runs[ops];
@@ -1295,9 +1384,11 @@ scale_child(int mode, int ops)
     chain_t *ch = malloc(slices * sizeof(*ch));
     if (TESTANY(LAYOUT_ONEMAP, layout)) {
         chain_t probe;
-        chain_make(&probe, slice_blocks, block_len, DEFAULT_SEED, layout & ~LAYOUT_ONEMAP);
+        /* Its own mapping, without the shared hub, so a page more each. */
+        chain_make(&probe, slice_blocks, block_len, DEFAULT_SEED,
+                   layout & ~(LAYOUT_ONEMAP | LAYOUT_FANIN));
         munmap(probe.code, probe.map_bytes);
-        arena_make(probe.map_bytes * slices);
+        arena_make((probe.map_bytes + page_bytes) * slices);
     }
     for (int i = 0; i < slices; i++)
         chain_make(&ch[i], slice_blocks, block_len, DEFAULT_SEED, layout);
@@ -1320,6 +1411,18 @@ scale_child(int mode, int ops)
         !dr_kstat_get(scale_drcontext, "bb_building", NULL, NULL, &ticks_per_ms))
         have_kstats = false;
     double ns_per_tick = have_kstats ? 1e6 / ticks_per_ms : 0;
+    int flush_limit = scale_flush_limit;
+    if (flush_limit < 0) {
+        /* The blocks of a region of -sw_flush_granule bytes (at least a page:
+         * if the option is 0 or unknown, we expect a page), twice over for the
+         * blocks that cross into the next region, plus a few: entry and exit
+         * blocks.
+         */
+        size_t granule = sw_flush_granule > page_bytes ? sw_flush_granule : page_bytes;
+        size_t block_bytes =
+            TESTANY(LAYOUT_PERPAGE, layout) ? page_bytes : (size_t)CHAIN(0)->stride * 4;
+        flush_limit = (int)(2 * ((granule + block_bytes - 1) / block_bytes) + 8);
+    }
 
     printf("scale %s/%s: %d blocks in buckets of %d, chains of %d, layout", cfg_ops,
            cfg_mode, slices * slice_blocks, bucket_blocks, slice_blocks);
@@ -1327,7 +1430,8 @@ scale_child(int mode, int ops)
         if (TESTANY(1u << f, layout))
             printf(" %s", layout_names[f]);
     }
-    printf("%s; ns per block", layout == 0 ? " contiguous" : "");
+    printf("%s%s; ns per block", layout == 0 ? " contiguous" : "",
+           scale_descending ? ", run from the highest address down" : "");
     if (have_kstats) {
         printf(", and KSTATS ticks per block (%.1f ns each; bb includes the next 4)",
                ns_per_tick);
@@ -1342,7 +1446,7 @@ scale_child(int mode, int ops)
     double *flush_cpu = calloc(buckets, sizeof(*flush_cpu));
     double *flush_ticks = calloc(buckets, sizeof(*flush_ticks));
     int flushes = scale_flushes < per_bucket ? scale_flushes : per_bucket;
-    int *flushed = calloc(flushes > 0 ? flushes : 1, sizeof(*flushed));
+    double max_rebuilt = 0;
     for (int k = 0; k < buckets; k++) {
         for (int i = k * per_bucket; i < (k + 1) * per_bucket; i++) {
             uint64 before = bbs_built();
@@ -1350,7 +1454,7 @@ scale_child(int mode, int ops)
             uint64_t h = 0;
             take_snap(&a);
             for (int r = 0; r < runs_per_slice; r++)
-                h |= chain_run(&ch[i]) ^ expected_hash;
+                h |= chain_run(CHAIN(i)) ^ expected_hash;
             take_snap(&b);
             if (h != 0)
                 FAIL("chain %d gave a wrong result", i);
@@ -1370,32 +1474,40 @@ scale_child(int mode, int ops)
          * hub's incoming links).
          */
         int built_chains = (k + 1) * per_bucket;
+        double rebuilt = 0, rebuild_cpu = 0, bucket_max_rebuilt = 0;
         for (int j = 0; j < flushes; j++) {
-            flushed[j] = built_chains - 1 - (int)((int64)j * built_chains / flushes);
-            chain_t *c = &ch[flushed[j]];
+            chain_t *c =
+                CHAIN(built_chains - 1 - (int)((int64)j * built_chains / flushes));
             snap_t a, b;
             cost_t f;
             take_snap(&a);
             flush_line(c, block_tag(c, (k * 7919 + j * 104729) % slice_blocks), ops);
             take_snap(&b);
-            snap_diff(&a, &b, flushes, &f);
-            flush_cpu[k] += f.cpu;
-            flush_ticks[k] += f.ticks[PHASE_FLUSH];
-        }
-        /* How much each flush took with it: the blocks that the flushed chains and
-         * the bucket's build again, and what that costs.
-         */
-        double rebuilt = 0, rebuild_cpu = 0;
-        for (int n = 0; flushes > 0 && n < per_bucket + flushes; n++) {
-            int i = n < per_bucket ? k * per_bucket + n : flushed[n - per_bucket];
-            if (n >= per_bucket && i >= k * per_bucket)
-                continue; /* in the bucket */
+            snap_diff(&a, &b, 1, &f);
+            flush_cpu[k] += f.cpu / flushes;
+            flush_ticks[k] += f.ticks[PHASE_FLUSH] / flushes;
+            /* How much this flush took with it: the blocks of every chain built so
+             * far that build again (running the others is cheap), and what that
+             * costs.
+             */
             uint64 before = bbs_built();
             double t = cpu_ns();
-            check_result(&ch[i], chain_run(&ch[i]), "a run after a flush");
+            for (int n = 0; n < built_chains; n++)
+                check_result(CHAIN(n), chain_run(CHAIN(n)), "a run after a flush");
             rebuild_cpu += cpu_ns() - t;
-            rebuilt += bbs_built() - before;
+            double these = (double)(bbs_built() - before);
+            rebuilt += these;
+            if (these > bucket_max_rebuilt)
+                bucket_max_rebuilt = these;
+            /* Deterministic, unlike the times: how far a flush of one line reaches. */
+            if (flush_limit > 0 && these > flush_limit) {
+                FAIL("a flush of one line took %.0f blocks with it, over the flush "
+                     "limit of %d",
+                     these, flush_limit);
+            }
         }
+        if (bucket_max_rebuilt > max_rebuilt)
+            max_rebuilt = bucket_max_rebuilt;
         char what[128];
         snprintf(what, sizeof(what), "scale %s/%s: bucket %2d (%7d blocks): median",
                  cfg_ops, cfg_mode, k, (k + 1) * bucket_blocks);
@@ -1406,12 +1518,59 @@ scale_child(int mode, int ops)
                    k, flush_cpu[k] / 1000);
             if (have_kstats)
                 printf(", flush_region %.0f ticks", flush_ticks[k]);
-            printf("; the flushed and the bucket's chains then rebuild %.0f blocks per "
-                   "flush, at %.0f ns each\n",
-                   rebuilt / flushes, rebuilt > 0 ? rebuild_cpu / rebuilt : 0);
+            if (TESTANY(LAYOUT_FANIN, layout))
+                printf(", hub fan-in %d", (k + 1) * bucket_blocks);
+            printf("; the chains then rebuild %.0f blocks per flush (most %.0f, limit "
+                   "%d); running them all again takes %.0f us\n",
+                   rebuilt / flushes, bucket_max_rebuilt, flush_limit,
+                   rebuild_cpu / flushes / 1000);
         }
         fflush(stdout);
     }
+    if (scale_range_flush && arena != NULL) {
+        /* A flush of the whole mapping: first as a JIT invalidating one line on
+         * each page (a flush per page), then every line (one flush of the range),
+         * then the mapping's munmap.
+         */
+        byte *start = arena + page_bytes, *end = arena + arena_used;
+        size_t pages = (end - start) / page_bytes;
+        int built_chains = buckets * per_bucket;
+        for (int pass = 0; pass < 3; pass++) {
+            static const char *const what[] = { "a line per page", "every line",
+                                                "munmap" };
+            snap_t a, b;
+            cost_t f;
+            if (pass < 2 && ops != OPS_SEEDBOX)
+                continue; /* DR acts on IC IVAU only without hw consistency */
+            take_snap(&a);
+            if (pass == 0)
+                icache_sync_range(start, end, page_bytes);
+            else if (pass == 1)
+                icache_sync_range(start, end, 64);
+            else if (munmap(arena, arena_bytes) != 0)
+                FAIL("munmap of the mapping failed");
+            take_snap(&b);
+            snap_diff(&a, &b, 1, &f);
+            printf("scale %s/%s: range flush (%s) of %zu pages: %.1f ms, %.2f us per "
+                   "page",
+                   cfg_ops, cfg_mode, what[pass], pages, f.cpu / 1e6,
+                   f.cpu / 1e3 / pages);
+            if (have_kstats)
+                printf(", flush_region %.0f ticks", f.ticks[PHASE_FLUSH]);
+            if (pass < 2) {
+                uint64 before = bbs_built();
+                double t = cpu_ns();
+                for (int n = 0; n < built_chains; n++)
+                    check_result(CHAIN(n), chain_run(CHAIN(n)), "a run after a flush");
+                printf("; the chains then rebuild %llu blocks, at %.0f ns each",
+                       (unsigned long long)(bbs_built() - before),
+                       (cpu_ns() - t) / (double)(bbs_built() - before + 1));
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+    }
+#undef CHAIN
     dr_app_stop_and_cleanup();
     if (have_kstats)
         remove_tree(logdir);
@@ -1432,11 +1591,13 @@ scale_child(int mode, int ops)
         if (flushes > 0)
             grows("flush ns", flush_cpu[0], flush_cpu[last], 20000, &any);
     }
-    /* The guard: every chain of the last bucket against the first bucket's
-     * median, which noise (that only adds time) cannot make fail.
+    /* The timing guard (-scale-guard, off in ordinary ctest runs): every chain of
+     * the last bucket against the first bucket's median.  That rides out a noisy
+     * chain or two, but not a slowdown of the whole last bucket (throttling, or
+     * contention for memory), so it belongs on a quiet machine.
      */
     double late_min = 1e300;
-    for (int i = last * per_bucket; i < buckets * per_bucket; i++) {
+    for (int i = last * per_bucket; buckets > 0 && i < buckets * per_bucket; i++) {
         if (slice_cpu[i] < late_min)
             late_min = slice_cpu[i];
     }
@@ -1447,11 +1608,430 @@ scale_child(int mode, int ops)
            "bucket's median %.0f; peak RSS %ld MB\n",
            cfg_ops, cfg_mode, any ? "grows" : "flat", late_min, ratio, bucket_median[0],
            ru.ru_maxrss / 1024);
+    if (flushes > 0) {
+        printf("scale %s/%s: the most blocks a flush of one line took was %.0f, limit "
+               "%d\n",
+               cfg_ops, cfg_mode, max_rebuilt, flush_limit);
+    }
     if (scale_guard && buckets > 1 && ratio > scale_limit) {
         FAIL("block building costs %.2fx as much per block with %d blocks built as "
              "with %d: a cost grows with the size of the code cache",
              ratio, scale_blocks, bucket_blocks);
     }
+    fflush(stdout);
+    return failures > 0 ? 1 : 0;
+}
+
+/***************************************************************************
+ * The patch tests (-patch N)
+ *
+ * Code patched as a JIT patches it must not run stale.  Two tests, as the
+ * architecture allows two ways of patching code that other threads run:
+ *
+ * phased: a function of four instructions across a page boundary returns
+ *   A + B (movz x0, #0 at the page's last-but-one word; add x0, x0, #A at its
+ *   last; add x0, x0, #B at the next page's first; ret).  Its block spans the
+ *   boundary, so with -sw_flush_granule it is on the fragment lists of both
+ *   pages.  An ADD may not be rewritten while another thread may execute it,
+ *   so the threads take turns: for phase t (1..N) the patching thread waits
+ *   until every worker has checked phase t-1 and is waiting, rewrites A (t
+ *   odd) or B (t even) so that the function returns t, invalidates the line
+ *   (dc cvau; dsb; ic ivau; dsb; isb), calls the function itself, and then
+ *   publishes t.  Each worker waits for the new phase, synchronizes (an ISB
+ *   after a branch on the phase it loaded), calls, must get t, and
+ *   acknowledges t.
+ *
+ * concurrent: a B may be rewritten while other threads execute it, as a JIT
+ *   retargets its call sites.  A block across a page boundary (nop; b T) ends
+ *   in a B on the far page to one of 64 targets (movz x0, #i; ret).  Patch t
+ *   points the B at target t % 64 and invalidates its line while the workers
+ *   keep calling; then publishes t, and waits for every worker to have made a
+ *   checked call that observed t before patching again.  A worker that has
+ *   observed phase s (and synchronized) must get s or a later patch, never
+ *   an earlier one, and never anything else.
+ *
+ * Every worker checks its first call, before any patch, and every phase.
+ */
+static int patch_count = 0, patch_threads = 3;
+#define PATCH_MAX_THREADS 64
+#define PATCH_TARGETS 64
+
+#define MOVZ_X0(imm) (0xd2800000 | (uint32_t)(imm) << 5)
+#define ADD_X0_X0(imm) (0x91000000 | (uint32_t)(imm) << 10)
+#define NOP 0xd503201f
+
+typedef struct {
+    uint32_t *fn;               /* the function the workers call */
+    int seq;                    /* the published patch */
+    int concurrent;             /* which test */
+    volatile int done;          /* the workers stop */
+    int ack[PATCH_MAX_THREADS]; /* the last patch each worker checked */
+    uint64 calls[PATCH_MAX_THREADS];
+    uint64 bad[PATCH_MAX_THREADS]; /* failures */
+    uint64 first_bad[PATCH_MAX_THREADS];
+} patch_state_t;
+static patch_state_t patch;
+
+static uint64
+patch_call(void)
+{
+    return ((uint64 (*)(void))patch.fn)();
+}
+
+/* Returns the published patch, synchronized for executing the code it
+ * published: a load-acquire, a conditional branch on the loaded value, and an
+ * ISB, so instruction fetch after the ISB is ordered after the load (a branch
+ * dependency to the context synchronization).  In one asm block, so the
+ * compiler can neither drop the branch nor separate the three at any
+ * optimization level.
+ */
+static int
+patch_observe(void)
+{
+    int s;
+    __asm__ __volatile__("ldar %w0, [%1]\n\t"
+                         "cbnz %w0, 1f\n"
+                         "1:\n\t"
+                         "isb"
+                         : "=&r"(s)
+                         : "r"(&patch.seq)
+                         : "memory");
+    return s;
+}
+
+/* Returns the published patch once it differs from last (or the test is
+ * done), synchronized as patch_observe() does.
+ */
+static int
+patch_wait_new(int last)
+{
+    while (__atomic_load_n(&patch.seq, __ATOMIC_RELAXED) == last &&
+           !__atomic_load_n(&patch.done, __ATOMIC_ACQUIRE))
+        sched_yield();
+    return patch_observe();
+}
+
+static void
+patch_check(int w, uint64 r, int lo, int hi)
+{
+    bool ok;
+    if (patch.concurrent) {
+        int d = ((int)r - lo % PATCH_TARGETS + PATCH_TARGETS) % PATCH_TARGETS;
+        ok = r < PATCH_TARGETS && d <= hi - lo;
+    } else
+        ok = r >= (uint64)lo && r <= (uint64)hi;
+    patch.calls[w]++;
+    if (!ok && patch.bad[w]++ == 0)
+        patch.first_bad[w] = r << 32 | (uint)lo;
+}
+
+static void *
+patch_worker(void *arg)
+{
+    int w = (int)(ptr_int_t)arg;
+    /* The first call, before any patch. */
+    int s = patch_observe();
+    /* The writer waits for every first call before patching: it must get s. */
+    patch_check(w, patch_call(), s, s);
+    __atomic_store_n(&patch.ack[w], s, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&patch.done, __ATOMIC_ACQUIRE)) {
+        if (patch.concurrent) {
+            /* Keep calling while the next patch is made. */
+            s = patch_observe();
+            uint64 r = patch_call();
+            int s2 = __atomic_load_n(&patch.seq, __ATOMIC_ACQUIRE);
+            patch_check(w, r, s, s2 + 1);
+            __atomic_store_n(&patch.ack[w], s, __ATOMIC_RELEASE);
+        } else {
+            /* Quiet until the next phase is published. */
+            s = patch_wait_new(__atomic_load_n(&patch.ack[w], __ATOMIC_RELAXED));
+            if (__atomic_load_n(&patch.done, __ATOMIC_ACQUIRE) &&
+                s == __atomic_load_n(&patch.ack[w], __ATOMIC_RELAXED))
+                break;
+            patch_check(w, patch_call(), s, s);
+            __atomic_store_n(&patch.ack[w], s, __ATOMIC_RELEASE);
+        }
+    }
+    return NULL;
+}
+
+/* Writes the instruction at pc and invalidates its line. */
+static void
+patch_write(uint32_t *pc, uint32_t instr)
+{
+    __atomic_store_n(pc, instr, __ATOMIC_RELAXED);
+    __asm__ __volatile__("dc cvau, %0\n\tdsb ish\n\tic ivau, %0\n\tdsb ish\n\tisb"
+                         :
+                         : "r"(pc)
+                         : "memory");
+}
+
+/* Waits until every worker has checked patch t; false after a minute. */
+static bool
+patch_wait_acks(int t)
+{
+    double start = now_ns();
+    for (int w = 0; w < patch_threads; w++) {
+        while (__atomic_load_n(&patch.ack[w], __ATOMIC_ACQUIRE) < t) {
+            if (now_ns() - start > 60e9) {
+                FAIL("worker %d did not check patch %d within a minute", w, t);
+                return false;
+            }
+            sched_yield();
+        }
+    }
+    return true;
+}
+
+static void
+patch_run(bool concurrent, byte *map)
+{
+    uint32_t *site = NULL, *targets = NULL;
+    memset(&patch, 0, sizeof(patch));
+    patch.concurrent = concurrent;
+    /* The functions are written while the mapping is still read-write. */
+    if (concurrent) {
+        patch.fn = (uint32_t *)(map + page_bytes - 4);
+        site = patch.fn + 1; /* the far page's first word */
+        targets = (uint32_t *)(map + page_bytes + 64);
+    } else
+        patch.fn = (uint32_t *)(map + page_bytes - 8);
+    pthread_t th[PATCH_MAX_THREADS];
+    int t, started = 0;
+    if (patch_call() != 0)
+        FAIL("the unpatched function returned %llu", (unsigned long long)patch_call());
+    for (int w = 0; w < patch_threads; w++) {
+        patch.ack[w] = -1;
+        if (pthread_create(&th[w], NULL, patch_worker, (void *)(ptr_int_t)w) != 0) {
+            FAIL("pthread_create failed");
+            break;
+        }
+        started++;
+    }
+    uint a = 0, b = 0;
+    int bad = 0;
+    for (t = 1; t <= patch_count && started == patch_threads; t++) {
+        /* Phased: every worker has checked t-1 and waits.  Concurrent: every
+         * worker has checked t-1 and keeps calling.
+         */
+        if (!patch_wait_acks(t - 1))
+            break;
+        if (concurrent) {
+            uint32_t *target = targets + 2 * (t % PATCH_TARGETS);
+            patch_write(site, 0x14000000 | (uint32_t)(target - site) & 0x3ffffff);
+        } else if (t % 2 == 1) {
+            a = t - b;
+            patch_write(patch.fn + 1, ADD_X0_X0(a));
+        } else {
+            b = t - a;
+            patch_write(patch.fn + 2, ADD_X0_X0(b));
+        }
+        uint64 r = patch_call();
+        uint64 want = concurrent ? (uint64)(t % PATCH_TARGETS) : (uint64)t;
+        if (r != want && bad++ < 5) {
+            FAIL("%s: after patch %d the function returned %llu, not %llu",
+                 concurrent ? "concurrent" : "phased", t, (unsigned long long)r,
+                 (unsigned long long)want);
+        }
+        __atomic_store_n(&patch.seq, t, __ATOMIC_RELEASE);
+    }
+    /* Every worker must have checked the last patch. */
+    if (started == patch_threads)
+        patch_wait_acks(patch_count);
+    __atomic_store_n(&patch.done, 1, __ATOMIC_RELEASE);
+    for (int w = 0; w < started; w++)
+        pthread_join(th[w], NULL);
+    uint64 calls = 0;
+    for (int w = 0; w < started; w++) {
+        calls += patch.calls[w];
+        if (patch.bad[w] > 0) {
+            FAIL("%s: worker %d: %llu of %llu calls returned code older than the "
+                 "patch they had seen published, or no valid result (first: %llu "
+                 "after patch %llu)",
+                 concurrent ? "concurrent" : "phased", w,
+                 (unsigned long long)patch.bad[w], (unsigned long long)patch.calls[w],
+                 (unsigned long long)(patch.first_bad[w] >> 32),
+                 (unsigned long long)(patch.first_bad[w] & 0xffffffff));
+        }
+    }
+    printf("patch %s/%s: %s: %d patches of a block across a page boundary, %d worker "
+           "threads each checking every patch, %llu worker calls\n",
+           cfg_ops, cfg_mode,
+           concurrent ? "concurrent B retargets" : "phased ADD rewrites", patch_count,
+           started, (unsigned long long)calls);
+}
+
+static int
+patch_child(int mode, int ops)
+{
+    cfg_mode = mode_names[mode];
+    cfg_ops = ops_names[ops];
+    client_mode = mode;
+    /* Two mappings of two pages: the phased function, and the concurrent one with
+     * its targets.
+     */
+    byte *maps[2];
+    for (int i = 0; i < 2; i++) {
+        maps[i] = mmap(NULL, 2 * page_bytes, PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (maps[i] == MAP_FAILED) {
+            perror("mmap");
+            return 1;
+        }
+    }
+    uint32_t *fn = (uint32_t *)(maps[0] + page_bytes - 8);
+    fn[0] = MOVZ_X0(0);
+    fn[1] = ADD_X0_X0(0);
+    fn[2] = ADD_X0_X0(0);
+    fn[3] = RET;
+    __builtin___clear_cache((char *)fn, (char *)(fn + 4));
+    uint32_t *g = (uint32_t *)(maps[1] + page_bytes - 4);
+    uint32_t *targets = (uint32_t *)(maps[1] + page_bytes + 64);
+    for (int i = 0; i < PATCH_TARGETS; i++) {
+        targets[2 * i] = MOVZ_X0(i);
+        targets[2 * i + 1] = RET;
+    }
+    g[0] = NOP;
+    g[1] = 0x14000000 | (uint32_t)(targets - (g + 1)) & 0x3ffffff; /* b targets[0] */
+    __builtin___clear_cache((char *)g, (char *)(targets + 2 * PATCH_TARGETS));
+    if (start_dr(ops, "") == NULL)
+        return 1;
+    patch_run(false, maps[0]);
+    patch_run(true, maps[1]);
+    dr_app_stop_and_cleanup();
+    fflush(stdout);
+    return failures > 0 ? 1 : 0;
+}
+
+/***************************************************************************
+ * The ibl test (-ibl N)
+ *
+ * After a flush, an indirect branch must not reach a deleted fragment through
+ * an ibl table entry.  A function T (movz x0, #v; ret) is made a trace head by
+ * a stub after it that branches back to it, so with traces on it becomes a
+ * trace, which -bb_ibt_table_includes_traces puts in the bb ibl tables as well
+ * as the trace ones.  (The ibtraces option sets turn off -xl8_code_copy, as
+ * blocks that keep a copy of writable code do not join traces.)  Each round
+ * calls T indirectly, from a bb and from a hot loop that becomes a trace,
+ * until it is hot; rewrites v and invalidates the line, which without
+ * hardware cache consistency flushes it with all threads synched; runs a
+ * chain of new blocks so the cache space is reused; and calls T indirectly
+ * again, first from a bb: it must return the new v.
+ *
+ * This is a smoke test.  It does not check that T is in both the trace and the
+ * bb ibl tables at the flush (no hook reads the tables), and with the walk
+ * skipped regardless of traces it still passed, so it does not cover the risk
+ * of a trace's bb-table entry outliving the trace, which is why the walk stays
+ * on with traces (flush_ibl_walk_needed() in core/fragment.c).
+ */
+static int ibl_rounds = 0;
+
+/* An indirect call of fn from the block it appears in, into out. */
+#define IBL_COLD_BLR(fn, out)                                                          \
+    __asm__ __volatile__("blr %1\n\tmov %0, x0"                                        \
+                         : "=r"(out)                                                   \
+                         : "r"(fn)                                                     \
+                         : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", \
+                           "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17",     \
+                           "x30", "memory", "cc")
+
+static uint64 __attribute__((noinline))
+ibl_call(uint32_t *fn)
+{
+    return ((uint64 (*)(void))fn)();
+}
+
+static int
+ibl_child(int mode, int ops)
+{
+    cfg_mode = mode_names[mode];
+    cfg_ops = ops_names[ops];
+    client_mode = mode;
+    byte *map = mmap(NULL, page_bytes, PROT_READ | PROT_WRITE | PROT_EXEC,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED) {
+        perror("mmap");
+        return 1;
+    }
+    uint32_t *t = (uint32_t *)map, *stub = t + 4;
+    t[0] = MOVZ_X0(0);
+    t[1] = RET;
+    stub[0] = 0x14000000 | (uint32_t)(t - stub) & 0x3ffffff; /* b t: backward */
+    __builtin___clear_cache((char *)t, (char *)(stub + 1));
+    /* A fresh chain each round, so the churn builds new fragments that reuse
+     * the space of the deleted ones rather than running ones already built.
+     */
+    chain_t *churn = malloc(ibl_rounds * sizeof(*churn));
+    for (int round = 0; round < ibl_rounds; round++)
+        chain_make(&churn[round], num_blocks, block_len, DEFAULT_SEED, 0);
+    if (start_dr(ops, "") == NULL)
+        return 1;
+    uint64 v_traces, v_includes, v_shared_bb, v_shared_trace;
+    dr_get_integer_option("disable_traces", &v_traces);
+    dr_get_integer_option("bb_ibt_table_includes_traces", &v_includes);
+    dr_get_integer_option("shared_bb_ibt_tables", &v_shared_bb);
+    dr_get_integer_option("shared_trace_ibt_tables", &v_shared_trace);
+    int bad = 0;
+    for (int round = 1; round <= ibl_rounds; round++) {
+        uint64 sum = 0;
+        /* Hot: through the stub (a backward branch to t) and indirectly. */
+        for (int i = 0; i < 200; i++) {
+            sum += ibl_call(stub);
+            sum += ibl_call(t);
+        }
+        /* And from a block that is not part of a trace (ibl_call(), the target
+         * of a backward call, is a trace head): a BLR of our own, run once a
+         * round, so it looks the (by now) trace up in the bb ibl table.
+         */
+        uint64 cold;
+        IBL_COLD_BLR(t, cold);
+        sum += cold;
+        if (sum != 401 * (uint64)(round - 1))
+            FAIL("round %d: the warm-up calls returned %llu in all", round,
+                 (unsigned long long)sum);
+        __atomic_store_n(&t[0], MOVZ_X0(round), __ATOMIC_RELAXED);
+        __asm__ __volatile__("dc cvau, %0\n\tdsb ish\n\tic ivau, %0\n\tdsb ish\n\tisb"
+                             :
+                             : "r"(t)
+                             : "memory");
+        /* New fragments, to reuse the space of the deleted ones. */
+        check_result(&churn[round - 1], chain_run(&churn[round - 1]), "a churn run");
+        /* First, before anything can build T again, the bb lookup that a stale
+         * entry in the bb ibl table would answer.
+         */
+        IBL_COLD_BLR(t, cold);
+        if (cold != (uint64)round && bad++ < 5) {
+            FAIL("round %d: after the patch the first indirect call, from a bb, "
+                 "returned %llu",
+                 round, (unsigned long long)cold);
+        }
+        for (int i = 0; i < 4; i++) {
+            uint64 r = i % 2 == 0 ? ibl_call(t) : ibl_call(stub);
+            if (r != (uint64)round && bad++ < 5) {
+                FAIL("round %d: after the patch an indirect call returned %llu", round,
+                     (unsigned long long)r);
+            }
+        }
+    }
+    /* Hot once more, and then, native (see fragment_bytes()), whether T is a
+     * trace: else the test does not test the trace's entries.
+     */
+    for (int i = 0; i < 200; i++) {
+        ibl_call(stub);
+        ibl_call(t);
+    }
+    void *drcontext = dr_get_current_drcontext();
+    dr_app_stop();
+    bool trace = dr_trace_exists_at(drcontext, t);
+    dr_app_cleanup();
+    if (!v_traces && !trace)
+        FAIL("the target did not become a trace");
+    printf("ibl %s/%s: %d rounds of a hot indirect target patched and flushed "
+           "(traces %s, bb ibl tables %s traces, ibl tables bb %s, trace %s; the "
+           "target %s a trace)\n",
+           cfg_ops, cfg_mode, ibl_rounds, v_traces ? "off" : "on",
+           v_includes ? "include" : "exclude", v_shared_bb ? "shared" : "private",
+           v_shared_trace ? "shared" : "private", trace ? "is" : "is not");
     fflush(stdout);
     return failures > 0 ? 1 : 0;
 }
@@ -1481,7 +2061,10 @@ usage(const char *name)
             "usage: %s [-blocks N] [-len N] [-reps N] [-runs N] "
             "[-modes m1,m2,...] [-ops o1,o2,...|all]\n"
             "       [-scale N [-bucket N] [-slice N] [-limit X] [-scale-guard] "
-            "[-layout sparse,rwx,onemap,hub,reverse] [-flushes K]]\n",
+            "[-layout l1,...] [-descending]\n"
+            "        [-flushes K [-flush-limit N|auto]] [-range-flush]]\n"
+            "       [-patch N [-threads N]] [-ibl N]\n"
+            "layouts: sparse, rwx, onemap, perpage, hub, fanin, reverse\n",
             name);
     return 1;
 }
@@ -1490,6 +2073,9 @@ int
 main(int argc, char *argv[])
 {
     uint want_mode = 0, want_ops = 1u << OPS_DEFAULT | 1u << OPS_SEEDBOX;
+    long pagesize = sysconf(_SC_PAGESIZE);
+    if (pagesize > 0)
+        page_bytes = (size_t)pagesize;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-blocks") == 0 && i + 1 < argc)
             num_blocks = atoi(argv[++i]);
@@ -1524,11 +2110,26 @@ main(int argc, char *argv[])
                 return 1;
         } else if (strcmp(argv[i], "-flushes") == 0 && i + 1 < argc)
             scale_flushes = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-flush-limit") == 0 && i + 1 < argc) {
+            i++;
+            scale_flush_limit = strcmp(argv[i], "auto") == 0 ? -1 : atoi(argv[i]);
+        } else if (strcmp(argv[i], "-patch") == 0 && i + 1 < argc)
+            patch_count = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-threads") == 0 && i + 1 < argc)
+            patch_threads = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-ibl") == 0 && i + 1 < argc)
+            ibl_rounds = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-descending") == 0)
+            scale_descending = true;
+        else if (strcmp(argv[i], "-range-flush") == 0)
+            scale_range_flush = true;
         else
             return usage(argv[0]);
     }
     if (num_blocks < 1 || block_len < 1 || reps < 1 || runs < 1 || scale_blocks < 0 ||
-        slice_blocks < 1 || scale_limit <= 1)
+        slice_blocks < 1 || scale_limit <= 1 || patch_count < 0 ||
+        patch_count > 4095 /* an ADD immediate */ || patch_threads < 0 ||
+        patch_threads > PATCH_MAX_THREADS || ibl_rounds < 0 || ibl_rounds > 65535)
         return usage(argv[0]);
     if (want_mode == 0)
         want_mode = (1u << NUM_MODES) - 1;
@@ -1542,14 +2143,25 @@ main(int argc, char *argv[])
             bucket_blocks = slice_blocks;
         if (scale_blocks < bucket_blocks)
             return usage(argv[0]);
-        if (TESTANY(LAYOUT_HUB, scale_layout) &&
-            (TESTANY(LAYOUT_SPARSE | LAYOUT_REVERSE, scale_layout) ||
+        if (TESTANY(LAYOUT_HUB | LAYOUT_FANIN, scale_layout) &&
+            (TESTANY(LAYOUT_SPARSE | LAYOUT_PERPAGE | LAYOUT_REVERSE, scale_layout) ||
              TESTANY(1u << OPS_TRACES, want_ops))) {
-            fprintf(stderr, "the hub layout cannot be sparse or reversed (traces)\n");
+            fprintf(stderr,
+                    "the hub layouts cannot be sparse, perpage or reversed (traces)\n");
             return 1;
         }
-    } else if (TESTANY(1u << OPS_TRACES, want_ops)) {
-        fprintf(stderr, "the traces options are for the scaling mode\n");
+        if (TESTANY(LAYOUT_SPARSE, scale_layout) &&
+            TESTANY(LAYOUT_PERPAGE, scale_layout)) {
+            fprintf(stderr, "a layout cannot be both sparse and perpage\n");
+            return 1;
+        }
+        if ((TESTANY(LAYOUT_FANIN, scale_layout) || scale_range_flush) &&
+            !TESTANY(LAYOUT_ONEMAP, scale_layout)) {
+            fprintf(stderr, "fanin and -range-flush need the onemap layout\n");
+            return 1;
+        }
+    } else if (TESTANY(1u << OPS_TRACES, want_ops) && ibl_rounds == 0) {
+        fprintf(stderr, "the traces options are for the scaling and ibl modes\n");
         return 1;
     }
     default_chain = num_blocks == DEFAULT_BLOCKS && block_len == DEFAULT_LEN;
@@ -1584,9 +2196,17 @@ main(int argc, char *argv[])
         for (int m = 0; m < NUM_MODES; m++) {
             if (!TESTANY(1u << o, want_ops) || !TESTANY(1u << m, want_mode))
                 continue;
+            /* Or the child inherits, and prints again, what we have not printed. */
+            fflush(stdout);
             pid_t pid = fork();
-            if (pid == 0)
-                _exit(scale_blocks > 0 ? scale_child(m, o) : child(m, o));
+            if (pid == 0) {
+                int res = ibl_rounds > 0 ? ibl_child(m, o)
+                    : patch_count > 0    ? patch_child(m, o)
+                    : scale_blocks > 0   ? scale_child(m, o)
+                                         : child(m, o);
+                fflush(stdout);
+                _exit(res);
+            }
             int st;
             waitpid(pid, &st, 0);
             if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
