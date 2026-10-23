@@ -77,15 +77,18 @@ main(int argc, char *argv[])
     assert(rc == 0);
 
     /* Now spend time doing indirect branches to try and stress signals interrupting
-     * the IBL.
+     * the IBL.  The volatile pointer keeps the call indirect (a known constant
+     * target could be turned into a direct call), and i is initialized.
      */
-    int i;
-    int (*foo_ptr)(int) = foo;
+    int i = 0;
+    int (*volatile foo_ptr)(int) = foo;
+    volatile int sink = 0;
 #define WAIT_FOR_NUM_SIGS 250
     while (num_sigs < WAIT_FOR_NUM_SIGS) {
-        rc += (*foo_ptr)(i);
+        sink += (*foo_ptr)(i);
+        i = (i + 1) & 0xff;
     }
 
     print("all done\n");
-    return rc > 0;
+    return 0;
 }

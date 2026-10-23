@@ -415,6 +415,8 @@ test_thread_func(void (*asm_func)(void))
  */
 
 static void *load_from;
+/* How many blocks used each emit flavor (both must, see event_bb()). */
+static volatile int num_emit_default, num_emit_store_translations;
 
 static dr_emit_flags_t
 event_bb(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool translating)
@@ -441,12 +443,20 @@ event_bb(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool trans
         instr_set_translation(inst, instr_get_app_pc(first));
 #    endif
     /* Test both by alternating and assuming we hit both at the detach points
-     * in the various tests.
+     * in the various tests.  Tags are instruction-aligned, so skip the bits that
+     * are always zero (AArch64 tags are 4-byte aligned: tag % 2 was always 0).
      */
-    if ((ptr_uint_t)tag % 2 == 0)
+    ptr_uint_t bits = (ptr_uint_t)tag;
+#ifdef AARCH64
+    bits >>= 2;
+#endif
+    if (bits % 2 == 0) {
+        __atomic_fetch_add(&num_emit_default, 1, __ATOMIC_RELAXED);
         return DR_EMIT_DEFAULT;
-    else
+    } else {
+        __atomic_fetch_add(&num_emit_store_translations, 1, __ATOMIC_RELAXED);
         return DR_EMIT_STORE_TRANSLATIONS;
+    }
 }
 
 static bool
@@ -550,6 +560,8 @@ main(void)
 
     destroy_cond_var(sideline_continue);
     destroy_cond_var(sideline_ready_for_attach);
+    /* Both emit flavors must have been exercised. */
+    assert(num_emit_default > 0 && num_emit_store_translations > 0);
     print("all done\n");
     return 0;
 }

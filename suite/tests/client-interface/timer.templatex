@@ -1,5 +1,8 @@
-// some number of these after dr_init but before app installs its itimer
+// Any number of client callbacks between dr_init and the app installing its own
+// itimer: the client's 25ms timer only fires first if the app takes that long to
+// get there, which a release build usually does not.
 (client event_timer fired
-)+(app got SIGALRM
+)*(app got SIGALRM
 )+(client event_timer fired
+)+(app got SIGALRM
 )+.*
