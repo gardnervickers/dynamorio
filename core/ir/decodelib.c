@@ -132,9 +132,21 @@ get_thread_private_dcontext(void)
     return GLOBAL_DCONTEXT;
 }
 
+#    ifdef DR_FUZZ_ASSERTS
+/* Supplied by the fuzz harness, which decides whether a usage error is a
+ * finding or should be ignored to mimic a release build.
+ */
+void
+dr_fuzz_client_assert(const char *file, int line, const char *msg);
+#    endif
+
 void
 external_error(const char *file, int line, const char *msg)
 {
+#    ifdef DR_FUZZ_ASSERTS
+    dr_fuzz_client_assert(file, line, msg);
+    return;
+#    endif
     print_file(STDERR, "Usage error: %s (%s, line %d)\n", msg, file, line);
     abort();
 }

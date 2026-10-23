@@ -1640,6 +1640,25 @@ endif ()
 # An alternative is to keep them in separate projects and only build
 # when we run them via --build-and-test.
 option(BUILD_TESTS "build tests" OFF)
+# libFuzzer harnesses for the AArch64 decoder/encoder (suite/fuzz).  These link
+# against drdecode_fuzz, a sanitizer-instrumented copy of drdecode, so no
+# global CFLAGS are needed.  Without clang only a corpus-replay driver is built.
+option(BUILD_FUZZERS "build libFuzzer harnesses for the IR" OFF)
+if (BUILD_FUZZERS)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    set(FUZZ_SANITIZER_FLAGS_DEFAULT
+      "-fsanitize=address,undefined -fno-sanitize=pointer-overflow -fno-sanitize-recover=undefined -fno-omit-frame-pointer")
+    set(FUZZ_COVERAGE_FLAGS "-fsanitize=fuzzer-no-link")
+  else ()
+    set(FUZZ_SANITIZER_FLAGS_DEFAULT
+      "-fsanitize=address,undefined -fno-sanitize=pointer-overflow -fno-omit-frame-pointer")
+    set(FUZZ_COVERAGE_FLAGS "")
+  endif ()
+  # pointer-overflow is off because DR routinely computes application
+  # addresses with pointer arithmetic starting from NULL.
+  set(FUZZ_SANITIZER_FLAGS "${FUZZ_SANITIZER_FLAGS_DEFAULT}" CACHE STRING
+    "sanitizer flags for drdecode_fuzz and the suite/fuzz harnesses")
+endif (BUILD_FUZZERS)
 # This is to disable the default -msgbox_mask.
 option(AUTOMATED_TESTING "build for automated testing" OFF)
 if (BUILD_TESTS)
@@ -1649,6 +1668,9 @@ if (BUILD_TESTS)
   # add Dashboard support
   include(CTest)
 endif (BUILD_TESTS)
+if (BUILD_FUZZERS)
+  enable_testing()
+endif (BUILD_FUZZERS)
 
 if (BUILD_CORE)
   add_subdirectory(core)
@@ -2027,13 +2049,13 @@ if (BUILD_EXT)
   add_subdirectory(ext)
 endif (BUILD_EXT)
 
-if (BUILD_SAMPLES OR BUILD_TESTS OR BUILD_CLIENTS)
+if (BUILD_SAMPLES OR BUILD_TESTS OR BUILD_CLIENTS OR BUILD_FUZZERS)
   # api/samples is set up to function both as a separate project for
   # building samples vs a DynamoRIO installation, and to allow
   # building as a component of the whole source tree
   set(DynamoRIO_INTERNAL ON) # do not import dynamorio lib target
   set(DynamoRIO_DIR ${PROJECT_BINARY_DIR}/cmake)
-endif (BUILD_SAMPLES OR BUILD_TESTS OR BUILD_CLIENTS)
+endif (BUILD_SAMPLES OR BUILD_TESTS OR BUILD_CLIENTS OR BUILD_FUZZERS)
 
 if (BUILD_SAMPLES)
   add_subdirectory(api/samples)
@@ -2043,6 +2065,10 @@ endif (BUILD_SAMPLES)
 if (BUILD_TESTS)
   add_subdirectory(suite/tests)
 endif (BUILD_TESTS)
+
+if (BUILD_FUZZERS)
+  add_subdirectory(suite/fuzz)
+endif (BUILD_FUZZERS)
 
 # We must append to this file to avoid cmake_install.cmake's diff from thinking
 # the exports have changed and thus clobbering the other config's files.

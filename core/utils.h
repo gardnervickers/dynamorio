@@ -113,6 +113,19 @@
 #    endif /* INTERNAL */
 #    define ASSERT_NOT_TESTED() \
         SYSLOG_INTERNAL_WARNING_ONCE("Not tested @%s:%d", __FILE__, __LINE__)
+#elif defined(DEBUG) && defined(STANDALONE_DECODER) && defined(DR_FUZZ_ASSERTS)
+/* The fuzzing build of drdecode (suite/fuzz) keeps internal asserts, which the
+ * standalone decoder otherwise compiles out, and reports them to the harness.
+ */
+void
+dr_fuzz_internal_assert(const char *file, int line, const char *expr);
+#    define ASSERT(x) \
+        ((void)(!(x) ? (dr_fuzz_internal_assert(__FILE__, __LINE__, #x), 0) : 0))
+#    define ASSERT_MESSAGE(level, msg, x) \
+        ((void)(!(x) ? (dr_fuzz_internal_assert(__FILE__, __LINE__, msg), 0) : 0))
+#    define ASSERT_NOT_TESTED() ASSERT(true)
+#    define ASSERT_CURIOSITY(x) ASSERT(true)
+#    define ASSERT_CURIOSITY_ONCE(x) ASSERT(true)
 #else
 #    define ASSERT(x) ((void)0)
 #    define ASSERT_MESSAGE(level, msg, x) ASSERT(x)

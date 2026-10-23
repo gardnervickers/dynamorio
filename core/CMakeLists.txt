@@ -1027,6 +1027,30 @@ elseif (RISCV64)
 endif()
 target_link_libraries(drdecode drlibc)
 
+if (BUILD_FUZZERS)
+  # A copy of drdecode for suite/fuzz that keeps internal ASSERTs (compiled out
+  # of the standalone decoder otherwise) and routes them and CLIENT_ASSERTs to
+  # the harness.
+  add_library(drdecode_fuzz STATIC
+    ${DECODER_SRCS}
+    ir/decodelib.c
+    string.c
+    io.c
+    )
+  set_target_properties(drdecode_fuzz PROPERTIES
+    COMPILE_DEFINITIONS "NOT_DYNAMORIO_CORE_PROPER;STANDALONE_DECODER;DR_FUZZ_ASSERTS")
+  # Instrument the code under test; FUZZ_SANITIZER_FLAGS is set at the top level.
+  append_property_string(TARGET drdecode_fuzz COMPILE_FLAGS
+    "-fPIC ${FUZZ_SANITIZER_FLAGS} ${FUZZ_COVERAGE_FLAGS}")
+  add_gen_events_deps(drdecode_fuzz)
+  if (AARCH64)
+    add_dependencies(drdecode_fuzz gen_aarch64_codec)
+  elseif (RISCV64)
+    add_dependencies(drdecode_fuzz gen_riscv64_codec)
+  endif ()
+  target_link_libraries(drdecode_fuzz drlibc)
+endif ()
+
 ###########################################################################
 # Injection library
 
