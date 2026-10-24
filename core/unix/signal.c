@@ -303,6 +303,31 @@ enum {
 static byte detached_sigact_state[SIGARRAY_SIZE];
 static bool multiple_handlers_present; /* Accessed using atomics, not the lock. */
 
+/* A native delivery on this thread takes detached_sigact_lock for reading
+ * (execute_native_handler() with no dcontext: an initializing thread, one in a
+ * detach, or the detacher once its own state is gone).  Where we take the lock for
+ * writing outside our signal handler we block signals meanwhile: else such a
+ * delivery, arriving while we wait for or hold the lock, would wait forever for us.
+ * SIGSEGV and SIGBUS stay unblocked, as in our handler.
+ */
+static void
+detached_sigact_write_lock(kernel_sigset_t *saved_mask)
+{
+    kernel_sigset_t block;
+    kernel_sigfillset(&block);
+    kernel_sigdelset(&block, SIGSEGV);
+    kernel_sigdelset(&block, SIGBUS);
+    sigprocmask_syscall(SIG_BLOCK, &block, saved_mask, sizeof(block));
+    d_r_write_lock(&detached_sigact_lock);
+}
+
+static void
+detached_sigact_write_unlock(kernel_sigset_t *saved_mask)
+{
+    d_r_write_unlock(&detached_sigact_lock);
+    sigprocmask_syscall(SIG_SETMASK, saved_mask, NULL, sizeof(*saved_mask));
+}
+
 /* Whether pc is in the reservation our stacks (including signal stacks) come from,
  * so that execute_native_handler() can tell a frame on one of our stacks from one on
  * the app's without our TLS, even after our heap is gone.  Meaningful only if
@@ -726,9 +751,10 @@ d_r_signal_init(void)
     /* A re-attach starts over from the app's current handlers.  A thread that took
      * a signal late in the previous detach may still be delivering it natively.
      */
-    d_r_write_lock(&detached_sigact_lock);
+    kernel_sigset_t saved_mask;
+    detached_sigact_write_lock(&saved_mask);
     memset(detached_sigact_state, 0, sizeof(detached_sigact_state));
-    d_r_write_unlock(&detached_sigact_lock);
+    detached_sigact_write_unlock(&saved_mask);
 
     IF_LINUX(signalfd_init());
     signal_arch_init();
@@ -1245,7 +1271,8 @@ signal_info_exit_sigaction(dcontext_t *dcontext, thread_sig_info_t *info,
                      * We check and restore under the lock so that a consumption
                      * cannot fall in between.
                      */
-                    d_r_write_lock(&detached_sigact_lock);
+                    kernel_sigset_t saved_mask;
+                    detached_sigact_write_lock(&saved_mask);
                     if (!kernel_action_replaced_natively(i)) {
                         sigaction_syscall(i,
                                           detached_sigact_state[i] ==
@@ -1254,7 +1281,7 @@ signal_info_exit_sigaction(dcontext_t *dcontext, thread_sig_info_t *info,
                                               : info->sighand->action[i],
                                           NULL);
                     }
-                    d_r_write_unlock(&detached_sigact_lock);
+                    detached_sigact_write_unlock(&saved_mask);
                 } else
                     sigaction_syscall(i, info->sighand->action[i], NULL);
             } else if (info->sighand->we_intercept[i]) {
@@ -2168,21 +2195,23 @@ set_handler_and_record_app(dcontext_t *dcontext, thread_sig_info_t *info, int si
         /* Record the app handler for delivering native signals during initialization.
          * XXX: Should we rename this s/detached_/native_/ or something?
          */
-        d_r_write_lock(&detached_sigact_lock);
+        kernel_sigset_t saved_mask;
+        detached_sigact_write_lock(&saved_mask);
         memcpy(&detached_sigact[sig], info->sighand->action[sig],
                sizeof(detached_sigact[sig]));
         detached_sigact_state[sig] = DETACHED_SIGACT_SAVED;
-        d_r_write_unlock(&detached_sigact_lock);
+        detached_sigact_write_unlock(&saved_mask);
     } else {
         LOG(THREAD, LOG_ASYNCH, 2,
             "prior handler is " PFX " vs main " PFX " with flags=0x%x for signal %d\n",
             oldact.handler, main_signal_handler, oldact.flags, sig);
         if (oldact.handler == (handler_t)SIG_DFL) {
             /* Not what a previous attach saved for native delivery. */
-            d_r_write_lock(&detached_sigact_lock);
+            kernel_sigset_t saved_mask;
+            detached_sigact_write_lock(&saved_mask);
             memset(&detached_sigact[sig], 0, sizeof(detached_sigact[sig]));
             detached_sigact_state[sig] = DETACHED_SIGACT_SAVED;
-            d_r_write_unlock(&detached_sigact_lock);
+            detached_sigact_write_unlock(&saved_mask);
         }
         if (info->sighand->action[sig] != NULL) {
             if (info->sighand->is_shared)
@@ -2464,12 +2493,13 @@ update_detached_sigact(thread_sig_info_t *info, int sig, const kernel_sigaction_
     }
     if (info->sighand->is_shared)
         d_r_mutex_lock(&info->sighand->lock);
-    d_r_write_lock(&detached_sigact_lock);
+    kernel_sigset_t saved_mask;
+    detached_sigact_write_lock(&saved_mask);
     memcpy(&detached_sigact[sig],
            info->sighand->action[sig] != NULL ? info->sighand->action[sig] : &kernel_act,
            sizeof(detached_sigact[sig]));
     detached_sigact_state[sig] = DETACHED_SIGACT_SAVED;
-    d_r_write_unlock(&detached_sigact_lock);
+    detached_sigact_write_unlock(&saved_mask);
     if (info->sighand->is_shared)
         d_r_mutex_unlock(&info->sighand->lock);
 }
@@ -8245,7 +8275,8 @@ signal_detach_save_app_actions(dcontext_t *dcontext)
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     if (atomic_read_bool(&multiple_handlers_present))
         return;
-    d_r_write_lock(&detached_sigact_lock);
+    kernel_sigset_t saved_mask;
+    detached_sigact_write_lock(&saved_mask);
     for (int i = 1; i <= MAX_SIGNUM; i++) {
         if (detached_sigact_state[i] == DETACHED_SIGACT_CONSUMED)
             continue;
@@ -8256,7 +8287,7 @@ signal_detach_save_app_actions(dcontext_t *dcontext)
             memset(&detached_sigact[i], 0, sizeof(detached_sigact[i]));
         detached_sigact_state[i] = DETACHED_SIGACT_SAVED;
     }
-    d_r_write_unlock(&detached_sigact_lock);
+    detached_sigact_write_unlock(&saved_mask);
 }
 
 /* Sends a signal to a currently-native thread.
