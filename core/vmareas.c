@@ -135,6 +135,18 @@ enum {
     VM_JIT_MANAGED = 0x2000,
     /* Kernel MAP_SHARED backing can change without writes to this VA. */
     VM_SHARED_MAPPING = 0x4000,
+
+    /* Whether the area's code is in a segment of a module we knew of at its load, in a
+     * mapping of the module's file (VM_CODE_IN_MODULE), or not (VM_CODE_OUTSIDE_MODULE:
+     * see module_known_at_load_run()), decided when an executable area is added
+     * (add_executable_vm_area(), or set_region_jit_managed() for a JIT-managed one,
+     * which is outside) and kept while it stays: see
+     * executable_area_code_outside_module().  On AArch64 without
+     * -hw_cache_consistency exactly one is set on each executable area; otherwise
+     * neither is.
+     */
+    VM_CODE_IN_MODULE = 0x8000,
+    VM_CODE_OUTSIDE_MODULE = 0x10000,
 };
 
 /* simple way to disable sandboxing */
@@ -1054,7 +1066,9 @@ add_vm_area(vm_area_vector_t *v, app_pc start, app_pc end, uint vm_flags, uint f
 #endif
             /* disallow any other vm_flag differences */
             DODEBUG({
-                flagignore = VM_UNMOD_IMAGE | VM_WAS_FUTURE | VM_ONCE_ONLY | VM_WRITABLE;
+                flagignore = VM_UNMOD_IMAGE | VM_WAS_FUTURE | VM_ONCE_ONLY | VM_WRITABLE |
+                    /* The existing area keeps its own. */
+                    VM_CODE_IN_MODULE | VM_CODE_OUTSIDE_MODULE;
             });
 #ifdef PROGRAM_SHEPHERDING
             DODEBUG({ flagignore = flagignore | VM_PATTERN_REVERIFY; });
@@ -2827,7 +2841,7 @@ add_executable_vm_area_one(app_pc start, app_pc end, uint vm_flags, uint frag_fl
         /* we only expect certain flags */
         uint expect = VM_WRITABLE | VM_UNMOD_IMAGE | VM_MADE_READONLY |
             VM_DELAY_READONLY | VM_WAS_FUTURE | VM_EXECUTED_FROM | VM_DRIVER_ADDRESS |
-            VM_SHARED_MAPPING;
+            VM_SHARED_MAPPING | VM_CODE_IN_MODULE | VM_CODE_OUTSIDE_MODULE;
 #    ifdef PROGRAM_SHEPHERDING
         expect |= VM_PATTERN_REVERIFY;
 #    endif
@@ -2946,6 +2960,47 @@ add_executable_vm_area(app_pc start, app_pc end, uint vm_flags, uint frag_flags,
                                                 part_frag_flags, have_writelock
                                                 _IF_DEBUG(comment)) && result;
             start = part_end;
+        }
+        return result;
+    }
+#endif
+#ifdef AARCH64
+    /* Classify a new area's code as in or outside modules (a re-added one passes its
+     * old flags): see executable_area_code_outside_module().  Only AArch64 without
+     * -hw_cache_consistency asks (code_may_change()), and the flags must not upset
+     * whole-flag checks elsewhere (add_executable_vm_area_check_IAT()).
+     * We split the area at module segment boundaries: a loader first maps a library's
+     * whole extent with its text's protection, then maps its data over part of it,
+     * leaving the text in one area with a gap no segment covers (between segments
+     * aligned to 64K on a 4K-page kernel), and the text must count as module code.
+     * Only an image (a mapping of a module's file, or the vdso) can be module code:
+     * anonymous code mapped over a module's segment that was unmapped (which leaves the
+     * module listed) is not.  We ask the memory's type too: an area first added when
+     * its code runs (check_thread_vm_area(): text mapped without exec, or writable, and
+     * made executable by an mprotect we do not act on) has no VM_UNMOD_IMAGE.
+     */
+    if (!INTERNAL_OPTION(hw_cache_consistency) &&
+        !TESTANY(VM_CODE_IN_MODULE | VM_CODE_OUTSIDE_MODULE, vm_flags)) {
+        bool result = true;
+        while (start < end) {
+            app_pc run_end = end;
+            dr_mem_info_t info;
+            bool image = TEST(VM_UNMOD_IMAGE, vm_flags);
+            if (!image && query_memory_ex(start, &info)) {
+                /* Judge each mapping by its own type. */
+                image = info.type == DR_MEMTYPE_IMAGE;
+                if (info.base_pc + info.size > start && info.base_pc + info.size < end)
+                    run_end = info.base_pc + info.size;
+            }
+            bool in_module = image && module_known_at_load_run(start, run_end, &run_end);
+            LOG(GLOBAL, LOG_VMAREAS, 2, "\tcode " PFX "-" PFX " is %s modules\n", start,
+                run_end, in_module ? "in" : "outside");
+            uint part_vm_flags =
+                vm_flags | (in_module ? VM_CODE_IN_MODULE : VM_CODE_OUTSIDE_MODULE);
+            result = add_executable_vm_area_one(start, run_end, part_vm_flags, frag_flags,
+                                                have_writelock _IF_DEBUG(comment)) &&
+                result;
+            start = run_end;
         }
         return result;
     }
@@ -3142,6 +3197,38 @@ is_executable_address(app_pc addr)
     found = lookup_addr(executable_areas, addr, NULL);
     d_r_read_unlock(&executable_areas->lock);
     return found;
+}
+
+/* Returns whether the code at addr, which a fragment is being or was built from, was
+ * outside any module we knew of at its load (see add_executable_vm_area()) when we
+ * added its executable area (AArch64 without -hw_cache_consistency only).  The answer
+ * stays while the area does, whatever happens to the module list meanwhile (e.g., a
+ * module's header unmapped, which removes the module but not its other segments'
+ * areas).  A fragment is recreated from the app's code only while its areas stay:
+ * removing an area flushes its fragments, and a fragment pending deletion that a
+ * thread is still in, which can outlive the area, is translated from the translation
+ * info we record as we flush it.
+ */
+bool
+executable_area_code_outside_module(app_pc addr)
+{
+    vm_area_t *area;
+    uint vm_flags = 0;
+    bool found;
+    bool own_lock = self_owns_write_lock(&executable_areas->lock);
+    if (!own_lock)
+        d_r_read_lock(&executable_areas->lock);
+    found = lookup_addr(executable_areas, addr, &area);
+    if (found)
+        vm_flags = area->vm_flags;
+    if (!own_lock)
+        d_r_read_unlock(&executable_areas->lock);
+    /* Every executable area is classified (AArch64 without -hw_cache_consistency): one
+     * we do not find counts as outside, which keeps a copy and does not elide.
+     */
+    ASSERT(!found || IF_AARCH64_ELSE(INTERNAL_OPTION(hw_cache_consistency), true) ||
+           TESTANY(VM_CODE_IN_MODULE | VM_CODE_OUTSIDE_MODULE, vm_flags));
+    return !found || !TESTANY(VM_CODE_IN_MODULE, vm_flags);
 }
 
 /* returns any VM_ flags associated with addr's vm area
@@ -6533,7 +6620,15 @@ set_region_jit_managed(app_pc start, size_t len)
         LOG(GLOBAL, LOG_VMAREAS, 1,
             "Generating new jit-managed vmarea: " PFX "-" PFX "\n", start, start + len);
 
-        add_vm_area(executable_areas, start, start + len, VM_JIT_MANAGED, 0,
+        uint vm_flags = VM_JIT_MANAGED;
+#ifdef AARCH64
+        /* Classified once, as outside modules (JIT code), like the areas
+         * add_executable_vm_area() adds: see executable_area_code_outside_module().
+         */
+        if (!INTERNAL_OPTION(hw_cache_consistency))
+            vm_flags |= VM_CODE_OUTSIDE_MODULE;
+#endif
+        add_vm_area(executable_areas, start, start + len, vm_flags, 0,
                     NULL _IF_DEBUG("jit-managed"));
     }
     d_r_write_unlock(&executable_areas->lock);
@@ -7511,6 +7606,12 @@ allow_xfer_for_frag_flags(dcontext_t *dcontext, app_pc pc, uint src_flags, uint 
  * Sets FRAG_STARTS_RSEQ_REGION in *flags if tag starts a region, and lowers *stop
  * (if non-NULL) so the block is checked again before the next boundary.  A block's
  * first instruction is never a stop: callers only stop at later ones.
+ * XXX: entering and leaving are judged by address against the block's start, which
+ * fits falling through: a direct transfer backward into a region below tag
+ * (rseq_start < tag) is not seen as entering it, and one backward out of tag's region
+ * to below it is not seen as leaving it (the region before pc is not tag's, and
+ * tag >= its end).  Builds and recreations agree on those, but such a block is not
+ * split at the boundary.
  */
 bool
 vm_area_rseq_boundary(app_pc tag, app_pc pc, uint *flags, app_pc *stop,

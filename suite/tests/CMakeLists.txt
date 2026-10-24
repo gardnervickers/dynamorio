@@ -1706,7 +1706,7 @@ function(set_properties name test myprefix)
     endforeach ()
   endif ()
   if (DEFINED ${test}_env)
-    set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT "${myprefix}${${test}_env}")
+    set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT "${${test}_env}")
   endif ()
 endfunction ()
 
@@ -2412,6 +2412,27 @@ if (NOT MACOS AND NOT ANDROID)
   tobuild_appdll(client.modules client-interface/modules.c)
   DynamoRIO_get_full_path(modules_libname client.modules.appdll "${location_suffix}")
   tobuild_ci(client.modules client-interface/modules.c "" "" "${modules_libname}")
+endif ()
+if (AARCH64 AND LINUX AND NOT ANDROID)
+  # Code in modules, the executable's and a dlopen()ed library's, counts as module
+  # code without -hw_cache_consistency: see client-interface/a64_module_class.dll.c.
+  # Not through torun(): it appends -code_api, which turns elision back off.
+  tobuild_appdll(client.a64_module_class client-interface/a64_module_class.c)
+  add_exe(client.a64_module_class client-interface/a64_module_class.c)
+  add_library(client.a64_module_class.dll SHARED
+    client-interface/a64_module_class.dll.c)
+  setup_test_client_dll_basics(client.a64_module_class.dll)
+  get_target_path_for_execution(a64mc_drrun drrun "${location_suffix}")
+  get_target_path_for_execution(a64mc_client client.a64_module_class.dll
+    "${location_suffix}")
+  get_target_path_for_execution(a64mc_app client.a64_module_class "${location_suffix}")
+  DynamoRIO_get_full_path(a64mc_lib client.a64_module_class.appdll "${location_suffix}")
+  add_test(NAME client.a64_module_class
+    COMMAND ${a64mc_drrun} -s 60 -quiet -opt_speed -no_hw_cache_consistency
+      -c ${a64mc_client} -- ${a64mc_app} ${a64mc_lib})
+  set_tests_properties(client.a64_module_class PROPERTIES TIMEOUT 60
+    PASS_REGULAR_EXPRESSION "all done"
+    FAIL_REGULAR_EXPRESSION "not elided|not seen|contiguous: yes|failed")
 endif ()
 if (X86) # FIXME i#1551, i#1569: port to ARM and AArch64
   tobuild_ci(client.alloc client-interface/alloc.c ""
@@ -5613,6 +5634,15 @@ if (UNIX)
       # thread is on its way from d_r_dispatch into a syscall.
       tobuild(linux.a64_dit_signal linux/a64_dit_signal.c)
       target_link_libraries(linux.a64_dit_signal rt)
+      # A fault in a block from patched JIT code that was not writable when the
+      # block was built (W^X, or written through a second mapping), before the
+      # app's IC IVAU: without -hw_cache_consistency DR keeps a copy of the code
+      # of blocks from outside any module to translate from.
+      tobuild_ops(linux.a64_code_copy_wx linux/a64_code_copy_wx.c
+        "-no_hw_cache_consistency" "")
+      torunonly(linux.a64_code_copy_wx_hwcc linux.a64_code_copy_wx
+        linux/a64_code_copy_wx.c "" "")
+      set(linux.a64_code_copy_wx_hwcc_expectbase "a64_code_copy_wx")
     endif ()
   endif ()
 
@@ -5817,6 +5847,18 @@ if (UNIX)
     use_DynamoRIO_static_client(api.rseq drmemtrace_nomain)
     use_DynamoRIO_drmemtrace_tracer(api.rseq)
     set(api.rseq_expectbase rseq_client)
+    if (AARCH64)
+      # A fault in an rseq sequence in anonymous read-only code: without
+      # -hw_cache_consistency DR keeps a copy of such code to translate from.
+      # glibc must not register rseq: DR would read the tables before the test
+      # maps the sequence's code.
+      tobuild_ops(linux.rseq_anon linux/rseq_anon.c "-no_hw_cache_consistency"
+        "-under_dr")
+      set(linux.rseq_anon_env "GLIBC_TUNABLES=glibc.pthread.rseq=0")
+      torunonly(linux.rseq_anon_hwcc linux.rseq_anon linux/rseq_anon.c "" "-under_dr")
+      set(linux.rseq_anon_hwcc_expectbase "rseq_anon")
+      set(linux.rseq_anon_hwcc_env "GLIBC_TUNABLES=glibc.pthread.rseq=0")
+    endif ()
     # Test non-compliant code with our workaround flag.
     tobuild_ops(linux.rseq_disable linux/rseq_disable.c "-disable_rseq" "")
   endif ()

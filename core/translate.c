@@ -2165,15 +2165,23 @@ record_translation_info(dcontext_t *dcontext, fragment_t *f, instrlist_t *existi
         app_pc copy_end = bb_code_copy_end(dcontext, f->tag);
         if (copy_end != NULL) {
             /* We translate from a copy of the code instead (-xl8_code_copy): see
-             * bb_needs_code_copy().
-             * XXX: like a sandboxed fragment's copy, this is taken after we decoded
-             * the code: a write in between leaves a copy of code the fragment was
-             * not built from.
+             * bb_needs_code_copy().  It must be the code the fragment was built
+             * from, though another thread can write the app's code meanwhile (a JIT
+             * patching a call or an entry NOP, with its IC IVAU still to come): we
+             * store the snapshot we decoded the bb from, whose words emit put in the
+             * cache (bb_snapshot_code()).
+             * XXX: where we have no complete snapshot (not AArch64, or a bb that
+             * decoded some instruction from the app's code) we read the app's code
+             * now, after the decode and emit, and a write in between leaves a copy
+             * of code the fragment was not built from.
              */
             uint size = (uint)(copy_end - (app_pc)f->tag);
+            const byte *snapshot = bb_code_snapshot(dcontext, f->tag, size);
             ASSERT(CHECK_TRUNCATE_TYPE_uint(copy_end - (app_pc)f->tag));
             info = translation_info_alloc(dcontext, 0, size);
-            if (!d_r_safe_read(f->tag, size, translation_info_code_copy(info))) {
+            if (snapshot != NULL)
+                memcpy(translation_info_code_copy(info), snapshot, size);
+            else if (!d_r_safe_read(f->tag, size, translation_info_code_copy(info))) {
                 /* Unmapped since we decoded it: the fragment will not run. */
                 memset(translation_info_code_copy(info), 0, size);
             }

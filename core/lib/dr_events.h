@@ -710,9 +710,10 @@ typedef struct _dr_fault_fragment_info_t {
      * deletion fragments (with DR's internal options that store translations).
      * Where DR keeps a copy of the app code a fragment was built from (a
      * self-modifying fragment, or, without hardware cache consistency, a block
-     * from a writable page), it rebuilds the ilist from that copy, whether or not
-     * the app code is still the same (see \p app_code_consistent).  It will also be
-     * NULL for non-code-cache cases where \p cache_start_pc is also NULL.
+     * from a writable page or, on AArch64, from outside any module), it rebuilds the
+     * ilist from that copy, whether or not the app code is still the same (see
+     * \p app_code_consistent).  It will also be NULL for non-code-cache cases where
+     * \p cache_start_pc is also NULL.
      */
     instrlist_t *ilist;
 } dr_fault_fragment_info_t;

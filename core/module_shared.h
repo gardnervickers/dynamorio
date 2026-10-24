@@ -132,6 +132,11 @@ enum {
     /* Mapped but not yet executed: rseq tables are read on 1st exec. */
     MODULE_RSEQ_DEFERRED = 0x00000200,
 #endif
+    /* Added when its code first ran rather than when it was mapped or at init (a
+     * module a custom loader mapped that we did not recognize then): its code ran
+     * as code outside any module before (see module_known_at_load_run()).
+     */
+    MODULE_FOUND_ON_EXEC = 0x00000400,
 };
 
 /**************** init/exit routines *****************/
@@ -148,6 +153,9 @@ modules_reset_list(void);
 void
 module_list_add(app_pc base, size_t view_size, bool at_map,
                 const char *filepath _IF_UNIX(uint64 inode));
+void
+module_list_add_with_flags(app_pc base, size_t view_size, bool at_map,
+                           const char *filepath _IF_UNIX(uint64 inode), uint flags);
 void
 module_list_remove(app_pc base, size_t view_size);
 void
@@ -182,6 +190,10 @@ os_module_get_flag(app_pc module_base, uint flag);
 /* no lock required by caller */
 bool
 pc_is_in_module(byte *pc);
+
+/* no lock required by caller */
+bool
+module_known_at_load_run(byte *start, byte *end, byte **run_end DR_PARAM_OUT);
 
 module_area_t *
 module_pc_lookup(byte *pc);

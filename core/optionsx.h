@@ -2407,11 +2407,12 @@ PC_OPTION_INTERNAL(bool, store_translations,
                    "store info at emit time for fragment translation")
 /* Without -hw_cache_consistency an app can rewrite code before it has us flush the
  * fragments built from it: keep a copy of the code of each block from writable pages
- * and translate a fragment's state from that copy rather than from the app's code.
+ * or (AArch64) from outside any module, and translate a fragment's state from that copy
+ * rather than from the app's code.
  */
 OPTION_DEFAULT_INTERNAL(bool, xl8_code_copy, true,
                         "without -hw_cache_consistency, translate blocks from writable "
-                        "pages from a copy of their code")
+                        "pages or non-module code from a copy of their code")
 /* Without -hw_cache_consistency an app has us flush code with an IC IVAU of one line,
  * and a flush deletes every fragment on the list of each region it overlaps.  Those
  * regions used to be whole executable areas, so a line of a JIT's code cache took all

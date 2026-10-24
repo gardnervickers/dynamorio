@@ -246,6 +246,14 @@ void
 module_list_add(app_pc base, size_t view_size, bool at_map,
                 const char *filepath _IF_UNIX(uint64 inode))
 {
+    module_list_add_with_flags(base, view_size, at_map, filepath _IF_UNIX(inode), 0);
+}
+
+/* module_list_add() with flags set on the module before anyone can look it up. */
+void
+module_list_add_with_flags(app_pc base, size_t view_size, bool at_map,
+                           const char *filepath _IF_UNIX(uint64 inode), uint flags)
+{
     ASSERT(loaded_module_areas != NULL);
     ASSERT(!vmvector_overlap(loaded_module_areas, base, base + view_size));
     os_get_module_info_write_lock();
@@ -259,6 +267,7 @@ module_list_add(app_pc base, size_t view_size, bool at_map,
         module_area_t *ma =
             module_area_create(base, view_size, at_map, filepath _IF_UNIX(inode));
         ASSERT(ma != NULL);
+        ma->flags |= flags;
 
         LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 1,
             "module %s %s |%s| [" PFX "," PFX "] added\n",
@@ -402,6 +411,40 @@ pc_is_in_module(byte *pc)
         in_module = true;
     os_get_module_info_unlock();
     return in_module;
+}
+
+/* Returns whether start is in a segment of a module that we added when it was mapped
+ * or at init: not one we only found when its code ran (MODULE_FOUND_ON_EXEC), whose
+ * code until then was outside any module, nor a gap between a module's
+ * non-contiguous segments.  Sets *run_end to the end, at most end, of the range from
+ * start of which the same holds.
+ */
+bool
+module_known_at_load_run(byte *start, byte *end, byte **run_end DR_PARAM_OUT)
+{
+    bool in = false;
+    byte *pc = start;
+    os_get_module_info_lock();
+    while (pc < end) {
+        app_pc seg_start, seg_end;
+        module_area_t *ma = NULL;
+        bool seg_in = false;
+        if (vmvector_lookup_data(loaded_module_areas, pc, &seg_start, &seg_end,
+                                 (void **)&ma)) {
+            seg_in = ma != NULL && !TESTANY(MODULE_FOUND_ON_EXEC, ma->flags);
+        } else if (!vmvector_lookup_prev_next(loaded_module_areas, pc, NULL, NULL,
+                                              &seg_end, NULL)) {
+            seg_end = end;
+        }
+        if (pc == start)
+            in = seg_in;
+        else if (seg_in != in)
+            break;
+        pc = (seg_end > pc && seg_end < end) ? seg_end : end;
+    }
+    os_get_module_info_unlock();
+    *run_end = pc;
+    return in;
 }
 
 /**************** module_area accessor routines (os shared) *****************/

@@ -1020,6 +1020,8 @@ check_new_page_start(dcontext_t *dcontext, build_bb_t *bb)
  */
 static bool
 code_may_change(app_pc pc);
+static bool
+reached_code_may_change(app_pc pc);
 
 static inline bool
 check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
@@ -1033,7 +1035,13 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
         uint flags_before = bb->flags;
         /* A block that elided a cti does not fall through into code the app can
          * rewrite unseen: we keep a copy of such code to translate from
-         * (-xl8_code_copy), which needs the block's code to be one range.
+         * (-xl8_code_copy), which needs the block's code to be one range.  That
+         * includes read-only code outside modules (code_may_change()), which becomes
+         * the block's own code if it goes on: a module's last text page followed by a
+         * JIT's.  A recreation asks again of the same area, as the block stops
+         * before it; only if that code is unmapped and module code mapped there
+         * while the block lives would a recreation go on (see
+         * reached_code_may_change()).
          */
         if (!is_first_instr && TESTANY(FRAG_HAS_DIRECT_CTI, bb->flags) &&
             INTERNAL_OPTION(xl8_code_copy) && code_may_change(new_pc))
@@ -1080,17 +1088,33 @@ check_new_page_contig(dcontext_t *dcontext, build_bb_t *bb, app_pc new_pc)
     return true;
 }
 
-/* Returns whether eliding the direct cti at cti_pc to target could leave a block whose
- * app code changes before we are told.  Without -hw_cache_consistency an app writes
- * code and only then has us flush it (AArch64 IC IVAU), so a thread can still run, and
- * fault in, a block built from the old code; we translate its state by re-decoding the
- * current code.  A JIT retargets calls and branches all the time: HotSpot points a call
- * site at an inline-cache stub, and patches a callee's verified entry to a branch.  Had
- * we elided the old target into the block, the new ilist would map the old target's
- * instructions to the new target's: a null receiver faulting in the callee's inline
- * cache check was reported in the stub, and HotSpot did not recognize the implicit null
- * check.  Without elision, the patched cti ends the block in both versions and the
- * target's code is its own block, so its instructions keep their addresses.
+/* Returns whether the app can rewrite the code at pc while threads still run blocks we
+ * built from it.  Without -hw_cache_consistency an app writes code and only then has us
+ * flush it (AArch64 IC IVAU), so a thread can still run, and fault in, a block built
+ * from the old code.  That holds for code on a writable page, and also for code outside
+ * any module that is read-only now: a JIT that keeps its code read-only between writes
+ * (W^X), or writes it through a second, writable mapping, makes the page writable only
+ * to write it, or never, and we do not act on its mprotect without
+ * -hw_cache_consistency.
+ * Ask this only of a block's own code (see reached_code_may_change() for code beyond
+ * it).  The answer must not change while a block built from pc lives, as its
+ * recreation must make the decisions its build made (whether to keep a copy of its
+ * code, and to elide a cti).  So whether pc is outside modules is decided once for its
+ * executable area, when we add the area (executable_area_code_outside_module()): a
+ * block lives no longer than the areas of its own code, whatever happens to the module
+ * list meanwhile (a module found late, or one whose header alone is unmapped, which
+ * removes the module but not its other segments' areas).  Code in a module we only
+ * found when its code ran (a module a custom loader mapped without our noticing,
+ * MODULE_FOUND_ON_EXEC) counts as outside modules, as it did until then.  For code
+ * outside modules the answer does not depend on its protection.
+ * XXX: a module's code made writable (and the answer changed), and rewritten while it
+ * runs (a hot patch), is not covered.
+ * XXX: only AArch64 counts code outside modules: elsewhere a recreation from our copy
+ * of the code (-xl8_code_copy) decodes and mangles it at the copy's address, while the
+ * fragment was built at the app's (x86-64 rip-relative operands, whose mangling depends
+ * on reachability; ARM's pc reads, which take the pc from the raw bits), so we keep the
+ * copy only for writable pages there as before.  That limitation applies to the
+ * writable-page copy as well.
  */
 static bool
 code_may_change(app_pc pc)
@@ -1098,19 +1122,61 @@ code_may_change(app_pc pc)
     uint prot;
     if (INTERNAL_OPTION(hw_cache_consistency))
         return false;
+    if (get_memory_info(pc, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot))
+        return true;
+#ifdef AARCH64
+    return executable_area_code_outside_module(pc);
+#else
+    return false;
+#endif
+}
+
+/* code_may_change() for code beyond the block being built: the target of a cti it may
+ * elide.  Where we decline to
+ * go there the block does not depend on that code (its areas are not the block's), so
+ * the code can be unmapped, and other code mapped there, while the block lives, and a
+ * recreation would ask again: a module's code there would let it elide where the build
+ * did not, giving a client a longer block.  So only the code's protection counts here,
+ * as it did for all code before we counted code outside modules.
+ * XXX: that answer can change too, as before (a writable page replaced by read-only
+ * code), so a recreation that elides can still differ from its build.
+ * XXX: a block in a module elides a direct cti into read-only code outside modules,
+ * which a W^X JIT can rewrite before we are told, and we keep no copy of a block that
+ * elided a cti: a fault there is translated from the new code.  That needs module
+ * code with a pc-relative branch to an address outside the module's segments where
+ * the app later maps code (pre-encoded, or a trampoline installed before we build the
+ * block): an accepted limitation.  Without elision (a client's default, though not
+ * Seedbox's -opt_speed) nothing asks this.
+ */
+static bool
+reached_code_may_change(app_pc pc)
+{
+    uint prot;
+    if (INTERNAL_OPTION(hw_cache_consistency))
+        return false;
     return get_memory_info(pc, NULL, NULL, &prot) && TESTANY(MEMPROT_WRITE, prot);
 }
 
-/* The block's own start counts too: we keep a copy of the code of a block from
- * writable pages (-xl8_code_copy) to translate from, which needs the block's code to
- * be one contiguous range.
+/* Returns whether eliding the direct cti at cti_pc to target could leave a block whose
+ * app code changes before we are told (see code_may_change()); we would translate a
+ * fault in it by re-decoding the current code.  A JIT retargets calls and branches all
+ * the time: HotSpot points a call site at an inline-cache stub, and patches a callee's
+ * verified entry to a branch.  Had we elided the old target into the block, the new
+ * ilist would map the old target's instructions to the new target's: a null receiver
+ * faulting in the callee's inline cache check was reported in the stub, and HotSpot did
+ * not recognize the implicit null check.  Without elision, the patched cti ends the
+ * block in both versions and the target's code is its own block, so its instructions
+ * keep their addresses.
+ * The block's own start counts too: we keep a copy of the code of a block whose code
+ * may change (-xl8_code_copy) to translate from, which needs the block's code to be one
+ * contiguous range.
  */
 static bool
 elided_cti_may_change(build_bb_t *bb, app_pc cti_pc, app_pc target)
 {
     if (INTERNAL_OPTION(hw_cache_consistency))
         return false;
-    return code_may_change(cti_pc) || code_may_change(target) ||
+    return code_may_change(cti_pc) || reached_code_may_change(target) ||
         (INTERNAL_OPTION(xl8_code_copy) && code_may_change(bb->start_pc));
 }
 
@@ -5663,8 +5729,10 @@ build_basic_block_fragment_done:
  * Re-decoding the app's code then describes code the fragment was not built from, and
  * translation info we stored instead lacks what a client's state restoration may need
  * from the ilist (drreg's restoration needs its own marks on instrs): from a copy we
- * rebuild the very ilist, client instrumentation included.  Contiguous code only: we
- * do not elide a cti in, into, or out of, writable code (see elided_cti_may_change()).
+ * rebuild the very ilist, client instrumentation included.  We keep one for a block
+ * with code that may change (code_may_change()): on a writable page, or (AArch64)
+ * outside any module.  Contiguous code only: we do not elide a cti in, into, or out
+ * of, such code (see elided_cti_may_change()).
  * Such blocks do not become part of traces (which would need a copy per block).
  */
 static bool
@@ -5682,6 +5750,19 @@ bb_needs_code_copy(build_bb_t *bb)
                 bb->flags) ||
         bb->end_pc == NULL || bb->end_pc <= bb->start_pc)
         return false;
+#ifdef LINUX
+    /* An rseq block's build takes its rseq flags (FRAG_STARTS_RSEQ_REGION,
+     * FRAG_HAS_RSEQ_ENDPOINT) and so its start and endpoint labels from
+     * check_thread_vm_area(), which a recreation from a copy does not call, while its
+     * mangling still sees the app pcs as rseq code: we translate an rseq block from
+     * the app's code, as before -xl8_code_copy.  This holds on every architecture, for
+     * a block from a writable page as much as one from outside modules (AArch64).
+     * XXX: rebuild the rseq flags from the app pcs to keep a copy of such a block too.
+     */
+    if (!vmvector_empty(d_r_rseq_areas) &&
+        vmvector_overlap(d_r_rseq_areas, bb->start_pc, bb->end_pc))
+        return false;
+#endif
     for (pc = (app_pc)PAGE_START(bb->start_pc); pc < bb->end_pc; pc += PAGE_SIZE) {
         if (code_may_change(pc))
             return true;
@@ -5699,6 +5780,24 @@ bb_code_copy_end(dcontext_t *dcontext, app_pc tag)
     if (bb == NULL || bb->app_copy_end == NULL || bb->start_pc != tag)
         return NULL;
     return bb->app_copy_end;
+}
+
+/* Returns our copy of the app code [tag, tag + size) that the bb being emitted was
+ * decoded from, and whose words emit puts in the cache (bb_snapshot_code()), or NULL
+ * if we do not have all of it.
+ */
+const byte *
+bb_code_snapshot(dcontext_t *dcontext, app_pc tag, size_t size)
+{
+#ifdef AARCH64
+    build_bb_t *bb = (build_bb_t *)dcontext->bb_build_info;
+    if (bb == NULL || !bb->for_cache || bb->start_pc != tag || bb->code_copy == NULL ||
+        bb->code_copy_incomplete || size > bb->code_copy_len)
+        return NULL;
+    return bb->code_copy;
+#else
+    return NULL;
+#endif
 }
 
 /* Builds an instrlist_t as though building a bb from pretend_pc, but decodes
@@ -5721,8 +5820,14 @@ recreate_bb_ilist(dcontext_t *dcontext, byte *pc, byte *pretend_pc, app_pc stop_
 {
     build_bb_t bb;
 
-    /* don't know full range -- just do simple check now */
-    if (!is_readable_without_exception(pc, 4)) {
+    /* don't know full range -- just do simple check now.
+     * A copy of the code (pc != pretend_pc: a sandboxed fragment's, or one kept to
+     * translate from, -xl8_code_copy) is our own heap, whose readability we know: asking
+     * would query the OS, as our heap is not in the memory cache, and reading
+     * /proc/self/maps costs more than the rest of a recreation (all the more in a
+     * process with many mappings).
+     */
+    if (pc == pretend_pc && !is_readable_without_exception(pc, 4)) {
         LOG(THREAD, LOG_INTERP, 3, "recreate_bb_ilist: cannot read memory at " PFX "\n",
             pc);
         return NULL;

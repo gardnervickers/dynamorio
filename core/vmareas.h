@@ -663,6 +663,9 @@ vm_area_rseq_boundary(app_pc tag, app_pc pc, uint *flags, app_pc *stop,
                       bool *exited_rseq DR_PARAM_OUT);
 #endif
 
+bool
+executable_area_code_outside_module(app_pc addr);
+
 /* Indicate the PC of the page in which instructions are about to be decoded. */
 void
 set_thread_decode_page_start(dcontext_t *dcontext, app_pc page_start);

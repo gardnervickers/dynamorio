@@ -9849,8 +9849,9 @@ os_add_new_app_module(dcontext_t *dcontext, bool at_map, app_pc base, size_t siz
 #endif /* HAVE_MEMINFO */
     /* XREF 307599 on rounding module end to the next PAGE boundary */
     if (found_map) {
-        module_list_add(base, ALIGN_FORWARD(mod_size, PAGE_SIZE), at_map, filename,
-                        inode);
+        /* Only os_check_new_app_module() adds a module other than at its mapping. */
+        module_list_add_with_flags(base, ALIGN_FORWARD(mod_size, PAGE_SIZE), at_map,
+                                   filename, inode, at_map ? 0 : MODULE_FOUND_ON_EXEC);
         dr_strfree(filename HEAPACCT(ACCT_OTHER));
     }
 }
@@ -9867,7 +9868,11 @@ os_check_new_app_module(dcontext_t *dcontext, app_pc pc)
         /* i#1760: an app module loaded by custom loader (e.g., bionic libc)
          * might not be detected by DynamoRIO in process_mmap.
          */
-        if (query_memory_ex_from_os(pc, &info) && info.type == DR_MEMTYPE_IMAGE) {
+        if (query_memory_ex_from_os(pc, &info) && info.type == DR_MEMTYPE_IMAGE &&
+            /* pc can be in a gap between the segments of a module we know, in a
+             * mapping that starts with its header: no new module.
+             */
+            !module_overlaps(info.base_pc, info.size)) {
             /* add the missing module */
             os_get_module_info_unlock();
             os_add_new_app_module(get_thread_private_dcontext(), false /*!at_map*/,
@@ -9982,6 +9987,11 @@ process_mmap(dcontext_t *dcontext, app_pc base, size_t size, uint prot,
 
 #ifdef LINUX
 /* Call right after the system call.
+ * XXX: we flush the source range of a move or shrink, but not a destination that a
+ * MREMAP_FIXED move maps over existing code: without -hw_cache_consistency fragments
+ * built from the code that was there can outlive it (and code_may_change() assumes a
+ * fragment lives no longer than the mappings of its code), and a module moved or
+ * mapped over is not updated in the module list.
  * i#173: old_prot and old_type should be from before the system call
  */
 static bool
@@ -11313,6 +11323,10 @@ os_walk_address_space(memquery_iter_t *iter, bool add_modules)
                 if (module_is_header(iter->vm_start, iter->vm_end - iter->vm_start)) {
                     module_list_add(iter->vm_start, iter->vm_end - iter->vm_start, false,
                                     iter->comment, iter->inode);
+                    /* It is the module's image, as for a file's mapping: its code
+                     * counts as module code (see add_executable_vm_area()).
+                     */
+                    image = true;
                 }
             }
         } else if (add_modules &&
