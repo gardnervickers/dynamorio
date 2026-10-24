@@ -422,6 +422,10 @@ typedef struct _sigfd_pipe_t sigfd_pipe_t;
  */
 typedef struct _sighand_info_t {
     bool is_shared;
+    /* A vfork child's copy, which it keeps only until it execs or exits: the
+     * parent's remains the process's set of handlers.
+     */
+    bool is_vfork_copy;
     int refcount;
     mutex_t lock;
     /* We use kernel_sigaction_t so we don't have to translate back and forth
@@ -440,7 +444,7 @@ typedef struct _sighand_info_t {
 } sighand_info_t;
 
 typedef struct _thread_sig_info_t {
-    /* A pointer to handler info shared in a CLONG_SIGHAND group. */
+    /* A pointer to handler info shared in a CLONE_SIGHAND group. */
     sighand_info_t *sighand;
 
     /* We save the old sigaction across a sigaction syscall so we can return it

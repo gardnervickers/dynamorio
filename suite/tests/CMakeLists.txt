@@ -3408,6 +3408,10 @@ if (UNIX AND NOT RISCV64)
     link_with_pthread(api.detach_signal)
     tobuild_api(api.detach_signal_repeat api/detach_signal_repeat.c "" "" OFF OFF OFF)
     link_with_pthread(api.detach_signal_repeat)
+    if (LINUX) # SIGRTMIN
+      tobuild_api(api.detach_signal_oneshot api/detach_signal_oneshot.c "" "" OFF OFF OFF)
+      link_with_pthread(api.detach_signal_oneshot)
+    endif ()
   endif ()
 endif ()
 if (NOT WIN32 AND NOT RISCV64) # XXX i#2611: fix for Windows

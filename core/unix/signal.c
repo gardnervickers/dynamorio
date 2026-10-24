@@ -291,7 +291,28 @@ os_cxt_ptr_t osc_empty;
 DECLARE_CXTSWPROT_VAR(static read_write_lock_t detached_sigact_lock,
                       INIT_READWRITE_LOCK(detached_sigact_lock));
 static kernel_sigaction_t detached_sigact[SIGARRAY_SIZE];
+/* The state of each detached_sigact[] entry, also under detached_sigact_lock: unset,
+ * saved, or a one-shot (SA_RESETHAND) handler already consumed by a native delivery,
+ * which leaves the entry at SIG_DFL and must not be saved again.
+ */
+enum {
+    DETACHED_SIGACT_UNSET,
+    DETACHED_SIGACT_SAVED,
+    DETACHED_SIGACT_CONSUMED,
+};
+static byte detached_sigact_state[SIGARRAY_SIZE];
 static bool multiple_handlers_present; /* Accessed using atomics, not the lock. */
+
+/* Whether pc is in the reservation our stacks (including signal stacks) come from,
+ * so that execute_native_handler() can tell a frame on one of our stacks from one on
+ * the app's without our TLS, even after our heap is gone.  Meaningful only if
+ * vmm_heap_stack_reservation_known().
+ */
+static inline bool
+is_on_dr_stack_reservation(byte *pc)
+{
+    return vmm_heap_in_stack_reservation(pc);
+}
 
 /**** function prototypes ***********************************************/
 
@@ -702,6 +723,12 @@ d_r_signal_init(void)
     IF_LINUX(IF_X86_64(ASSERT(ALIGNED(offsetof(sigpending_t, xstate), AVX_ALIGNMENT))));
     IF_MACOS(ASSERT(sizeof(kernel_sigset_t) == sizeof(__darwin_sigset_t)));
     os_itimers_thread_shared();
+    /* A re-attach starts over from the app's current handlers.  A thread that took
+     * a signal late in the previous detach may still be delivering it natively.
+     */
+    d_r_write_lock(&detached_sigact_lock);
+    memset(detached_sigact_state, 0, sizeof(detached_sigact_state));
+    d_r_write_unlock(&detached_sigact_lock);
 
     IF_LINUX(signalfd_init());
     signal_arch_init();
@@ -1157,6 +1184,28 @@ signal_info_init_sigaction(dcontext_t *dcontext, thread_sig_info_t *info)
 }
 
 /* Cleans up info's sighand structure. */
+/* During a detach, whether the app has replaced our kernel action for sig: the
+ * threads already detached run natively and can install actions straight in the
+ * kernel (a one-shot handler, for one, re-arming itself), which we must not overwrite
+ * with our older copy.  Ours is our handler, or the SIG_IGN an alarm signal gets
+ * from signal_remove_alarm_handlers(), so an alarm signal the app set to SIG_IGN
+ * natively looks like ours.
+ * XXX: An app change between this check and our install is lost.  Installing first
+ * and putting back a replaced action that was not ours would close that window but
+ * opens a worse one: until we put it back, the kernel has our copy, which is
+ * SIG_DFL for a one-shot handler we delivered, and the app's next signal takes the
+ * default action (api.detach_signal_oneshot then fails most runs).
+ */
+static bool
+kernel_action_replaced_natively(int sig)
+{
+    kernel_sigaction_t now;
+    if (sigaction_syscall(sig, NULL, &now) != 0)
+        return false;
+    return now.handler != (handler_t)main_signal_handler &&
+        !(sig_is_alarm_signal(sig) && now.handler == (handler_t)SIG_IGN);
+}
+
 static void
 signal_info_exit_sigaction(dcontext_t *dcontext, thread_sig_info_t *info,
                            bool other_thread)
@@ -1190,11 +1239,29 @@ signal_info_exit_sigaction(dcontext_t *dcontext, thread_sig_info_t *info,
                 }
                 LOG(THREAD, LOG_ASYNCH, 2, "\trestoring " PFX " as handler for %d\n",
                     info->sighand->action[i]->handler, i);
-                sigaction_syscall(i, info->sighand->action[i], NULL);
+                if (doing_detach) {
+                    /* A one-shot handler a native delivery consumed during the
+                     * detach goes back as SIG_DFL, as the kernel would have left it.
+                     * We check and restore under the lock so that a consumption
+                     * cannot fall in between.
+                     */
+                    d_r_write_lock(&detached_sigact_lock);
+                    if (!kernel_action_replaced_natively(i)) {
+                        sigaction_syscall(i,
+                                          detached_sigact_state[i] ==
+                                                  DETACHED_SIGACT_CONSUMED
+                                              ? &act
+                                              : info->sighand->action[i],
+                                          NULL);
+                    }
+                    d_r_write_unlock(&detached_sigact_lock);
+                } else
+                    sigaction_syscall(i, info->sighand->action[i], NULL);
             } else if (info->sighand->we_intercept[i]) {
                 /* restore to default */
                 LOG(THREAD, LOG_ASYNCH, 2, "\trestoring SIG_DFL as handler for %d\n", i);
-                sigaction_syscall(i, &act, NULL);
+                if (!doing_detach || !kernel_action_replaced_natively(i))
+                    sigaction_syscall(i, &act, NULL);
             }
         }
         if (info->sighand->action[i] != NULL) {
@@ -1291,6 +1358,7 @@ signal_thread_inherit(dcontext_t *dcontext, void *clone_record)
                 !atomic_read_bool(&multiple_handlers_present))
                 ATOMIC_1BYTE_WRITE(&multiple_handlers_present, true, false);
             signal_info_init_sigaction(dcontext, info);
+            info->sighand->is_vfork_copy = TESTANY(CLONE_VFORK, record->clone_flags);
             for (i = 1; i <= MAX_SIGNUM; i++) {
                 if (record->info.sighand->action[i] != NULL) {
                     info->sighand->action[i] = (kernel_sigaction_t *)handler_alloc(
@@ -2103,11 +2171,19 @@ set_handler_and_record_app(dcontext_t *dcontext, thread_sig_info_t *info, int si
         d_r_write_lock(&detached_sigact_lock);
         memcpy(&detached_sigact[sig], info->sighand->action[sig],
                sizeof(detached_sigact[sig]));
+        detached_sigact_state[sig] = DETACHED_SIGACT_SAVED;
         d_r_write_unlock(&detached_sigact_lock);
     } else {
         LOG(THREAD, LOG_ASYNCH, 2,
             "prior handler is " PFX " vs main " PFX " with flags=0x%x for signal %d\n",
             oldact.handler, main_signal_handler, oldact.flags, sig);
+        if (oldact.handler == (handler_t)SIG_DFL) {
+            /* Not what a previous attach saved for native delivery. */
+            d_r_write_lock(&detached_sigact_lock);
+            memset(&detached_sigact[sig], 0, sizeof(detached_sigact[sig]));
+            detached_sigact_state[sig] = DETACHED_SIGACT_SAVED;
+            d_r_write_unlock(&detached_sigact_lock);
+        }
         if (info->sighand->action[sig] != NULL) {
             if (info->sighand->is_shared)
                 d_r_mutex_lock(&info->sighand->lock);
@@ -2366,6 +2442,38 @@ handle_clone(dcontext_t *dcontext, uint64 flags)
     }
 }
 
+/* The app changed its action for sig through us: the copy native delivery uses
+ * (detached_sigact[]) follows, so a new action also replaces a one-shot handler a
+ * native delivery consumed.  act is the new action as the kernel has it, for when we
+ * keep none of our own (a SIG_IGN or SIG_DFL we do not intercept); it may be NULL
+ * when we do.  We hold the sighand lock throughout so that concurrent changes reach
+ * the copy in the order they reach sighand.
+ */
+static void
+update_detached_sigact(thread_sig_info_t *info, int sig, const kernel_sigaction_t *act)
+{
+    /* A vfork child, such as posix_spawn()'s, resets the parent's handlers in its
+     * own copy: the parent's are still the process's (signal_thread_inherit()).
+     */
+    if (info->sighand->is_vfork_copy)
+        return;
+    kernel_sigaction_t kernel_act;
+    if (act == NULL || !d_r_safe_read(act, sizeof(kernel_act), &kernel_act)) {
+        memset(&kernel_act, 0, sizeof(kernel_act));
+        kernel_act.handler = (handler_t)SIG_DFL;
+    }
+    if (info->sighand->is_shared)
+        d_r_mutex_lock(&info->sighand->lock);
+    d_r_write_lock(&detached_sigact_lock);
+    memcpy(&detached_sigact[sig],
+           info->sighand->action[sig] != NULL ? info->sighand->action[sig] : &kernel_act,
+           sizeof(detached_sigact[sig]));
+    detached_sigact_state[sig] = DETACHED_SIGACT_SAVED;
+    d_r_write_unlock(&detached_sigact_lock);
+    if (info->sighand->is_shared)
+        d_r_mutex_unlock(&info->sighand->lock);
+}
+
 /* Returns false if should NOT issue syscall.
  * In such a case, the result is in "result".
  * If *result is non-zero, the syscall should fail.
@@ -2576,6 +2684,8 @@ handle_post_sigaction(dcontext_t *dcontext, bool success, int sig,
         if (info->sighand->is_shared)
             d_r_mutex_unlock(&info->sighand->lock);
     }
+    if (act != NULL)
+        update_detached_sigact(info, sig, act);
     return 0;
 }
 
@@ -7758,6 +7868,10 @@ execute_handler_from_cache(dcontext_t *dcontext, int sig, sigframe_rt_t *our_fra
          * others may look at sigaction struct, so we just set to default
          */
         info->sighand->action[sig]->handler = (handler_t)SIG_DFL;
+        /* Else a native delivery to a thread we have not taken over yet would run
+         * the handler again.
+         */
+        update_detached_sigact(info, sig, NULL);
     }
     info->in_app_handler = true;
 
@@ -8031,6 +8145,10 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
          * others may look at sigaction struct, so we just set to default
          */
         info->sighand->action[sig]->handler = (handler_t)SIG_DFL;
+        /* Else a native delivery to a thread we have not taken over yet would run
+         * the handler again.
+         */
+        update_detached_sigact(info, sig, NULL);
     }
     sig_full_cxt_t sc_full = { sc, NULL /*not provided*/ };
     /* i#4041: Provide the actually-interrupted mid-rseq PC to the rseq event. */
@@ -8053,6 +8171,87 @@ execute_handler_from_dispatch(dcontext_t *dcontext, int sig)
     return true;
 }
 
+/* Whether act is a one-shot (SA_RESETHAND) handler that a delivery consumes.  No
+ * handler runs for SIG_IGN, so the kernel does not reset an ignored action, and
+ * resetting SIG_DFL changes nothing.
+ */
+static bool
+is_oneshot_handler(const kernel_sigaction_t *act)
+{
+    return TESTANY(SA_ONESHOT, act->flags) && act->handler != (handler_t)SIG_IGN &&
+        act->handler != (handler_t)SIG_DFL;
+}
+
+/* Copies the app's action for sig saved for native delivery into *act (if not NULL)
+ * and, if it is a one-shot (SA_RESETHAND) handler, consumes it: native delivery
+ * resets it to the default action, so a second delivery must not run it again.  We
+ * consume it under the lock before delivering, so of two concurrent deliveries only
+ * one gets the handler, whichever way each then delivers.  If the kernel has the
+ * app's handler again (after a detach put it back, even across a re-attach) we also
+ * reset the kernel's action, as the kernel would have; signal_info_exit_sigaction()
+ * restores a consumed one as SIG_DFL.  Neither replaces an action the app installed
+ * natively since.  Returns whether an earlier delivery had consumed it.
+ */
+static bool
+take_detached_sigact(int sig, kernel_sigaction_t *act)
+{
+    kernel_sigaction_t cur;
+    bool consumed;
+    d_r_read_lock(&detached_sigact_lock);
+    memcpy(&cur, &detached_sigact[sig], sizeof(cur));
+    consumed = detached_sigact_state[sig] == DETACHED_SIGACT_CONSUMED;
+    d_r_read_unlock(&detached_sigact_lock);
+    if (is_oneshot_handler(&cur)) {
+        d_r_write_lock(&detached_sigact_lock);
+        /* Another delivery may have consumed it meanwhile. */
+        memcpy(&cur, &detached_sigact[sig], sizeof(cur));
+        consumed = detached_sigact_state[sig] == DETACHED_SIGACT_CONSUMED;
+        if (!consumed && is_oneshot_handler(&cur)) {
+            memset(&detached_sigact[sig], 0, sizeof(detached_sigact[sig]));
+            detached_sigact_state[sig] = DETACHED_SIGACT_CONSUMED;
+            /* As the kernel would, but only if it has the handler we consumed: not
+             * while it still has ours, nor once the app has installed another one
+             * natively.
+             */
+            kernel_sigaction_t now;
+            if (sigaction_syscall(sig, NULL, &now) == 0 && now.handler == cur.handler) {
+                kernel_sigaction_t dfl;
+                memset(&dfl, 0, sizeof(dfl));
+                dfl.handler = (handler_t)SIG_DFL;
+                sigaction_syscall(sig, &dfl, NULL);
+            }
+        }
+        d_r_write_unlock(&detached_sigact_lock);
+    }
+    if (act != NULL)
+        memcpy(act, &cur, sizeof(*act));
+    return consumed;
+}
+
+/* Saves the app's actions for native delivery during a detach, before the
+ * detaching thread releases any other thread, so that no thread's sig_detach()
+ * fills an entry after a native delivery has consumed it.
+ */
+void
+signal_detach_save_app_actions(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    if (atomic_read_bool(&multiple_handlers_present))
+        return;
+    d_r_write_lock(&detached_sigact_lock);
+    for (int i = 1; i <= MAX_SIGNUM; i++) {
+        if (detached_sigact_state[i] == DETACHED_SIGACT_CONSUMED)
+            continue;
+        if (info->sighand->action[i] != NULL) {
+            memcpy(&detached_sigact[i], info->sighand->action[i],
+                   sizeof(detached_sigact[i]));
+        } else
+            memset(&detached_sigact[i], 0, sizeof(detached_sigact[i]));
+        detached_sigact_state[i] = DETACHED_SIGACT_SAVED;
+    }
+    d_r_write_unlock(&detached_sigact_lock);
+}
+
 /* Sends a signal to a currently-native thread.
  * dcontext can be NULL.
  * cur_xsp is the stack pointer initially passed to the DR signal handler. May be NULL
@@ -8070,6 +8269,10 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
     sighand_info_t sighand = {};
     kernel_sigaction_t sigact_struct;
     thread_sig_info_t *info;
+    /* Whether DR's signal stack may hold our_frame: see reuse_cur_frame below. */
+    bool dr_sigstack_installed = dcontext != NULL;
+    /* Whether we deliver a one-shot handler from DR's copy of the action. */
+    bool reset_dr_oneshot = false;
     LOG(THREAD, LOG_ASYNCH, 2, "%s for signal %d in thread " TIDFMT "\n", __FUNCTION__,
         sig, get_sys_thread_id());
     if (dcontext != NULL && is_thread_signal_info_initialized(dcontext) &&
@@ -8079,6 +8282,19 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
          */
         dynamo_started) {
         info = (thread_sig_info_t *)dcontext->signal_field;
+        /* This delivery uses DR's copy of the action.  A one-shot handler there is
+         * also the one saved for native delivery, which follows the app's changes
+         * through us (update_detached_sigact()), and we consume both.  If a native
+         * delivery without our state consumed it already, the kernel would have
+         * reset it: we deliver the default action.
+         */
+        if (info->sighand->action[sig] != NULL &&
+            is_oneshot_handler(info->sighand->action[sig])) {
+            if (take_detached_sigact(sig, NULL))
+                info->sighand->action[sig]->handler = (handler_t)SIG_DFL;
+            else
+                reset_dr_oneshot = true;
+        }
     } else {
         if (atomic_read_bool(&multiple_handlers_present)) {
             /* See i#1921 comment up top: we don't handle this. */
@@ -8089,9 +8305,7 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
         synthetic.sighand = &sighand;
         synthetic.sighand->we_intercept[sig] = true;
         synthetic.sighand->action[sig] = &sigact_struct;
-        d_r_read_lock(&detached_sigact_lock);
-        memcpy(&sigact_struct, &detached_sigact[sig], sizeof(sigact_struct));
-        d_r_read_unlock(&detached_sigact_lock);
+        take_detached_sigact(sig, &sigact_struct);
         memcpy(&info->app_sigblocked, &our_frame->uc.uc_sigmask,
                sizeof(info->app_sigblocked));
 #ifdef HAVE_SIGALTSTACK
@@ -8101,7 +8315,8 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
         /* DR's sigstack is set up before is_thread_signal_info_initialized().
          * If DR's is in place, the app's is stored (it's a syscall so atomic).
          */
-        if (dc_info != NULL && dc_info->sigstack.ss_sp != NULL) {
+        dr_sigstack_installed = dc_info != NULL && dc_info->sigstack.ss_sp != NULL;
+        if (dr_sigstack_installed) {
             memcpy(&synthetic.app_sigstack, &dc_info->app_sigstack,
                    sizeof(synthetic.app_sigstack));
         } else {
@@ -8122,6 +8337,21 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
         return;
     kernel_ucontext_t *uc = get_ucontext_from_rt_frame(our_frame);
     sigcontext_t *sc = SIGCXT_FROM_UCXT(uc);
+#ifdef HAVE_SIGALTSTACK
+    if (info == &synthetic && !dr_sigstack_installed && !APP_HAS_SIGSTACK(info) &&
+        TESTANY(SS_AUTODISARM, uc->uc_stack.ss_flags) &&
+        !is_on_dr_stack_reservation((byte *)uc->uc_stack.ss_sp)) {
+        /* With SS_AUTODISARM the kernel disables the app's sigaltstack while a
+         * handler runs, so our query above found none: the one registered at
+         * delivery is in the frame.  We keep its SS_AUTODISARM: a copied frame
+         * gets it in uc_stack (copy_frame_to_stack()), and the app's sigreturn
+         * registers the sigaltstack again from there.
+         */
+        synthetic.app_sigstack.ss_sp = uc->uc_stack.ss_sp;
+        synthetic.app_sigstack.ss_size = uc->uc_stack.ss_size;
+        synthetic.app_sigstack.ss_flags = uc->uc_stack.ss_flags & SS_FLAG_BITS;
+    }
+#endif
 
     /* We do not send the signal to clients as it is not a managed thread and we
      * cannot really take any action except send it to the native handler.
@@ -8222,32 +8452,65 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
      * still in effect), regardless of whether the signal stack was registered
      * for sig.
      */
+    /* We extend that to any delivery to a thread that has no dcontext and is not on
+     * one of our stacks, deciding per delivery from where the kernel put the frame
+     * rather than from global detach state, which cannot vouch for one particular
+     * thread.  Besides a thread in a detach, this covers one that never was under DR
+     * (a signal during attach), and one that entered our handler just before a
+     * finished detach reinstated the app's handlers and only gets here now: under
+     * load it can be descheduled that long, even across a later re-attach.  A copy
+     * of the frame might not fit on a small app sigaltstack (i#6814), which is fatal.
+     * The kernel recorded in the frame the sigaltstack registered at delivery: we use
+     * that rather than ask now, as with SS_AUTODISARM it is disabled while the handler
+     * runs.  If the frame is on it, that sigaltstack is ours when it lies in the
+     * reservation our stacks come from (then the thread is not native yet, as in the
+     * x86 detach before the thread restored the app's, or in thread init or exit), and
+     * else the app's, which we use only if the app asked for it.  Otherwise the
+     * kernel put the frame below the interrupted stack pointer, which must not be on
+     * one of our stacks either.  We need no TLS or heap for this, so it also works
+     * after a detach.
+     * If we cannot tell where our stacks are (no reservation for them, as with
+     * REACHABLE_HEAP(), or one we allocated beyond: vmm_heap_stack_reservation_known())
+     * we keep the old rule: reuse only during a detach.
+     */
     bool reuse_cur_frame = false;
-    if (dcontext == NULL && doing_detach) {
-        ASSERT(cur_xsp != NULL);
-        reuse_cur_frame = true;
-        if (!IS_RT_FOR_APP(info, sig)) {
-            /* If the app wants a non-RT frame, we cannot reuse the DR signal frame
-             * which is RT.
-             */
-            reuse_cur_frame = false;
-        } else if (APP_HAS_SIGSTACK(info)) {
-            bool currently_on_sigstack = cur_xsp != NULL &&
-                info->app_sigstack.ss_sp < (void *)cur_xsp &&
-                (void *)cur_xsp < info->app_sigstack.ss_sp + info->app_sigstack.ss_size;
-            if (!currently_on_sigstack) {
-                /* If the app has a sigstack, we must be on it. */
-                ASSERT_NOT_REACHED();
-                /* In release build, we bail on this optimization and try to deliver the
-                 * signal using a frame copy.
+    if (dcontext == NULL && !dr_sigstack_installed && cur_xsp != NULL &&
+        IS_RT_FOR_APP(info, sig)) {
+        /* XXX: Off Linux, where delivery goes through a trampoline, we have not
+         * tried reusing a frame outside a detach.
+         */
+        if (IF_LINUX_ELSE(!vmm_heap_stack_reservation_known(), true)) {
+            reuse_cur_frame = doing_detach &&
+                (!APP_HAS_SIGSTACK(info) ||
+                 (USE_APP_SIGSTACK(info, sig) &&
+                  info->app_sigstack.ss_sp < (void *)cur_xsp &&
+                  (void *)cur_xsp <
+                      info->app_sigstack.ss_sp + info->app_sigstack.ss_size));
+        } else {
+            byte *alt_base = (byte *)uc->uc_stack.ss_sp;
+            bool on_altstack = !TESTANY(SS_DISABLE, uc->uc_stack.ss_flags) &&
+                alt_base != NULL && (byte *)our_frame >= alt_base &&
+                (byte *)our_frame < alt_base + uc->uc_stack.ss_size;
+            if (on_altstack) {
+                /* Natively the kernel would have put the frame there too if the app
+                 * asked for its sigaltstack, or if the app was running on it
+                 * already: then the frame goes below the interrupted stack pointer
+                 * whatever the action's flags.
                  */
-                reuse_cur_frame = false;
-            }
-            if (!USE_APP_SIGSTACK(info, sig)) {
-                /* If the app does not want to use the signal stack, we cannot
-                 * reuse the current frame.
-                 */
-                reuse_cur_frame = false;
+                byte *interrupted_xsp = (byte *)sc->SC_XSP;
+                bool was_on_altstack = interrupted_xsp > alt_base &&
+                    interrupted_xsp - alt_base <= (ptr_int_t)uc->uc_stack.ss_size;
+                reuse_cur_frame = !is_on_dr_stack_reservation(alt_base) &&
+                    (TESTANY(SA_ONSTACK, info->sighand->action[sig]->flags) ||
+                     was_on_altstack);
+            } else {
+                /* A kernel frame, SVE and SME state included, is well under this. */
+                const size_t max_frame_distance = 1024 * 1024;
+                byte *interrupted_xsp = (byte *)sc->SC_XSP;
+                reuse_cur_frame = (byte *)our_frame < interrupted_xsp &&
+                    interrupted_xsp - (byte *)our_frame <= max_frame_distance &&
+                    !is_on_dr_stack_reservation((byte *)our_frame) &&
+                    !is_on_dr_stack_reservation(interrupted_xsp - 1);
             }
         }
     }
@@ -8258,8 +8521,6 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
     if (!TEST(SA_NOMASK, (info->sighand->action[sig]->flags)))
         kernel_sigaddset(&blocked, sig);
 
-    RSTATS_INC(num_signals);
-    RSTATS_INC(num_native_signals);
     if (reuse_cur_frame) {
         /* We've determined that we can reuse the current signal frame to
          * deliver sig to the native signal handler. We want to simply jump
@@ -8267,9 +8528,13 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
          * state currently in the frame (reg values, blocked sigmask).
          */
 
+#ifdef DR_HOST_NOT_TARGET
+        ASSERT_NOT_REACHED();
+#elif defined(X86_64) || defined(AARCH64)
         /* Emulate the app's sigmask for the native signal delivery. This is the
          * blocked mask for this signal and the current app sigmask in the
-         * interrupted app context.
+         * interrupted app context.  Only here, where we do jump to the handler:
+         * elsewhere we go on in our handler, which needs our mask.
          */
         for (int i = 1; i <= MAX_SIGNUM; i++) {
             if (kernel_sigismember((kernel_sigset_t *)&our_frame->uc.uc_sigmask, i)) {
@@ -8277,9 +8542,6 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
             }
         }
         sigprocmask_syscall(SIG_SETMASK, &blocked, NULL, sizeof(blocked));
-#ifdef DR_HOST_NOT_TARGET
-        ASSERT_NOT_REACHED();
-#elif defined(X86_64) || defined(AARCH64)
         void (*asm_jmp_tgt)() = SIGACT_PRIMARY_HANDLER(&sigact_struct);
         kernel_siginfo_t *siginfo_var = &our_frame->info;
         kernel_ucontext_t *ucontext_var = &our_frame->uc;
@@ -8371,15 +8633,12 @@ execute_native_handler(dcontext_t *dcontext, int sig, sigframe_rt_t *our_frame,
     LOG(THREAD, LOG_ASYNCH, 2, "%s: set pc to handler %p with xsp=%p\n", __FUNCTION__,
         SIGACT_PRIMARY_HANDLER(info->sighand->action[sig]), new_xsp);
 
-    if (TEST(SA_ONESHOT, detached_sigact[sig].flags)) {
-        /* XXX: When we remove DR's handler from the final thread we'll ignore this
-         * delivery: but we can't safely access that data struct here.  The best we
-         * can do is avoid delivering twice ourselves.
-         */
-        d_r_write_lock(&detached_sigact_lock);
-        memset(&detached_sigact[sig], 0, sizeof(detached_sigact[sig]));
-        d_r_write_unlock(&detached_sigact_lock);
-    }
+    /* A one-shot handler saved for native delivery was consumed by
+     * take_detached_sigact() above.  We reset DR's copy as
+     * execute_handler_from_cache() does: others may look at the struct.
+     */
+    if (reset_dr_oneshot)
+        info->sighand->action[sig]->handler = (handler_t)SIG_DFL;
 }
 
 /* Whether raise_signal_as_fault() can raise sig. */
@@ -9129,9 +9388,12 @@ handle_sigreturn(dcontext_t *dcontext, void *ucxt_param, int style)
     /* Defensively check for NULL.
      * XXX i#3182: It did happen but it is not clear how.
      */
+    /* We reset a one-shot handler to SIG_DFL when we delivered it, but the handler
+     * may have installed itself, or another action, again.
+     */
     if (info->sighand->action[sig] != NULL &&
-        TEST(SA_ONESHOT, info->sighand->action[sig]->flags)) {
-        ASSERT(info->sighand->action[sig]->handler == (handler_t)SIG_DFL);
+        TEST(SA_ONESHOT, info->sighand->action[sig]->flags) &&
+        info->sighand->action[sig]->handler == (handler_t)SIG_DFL) {
         if (!info->sighand->we_intercept[sig]) {
             /* let kernel do default independent of us */
             handler_free(dcontext, info->sighand->action[sig],
@@ -10257,26 +10519,11 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
     DOLOG(3, LOG_ASYNCH,
           { dump_sigcontext(dcontext, get_sigcontext_from_rt_frame(frame)); });
 
-    if (!atomic_read_bool(&multiple_handlers_present)) {
-        /* Save the app's handlers (we only support one handler setups) for
-         * execute_native_handler().
-         */
-        d_r_read_lock(&detached_sigact_lock);
-        for (int i = 0; i < SIGARRAY_SIZE; ++i) {
-            if (info->sighand->action[i] != NULL &&
-                detached_sigact[i].handler == (handler_t)0) {
-                d_r_read_unlock(&detached_sigact_lock);
-                d_r_write_lock(&detached_sigact_lock);
-                if (detached_sigact[i].handler == (handler_t)0) {
-                    memcpy(&detached_sigact[i], info->sighand->action[i],
-                           sizeof(detached_sigact[i]));
-                }
-                d_r_write_unlock(&detached_sigact_lock);
-                d_r_read_lock(&detached_sigact_lock);
-            }
-        }
-        d_r_read_unlock(&detached_sigact_lock);
-    }
+    /* signal_detach_save_app_actions() saved the app's handlers for
+     * execute_native_handler() before the detacher released us.  An entry another
+     * thread's native delivery consumed since (a one-shot handler) must stay
+     * consumed, so we do not save them again here.
+     */
 
     /* Update the mask of the signal frame so that the later sigreturn will
      * restore the app signal mask.
@@ -10289,13 +10536,18 @@ sig_detach(dcontext_t *dcontext, sigframe_rt_t *frame, KSYNCH_TYPE *detached)
      * and that we're not clobbering any app data beyond TOS.
      */
     xsp = get_sigstack_frame_ptr(dcontext, info, SUSPEND_SIGNAL, frame);
+#if defined(DEBUG) && defined(HAVE_SIGALTSTACK)
+    void *app_ss_sp = info->app_sigstack.ss_sp;
+#endif
     copy_frame_to_stack(dcontext, info, SUSPEND_SIGNAL, frame, xsp, false /*!pending*/);
 
 #ifdef HAVE_SIGALTSTACK
     /* Make sure the frame's sigstack reflects the app stack.
-     * copy_frame_to_stack() should have done this for us.
+     * copy_frame_to_stack() should have done this for us.  It also disarmed
+     * info->app_sigstack if that is SS_AUTODISARM, as for a handler, so we compare
+     * with the one before.
      */
-    ASSERT(((sigframe_rt_t *)xsp)->uc.uc_stack.ss_sp == info->app_sigstack.ss_sp);
+    ASSERT(((sigframe_rt_t *)xsp)->uc.uc_stack.ss_sp == app_ss_sp);
 #endif
 
     /* Restore app segment registers. It is important that we do not restore the

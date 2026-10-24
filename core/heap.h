@@ -145,6 +145,19 @@ vmm_heap_fork_init(dcontext_t *dcontext);
 #endif
 void
 print_vmm_heap_data(file_t outf);
+/* For code with no TLS, such as a signal handler, also after vmm_heap_exit(): whether
+ * vmm_heap_in_stack_reservation() tells where our stacks are.  It cannot without a
+ * reservation for them (as with REACHABLE_HEAP()), or once we have allocated beyond
+ * it.
+ */
+bool
+vmm_heap_stack_reservation_known(void);
+/* Whether p is in the reservation our stacks come from.  Once it is unmapped
+ * (vmm_heap_exit()), no p is.
+ */
+bool
+vmm_heap_in_stack_reservation(byte *p);
+
 byte *
 vmcode_get_start();
 byte *

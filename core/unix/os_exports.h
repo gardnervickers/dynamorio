@@ -607,6 +607,8 @@ signal_fork_pre(dcontext_t *dcontext, bool clear_sighand);
 
 void
 signal_remove_alarm_handlers(dcontext_t *dcontext);
+void
+signal_detach_save_app_actions(dcontext_t *dcontext);
 
 bool
 set_itimer_callback(dcontext_t *dcontext, int which, uint millisec,

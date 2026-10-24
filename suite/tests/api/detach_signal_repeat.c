@@ -30,17 +30,27 @@
  * DAMAGE.
  */
 
-/* Detaches repeatedly while threads keep sending themselves a signal.  A
- * thread's handler returns through rt_sigreturn, which DR rewrites to come back
- * to DR.  If the detach finds the thread at that sigreturn's syscall instruction
- * it must not treat it as a native syscall to restart there: the thread would
- * reissue the rewritten sigreturn after its DR state is gone.  Repeating the
- * detach with many signals in flight makes that likely.
+/* Detaches repeatedly while threads keep sending themselves a signal whose
+ * handler runs on a sigaltstack of SIGSTKSZ.  It tests two detach races:
  *
- * The handler runs on a large sigaltstack so that a signal delivered natively
- * just after a detach has room for its frame.
+ * - A thread's handler returns through rt_sigreturn, which DR rewrites to come
+ *   back to DR.  If the detach finds the thread at that sigreturn's syscall
+ *   instruction it must not treat it as a native syscall to restart there: the
+ *   thread would reissue the rewritten sigreturn after its DR state is gone.
+ * - A signal can enter DR's handler just before the detach reinstates the app's
+ *   handlers and only be delivered natively once the detach has finished.  DR
+ *   must then deliver it from the frame it is on: a copy of the frame does not
+ *   fit on such a small sigaltstack (i#6814) and is fatal.
+ *
+ * Repeating the detach with many signals in flight makes both likely.
+ *
+ * DR's debug build needs more of a native thread's sigaltstack in its own handler,
+ * before it delivers the signal, than SIGSTKSZ leaves (about 20K below the kernel's
+ * frame on AArch64), so it gets a larger sigaltstack and only a release build
+ * tests that we do not copy the frame.
  */
 
+/* As tools.h does: SIGSTKSZ is then sysconf(_SC_SIGSTKSZ), as for C++ apps. */
 #define _GNU_SOURCE 1
 #include "configure.h"
 #include "dr_api.h"
@@ -54,7 +64,11 @@
 
 #define NUM_THREADS 8
 #define NUM_ROUNDS 5
-#define ALT_STACK_SIZE (1024 * 1024)
+#ifdef DEBUG
+#    define ALT_STACK_SIZE (64 * 1024)
+#else
+#    define ALT_STACK_SIZE SIGSTKSZ
+#endif
 
 static atomic_int round_exit;
 static atomic_int threads_ready;
@@ -69,9 +83,10 @@ handle_signal(int sig, siginfo_t *info, void *ucxt)
 static void *
 thread_func(void *arg)
 {
+    size_t size = ALT_STACK_SIZE;
     stack_t ss;
-    ss.ss_sp = malloc(ALT_STACK_SIZE);
-    ss.ss_size = ALT_STACK_SIZE;
+    ss.ss_sp = malloc(size);
+    ss.ss_size = size;
     ss.ss_flags = 0;
     if (ss.ss_sp == NULL || sigaltstack(&ss, NULL) != 0) {
         print("sigaltstack failed\n");

@@ -2519,6 +2519,10 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
     detach_stacked_callbacks = detach_handle_callbacks(num_threads, threads, cleanup_tpc);
 #endif
 
+#if defined(UNIX) && !defined(LINUX_KERNEL)
+    /* Before we release any thread to run its sig_detach(). */
+    signal_detach_save_app_actions(my_dcontext);
+#endif
     LOG(GLOBAL, LOG_ALL, 1, "Detach: starting to translate contexts\n");
     for (i = 0; i < num_threads; i++) {
         if (threads[i]->dcontext == my_dcontext) {
@@ -2677,6 +2681,10 @@ detach_externally_on_new_stack()
         "Detach : unpatched ntdll.dll and fixed memory permissions\n");
     /* perform exit tasks that require full thread data structs */
     dynamo_process_exit_with_thread_info();
+#    if defined(UNIX) && !defined(LINUX_KERNEL)
+    /* Before we release any thread to run its sig_detach(). */
+    signal_detach_save_app_actions(my_dcontext);
+#    endif
     LOG(GLOBAL, LOG_ALL, 1, "Detach: starting to translate contexts\n");
     for (i = 0; i < num_threads; i++) {
         if (threads[i]->dcontext == my_dcontext) {

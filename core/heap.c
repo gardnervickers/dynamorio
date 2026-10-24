@@ -307,6 +307,15 @@ static bool heap_exiting = false;
 DECLARE_NEVERPROT_VAR(static bool ever_beyond_vmm, false);
 #endif
 
+/* The reservation our stacks come from, kept outside heapmgt for code with no TLS
+ * that may run after vmm_heap_exit(), such as a signal handler in a thread that
+ * has gone native: see vmm_heap_stack_reservation_known().
+ */
+DECLARE_NEVERPROT_VAR(static byte *stack_reservation_start, NULL);
+DECLARE_NEVERPROT_VAR(static byte *stack_reservation_end, NULL);
+DECLARE_NEVERPROT_VAR(static bool stack_reservation_unmapped, false);
+DECLARE_NEVERPROT_VAR(static bool allocated_beyond_reservation, false);
+
 /* Lock used only for managing heap units, not for normal thread-local alloc.
  * Must be recursive due to circular dependencies between vmareas and global heap.
  * Furthermore, always grab dynamo_vm_areas_lock() before grabbing this lock,
@@ -1185,6 +1194,20 @@ is_vmm_reserved_address(byte *pc, size_t size, DR_PARAM_OUT byte **region_start,
     return false;
 }
 
+bool
+vmm_heap_stack_reservation_known(void)
+{
+    return stack_reservation_unmapped ||
+        (stack_reservation_start != NULL && !allocated_beyond_reservation);
+}
+
+bool
+vmm_heap_in_stack_reservation(byte *p)
+{
+    return !stack_reservation_unmapped && p >= stack_reservation_start &&
+        p < stack_reservation_end;
+}
+
 byte *
 vmcode_get_start(void)
 {
@@ -1529,6 +1552,7 @@ static void
 reached_beyond_vmm(which_vmm_t which)
 {
     DODEBUG(ever_beyond_vmm = true;);
+    allocated_beyond_reservation = true;
     /* Stats can be very useful to diagnose why we hit OOM. */
     if (INTERNAL_OPTION(rstats_to_stderr))
         dump_global_rstats_to_stderr();
@@ -1954,6 +1978,14 @@ vmm_heap_init()
                 false, "vmheap");
         }
     }
+    /* Without a vmheap (as with REACHABLE_HEAP()) our stacks come from vmcode,
+     * which also holds code: we then leave the bounds unknown.
+     */
+    stack_reservation_start = heapmgt->vmheap.start_addr;
+    stack_reservation_end =
+        heapmgt->vmheap.start_addr == NULL ? NULL : heapmgt->vmheap.end_addr;
+    stack_reservation_unmapped = false;
+    allocated_beyond_reservation = false;
 }
 
 static void
@@ -2035,6 +2067,8 @@ vmm_heap_exit()
         if (heapmgt->vmheap.start_addr != NULL)
             vmh_exit(&heapmgt->vmheap, true);
         vmm_heap_exited = true;
+        /* None of our stacks is left in it. */
+        stack_reservation_unmapped = true;
     }
 }
 
