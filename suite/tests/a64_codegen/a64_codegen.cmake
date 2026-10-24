@@ -57,10 +57,17 @@ set(api.a64_codegen_ir_shared_timeout ${api.a64_codegen_ir_timeout})
 
 # Building and running chains of blocks under static DR, in a child per client
 # mode and DR option set.
-if (DEBUG)
-  # Debug DR builds the fault chain's blocks (and the blocks from each fault to
-  # the end of its block) slowly: half the fault chain, which still has every
+if (DEBUG AND NOT A64_LONG_TESTS)
+  # Debug DR's benchmark numbers mean little, and its time goes to the verbatim
+  # guard's translations (dr_app_pc_from_cache_pc() rebuilds the block) and to
+  # building blocks: by default, one copy of the chain for the build benchmark
+  # (so no check that copies are the same size), few exec runs, the verbatim
+  # guard on every 16th block, and half the fault chain, which still has every
   # position and kind of fault once without the marker and once with it.
+  # Under a minute; about 5 minutes with A64_LONG_TESTS, as before.
+  set(a64_codegen_build_ops "-reps;1;-runs;20;-verbatim-stride;16;-fault-blocks;162")
+  set(api.a64_codegen_build_timeout 600)
+elseif (DEBUG)
   set(a64_codegen_build_ops "-fault-blocks;162")
   set(api.a64_codegen_build_timeout 900)
 else ()

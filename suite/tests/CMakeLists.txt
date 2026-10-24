@@ -3294,6 +3294,11 @@ if (AARCHXX)
   link_with_pthread(client.ldstex)
 endif ()
 
+# The AArch64 tests added for Seedbox (a64_codegen/ and the tests beside it)
+# run a small, quick set by default; this option adds their long stress,
+# real-workload and JVM tests and runs the rest at full size.
+option(A64_LONG_TESTS
+  "Also run the long AArch64 stress, real-workload and JVM tests, at full size" OFF)
 if (AARCH64 AND LINUX)
   include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/a64_codegen.cmake")
 endif ()

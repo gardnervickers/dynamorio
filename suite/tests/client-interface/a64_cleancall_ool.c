@@ -61,7 +61,10 @@
  *           thread suspends the app thread (dr_suspend_all_other_threads_ex())
  *           in a loop: every interrupted context delivered to the app, and every
  *           context dr_get_mcontext() gives for a suspended thread, at ool_site
- *           or ool_after must be the state set or the variant's result.
+ *           or ool_after must be the state set or the variant's result.  A
+ *           second argument, a number of seconds, ends the runs early once they
+ *           have taken that long (under a loaded machine or a debug DR the
+ *           5000 runs have taken minutes).
  *   sweep   deterministic: a parent process ptraces the app thread.  The client
  *           puts a BRK before and after each clean call; at each run the parent
  *           single-steps k instructions from the first BRK (stepping over the
@@ -754,8 +757,19 @@ stop_dr(void)
     dr_app_stop_and_cleanup();
 }
 
+static double
+monotonic_secs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* Runs every variant runs times, or until max_secs seconds have passed if that
+ * is sooner (0: no limit).
+ */
 static int
-run_basic_or_stress(const char *mode, int runs)
+run_basic_or_stress(const char *mode, int runs, double max_secs)
 {
     timer_t timer;
     install_handlers();
@@ -773,9 +787,12 @@ run_basic_or_stress(const char *mode, int runs)
         struct itimerspec its = { { 0, 50000 }, { 0, 50000 } };
         timer_settime(timer, 0, &its, NULL);
     }
+    double start = monotonic_secs();
     for (int r = 0; r < runs; r++) {
         for (int v = 0; v < NUM_VARIANTS; v++)
             run_one(v, (uint64_t)r);
+        if (max_secs > 0 && monotonic_secs() - start > max_secs)
+            break;
     }
     if (mode_stress) {
         struct itimerspec its = { { 0, 0 }, { 0, 0 } };
@@ -1198,10 +1215,10 @@ main(int argc, const char *argv[])
         return 1;
     memset(shared, 0, sizeof(*shared));
     if (strcmp(mode, "basic") == 0)
-        return run_basic_or_stress(mode, 2000);
+        return run_basic_or_stress(mode, 2000, 0);
     if (strcmp(mode, "stress") == 0) {
         mode_stress = 1;
-        return run_basic_or_stress(mode, 5000);
+        return run_basic_or_stress(mode, 5000, argc > 2 ? atof(argv[2]) : 0);
     }
     if (strcmp(mode, "sweep") == 0) {
         mode_sweep = 1;

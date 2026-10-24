@@ -41,8 +41,14 @@ if (NOT ANDROID)
     "" "basic" OFF ON OFF)
   link_with_pthread(client.a64_cleancall_ool)
   set(client.a64_cleancall_ool_expectbase "a64_cleancall_ool_basic")
+  # By default its runs stop after 10 seconds (A64_LONG_TESTS: all 5000).
+  if (A64_LONG_TESTS)
+    set(a64_cleancall_ool_stress_ops "stress")
+  else ()
+    set(a64_cleancall_ool_stress_ops "stress;10")
+  endif ()
   torunonly_api(client.a64_cleancall_ool_stress client.a64_cleancall_ool
-    client-interface/a64_cleancall_ool.c "" "stress" OFF OFF)
+    client-interface/a64_cleancall_ool.c "" "${a64_cleancall_ool_stress_ops}" OFF OFF)
   set(client.a64_cleancall_ool_stress_expectbase "a64_cleancall_ool_stress")
   set(client.a64_cleancall_ool_stress_timeout 300)
   torunonly_api(client.a64_cleancall_ool_sweep client.a64_cleancall_ool

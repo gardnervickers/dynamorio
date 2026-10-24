@@ -125,7 +125,8 @@
  * test if that is over N blocks per flush.
  *
  * Usage: api.a64_codegen_build [-blocks N] [-len N] [-reps N] [-runs N]
- *                              [-fault-blocks N] [-modes m1,m2,...]
+ *                              [-fault-blocks N] [-verbatim-stride N]
+ *                              [-modes m1,m2,...]
  *                              [-ops o1,o2,...|all]
  *                              [-scale N [-bucket N] [-slice N] [-limit X]
  *                               [-scale-guard] [-layout l1,l2,...]
@@ -1326,6 +1327,11 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 
 static int num_blocks = DEFAULT_BLOCKS, block_len = DEFAULT_LEN, reps = 5, runs = 200;
 static int fault_blocks = DEFAULT_FAULT_BLOCKS;
+/* The verbatim guard checks every verbatim_stride-th block of the marked copy
+ * (dr_app_pc_from_cache_pc() rebuilds a block's translation, which is most of
+ * a debug DR's time in this test).
+ */
+static int verbatim_stride = 1;
 static bool default_chain;
 static uint64_t expected_hash;
 static double native_ns_per_block;
@@ -1442,7 +1448,7 @@ check_verbatim(chain_t *c)
 {
     void *drcontext = dr_get_current_drcontext();
     int reported = 0;
-    for (int b = 0; b < c->blocks && reported < 10; b++) {
+    for (int b = 0; b < c->blocks && reported < 10; b += verbatim_stride) {
         app_pc tag = block_tag(c, b);
         byte *cache = marker_table[b];
         if (cache == NULL) {
@@ -2624,7 +2630,7 @@ usage(const char *name)
 {
     fprintf(stderr,
             "usage: %s [-blocks N] [-len N] [-reps N] [-runs N] [-fault-blocks N] "
-            "[-modes m1,m2,...] [-ops o1,o2,...|all]\n"
+            "[-verbatim-stride N] [-modes m1,m2,...] [-ops o1,o2,...|all]\n"
             "       [-scale N [-bucket N] [-slice N] [-limit X] [-scale-guard] "
             "[-layout l1,...] [-descending]\n"
             "        [-flushes K [-flush-limit N|auto]] [-range-flush]]\n"
@@ -2652,6 +2658,8 @@ main(int argc, char *argv[])
             runs = atoi(argv[++i]);
         else if (strcmp(argv[i], "-fault-blocks") == 0 && i + 1 < argc)
             fault_blocks = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-verbatim-stride") == 0 && i + 1 < argc)
+            verbatim_stride = atoi(argv[++i]);
         else if (strcmp(argv[i], "-modes") == 0 && i + 1 < argc) {
             if (!parse_list(argv[++i], mode_names, NUM_MODES, &want_mode))
                 return 1;
@@ -2697,7 +2705,7 @@ main(int argc, char *argv[])
         slice_blocks < 1 || scale_limit <= 1 || patch_count < 0 ||
         patch_count > 4095 /* an ADD immediate */ || patch_threads < 0 ||
         patch_threads > PATCH_MAX_THREADS || ibl_rounds < 0 || ibl_rounds > 65535 ||
-        fault_blocks < 0)
+        fault_blocks < 0 || verbatim_stride < 1)
         return usage(argv[0]);
     /* The faults guard is part of the default mode. */
     if (scale_blocks > 0 || patch_count > 0 || ibl_rounds > 0)
