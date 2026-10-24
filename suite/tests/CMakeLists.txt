@@ -3309,6 +3309,14 @@ if (ARM AND NOT ANDROID)
   tobuild_api(api.it api/it_arm.c "" "" OFF OFF OFF)
 endif(ARM AND NOT ANDROID)
 
+# Real workloads under DR, with and without a Seedbox-style instrumentation
+# client, and the HotSpot JIT stress test: see a64_smoke/a64_smoke.cmake and
+# jvm/jvm.cmake.
+if (AARCH64 AND LINUX AND NOT ANDROID)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/a64_smoke/a64_smoke.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/jvm/jvm.cmake")
+endif ()
+
 if (ARM)
   if (NOT ANDROID) # XXX i#1874: get working on Android
     # Helper exe, used offline to build smaller input binary to test itself:
