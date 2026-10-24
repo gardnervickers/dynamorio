@@ -3326,6 +3326,46 @@ endif ()
 option(A64_LONG_TESTS
   "Also run the long AArch64 stress, real-workload and JVM tests, at full size" OFF)
 if (AARCH64 AND LINUX)
+  # The AArch64 property tests (the native CPU, or an architectural rule, as
+  # the oracle for execution under DR) are defined one file per test or test
+  # family in a64_prop/, so adding one is adding a file there.  The files are
+  # included here, in name order, so they share this file's scope and helpers;
+  # each states any further conditions it needs.  Mechanics shared by the tests
+  # are in api/a64_prop_support.h.
+  set(a64_prop_support_c ${CMAKE_CURRENT_SOURCE_DIR}/api/a64_prop_support.c)
+  set_cflags("${a64_prop_support_c}")
+  # a64_prop_register(TESTS <test>... [TIMING <test>...] TARGETS <target>...):
+  # every file names its tests (without the run prefix), which get the
+  # "a64_prop" ctest label at the end of this file, and the targets they run,
+  # which join the top-level a64_prop_tests target: "ninja a64_prop_tests &&
+  # ctest -L a64_prop" builds and runs the whole set.  Tests listed under TIMING
+  # also get "a64_prop_timing": their oracles allow for legal deferral but they
+  # have still failed only under heavy machine load, so a verification script
+  # can report their failures without blocking on them.
+  macro(a64_prop_register)
+    cmake_parse_arguments(a64pr "" "" "TESTS;TIMING;TARGETS" ${ARGN})
+    list(APPEND a64_prop_testnames ${a64pr_TESTS} ${a64pr_TIMING})
+    list(APPEND a64_prop_timing_testnames ${a64pr_TIMING})
+    set_property(GLOBAL APPEND PROPERTY DR_A64_PROP_TARGETS ${a64pr_TARGETS})
+  endmacro()
+  # a64_prop_args(<var> SHORT <arg>... LONG <arg>...): sets <var> to a test's
+  # arguments, its full size with A64_LONG_TESTS and otherwise a small, quick
+  # default (a few seconds to tens of seconds per test, against a debug DR too).
+  macro(a64_prop_args var)
+    cmake_parse_arguments(a64pa "" "" "SHORT;LONG" ${ARGN})
+    if (A64_LONG_TESTS)
+      set(${var} "${a64pa_LONG}")
+    else ()
+      set(${var} "${a64pa_SHORT}")
+    endif ()
+  endmacro()
+  set_property(GLOBAL APPEND PROPERTY DR_A64_PROP_TARGETS drrun runstats simple_app)
+  file(GLOB a64_prop_files CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/a64_prop/*.cmake")
+  list(SORT a64_prop_files)
+  foreach (a64_prop_file ${a64_prop_files})
+    include("${a64_prop_file}")
+  endforeach ()
   include("${CMAKE_CURRENT_SOURCE_DIR}/a64_codegen/a64_codegen.cmake")
 endif ()
 
@@ -6734,6 +6774,25 @@ if (UNIX AND X86 AND CPU_AMD AND NOT DR_HOST_X64)
     code_api|tool.record_filter_bycore_uni)
 endif ()
 
+# Labels of the AArch64 property tests registered by a64_prop/*.cmake
+# (a64_prop_register).  Appended, so labels set above are kept.
+foreach (a64_prop_test ${a64_prop_testnames})
+  set(a64_prop_found OFF)
+  foreach (a64_prop_prefix "" ${prior_prefixes})
+    if (TEST "${a64_prop_prefix}${a64_prop_test}")
+      set_property(TEST "${a64_prop_prefix}${a64_prop_test}" APPEND PROPERTY
+        LABELS a64_prop)
+      if ("${a64_prop_test}" IN_LIST a64_prop_timing_testnames)
+        set_property(TEST "${a64_prop_prefix}${a64_prop_test}" APPEND PROPERTY
+          LABELS a64_prop_timing)
+      endif ()
+      set(a64_prop_found ON)
+    endif ()
+  endforeach ()
+  if (NOT a64_prop_found)
+    message(WARNING "a64_prop_register: no test named ${a64_prop_test}")
+  endif ()
+endforeach ()
 # The AArch64 codegen benchmarks and guards (a64_codegen/a64_codegen.cmake).
 foreach (a64_codegen_test ${a64_codegen_testnames})
   set(a64_codegen_found OFF)

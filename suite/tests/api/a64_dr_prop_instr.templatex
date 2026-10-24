@@ -1,0 +1,5 @@
+instr: generated 120, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive [0-9]+
+instr: blocks checked with a native trace [0-9]+, without [0-9]+; addresses compared [0-9]+
+instr: known deviations masked: fault-btype [0-9]+, fault-ssbs [0-9]+, async-btype [0-9]+, async-ssbs [0-9]+
+(instr: SSBS record: [ -~]*
+)?instr: all properties hold

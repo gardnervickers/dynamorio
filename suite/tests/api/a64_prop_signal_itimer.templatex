@@ -1,0 +1,3 @@
+itimer: cases [0-9]+ per variant, compared [0-9]+, inconclusive \(descheduled\) [0-9]+, expiries delivered under DR [0-9]+, DR itimer callbacks [0-9]+
+itimer: known deviations: itimer-mux [0-9]+
+itimer: all properties hold

@@ -1,0 +1,6 @@
+paths \(case x variant\): generated [0-9]+, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive [0-9]+
+paths: interrupted contexts checked [0-9]+ \(native [0-9]+\), handler effects applied [0-9]+, frames validated [0-9]+, stray signals [0-9]+
+paths: known deviations: rt-overflow-order [0-9]+
+(storm: debug DR runs with [ -~]*
+)?storm: rounds native [0-9]+, dr [0-9]+; main-thread EINTRs native [0-9]+, dr [0-9]+; SIGEV_THREAD notifications under dr [0-9]+
+paths: all properties hold

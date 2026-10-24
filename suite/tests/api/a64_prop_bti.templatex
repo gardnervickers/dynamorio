@@ -1,0 +1,7 @@
+((note: no PAuth, the PAC branch forms are not tested
+)?bti matrix: generated [0-9]+, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive 0
+bti matrix: brk on a guarded page with BTYPE != 0: [a-zA-Z ]+
+bti graph: generated [0-9]+, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive 0
+bti graph: interrupted contexts checked: [ -~]*
+bti known deviations: bti-not-enforced-branch [0-9]+, bti-not-enforced-sigreturn [0-9]+, bti-not-enforced-sigentry [0-9]+, frame-btype-branch [0-9]+, frame-btype-sigreturn [0-9]+, frame-btype-sigentry [0-9]+, frame-btype-noexec [0-9]+, forged-fault-no-esr [0-9]+, async-btype [0-9]+
+bti: all properties hold|SKIP: PROT_BTI does not take effect: [ -~]*)

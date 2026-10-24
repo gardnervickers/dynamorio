@@ -1,0 +1,4 @@
+abi \(case x variant\): generated [0-9]+, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive [0-9]+
+abi: interrupted contexts checked [0-9]+ \(native [0-9]+\), handler effects applied [0-9]+, frames validated [0-9]+, stray signals [0-9]+
+abi: known deviations: rt-overflow-order [0-9]+
+abi: all properties hold

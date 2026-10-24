@@ -1,0 +1,6 @@
+drreg: generated [0-9]+, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive [0-9]+
+drreg: app values records checked [0-9]+, clean-call records [0-9]+, contexts [0-9]+, fault-frame differences in dead registers: non-conservative [0-9]+, conservative \(i#3801\) [0-9]+
+drreg: known fault-frame PSTATE deviations: ssbs [0-9]+, btype [0-9]+
+drreg: interrupted contexts checked [0-9]+, budget clean calls taken [0-9]+
+drreg: observations not compared after a dead-register fault-frame difference: [0-9]+, non-conservative NO_APP_VALUE: [0-9]+
+drreg: all properties hold

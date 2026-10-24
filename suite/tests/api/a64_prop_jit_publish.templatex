@@ -1,0 +1,2 @@
+(publish [ -~]*
+)+publish: all properties hold

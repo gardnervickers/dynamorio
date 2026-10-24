@@ -1,0 +1,2 @@
+((trace|NOTE|Block-final exclusive store)[ -~]*
+)+trace: all properties hold

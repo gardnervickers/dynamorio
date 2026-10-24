@@ -1,0 +1,5 @@
+cleancall: generated [0-9]+, accepted [0-9]+, executed [0-9]+, checked [0-9]+, suppressed [0-9]+, inconclusive [0-9]+
+cleancall: records checked [0-9]+ \(contexts [0-9]+\), leaf calls [0-9]+, TPIDR windows [0-9]+
+cleancall: known deviations: static-tpidr [0-9]+ \(callees in the window that saw libc's thread pointer: [0-9]+\)
+cleancall: known fault-frame PSTATE deviations: ssbs [0-9]+, btype [0-9]+
+cleancall: all properties hold

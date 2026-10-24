@@ -2070,6 +2070,16 @@ if (BUILD_FUZZERS)
   add_subdirectory(suite/fuzz)
 endif (BUILD_FUZZERS)
 
+# Everything the tests labeled "a64_prop" need (the AArch64 property tests: see
+# suite/tests/a64_prop/), so that
+# "ninja a64_prop_tests && ctest -L a64_prop" works in a fresh build directory.
+get_property(a64_prop_targets GLOBAL PROPERTY DR_A64_PROP_TARGETS)
+if (a64_prop_targets)
+  list(REMOVE_DUPLICATES a64_prop_targets)
+  add_custom_target(a64_prop_tests)
+  add_dependencies(a64_prop_tests ${a64_prop_targets})
+endif ()
+
 # We must append to this file to avoid cmake_install.cmake's diff from thinking
 # the exports have changed and thus clobbering the other config's files.
 # This is what is copied to ${CMAKE_INSTALL_PREFIX}/${INSTALL_CMAKE}.
