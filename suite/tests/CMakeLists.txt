@@ -2737,6 +2737,11 @@ if (UNIX)
     tobuild_ci(client.cbr-retarget client-interface/cbr-retarget.c "" "" "")
   endif (X86 OR AARCH64)
   tobuild_ci(client.cleancallsig client-interface/cleancallsig.c "" "" "")
+  if (LINUX AND (X86 OR AARCH64))
+    # A signal queued during a clean call's callee is delivered after it returns.
+    tobuild_ci(client.cleancall_pending_signal
+      client-interface/cleancall_pending_signal.c "" "" "")
+  endif ()
   if (X64 AND NOT RISCV64) # XXX i#3173 Improve testing of emulation API functions
     # TODO i#3544: Port tests to RISC-V 64
     tobuild_ci(client.emulation_api_simple client-interface/emulation_api_simple.c

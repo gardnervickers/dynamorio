@@ -5572,11 +5572,10 @@ signal_holds_shared_fragment(dcontext_t *dcontext)
 
 #if defined(LINUX) && (defined(X86) || defined(AARCH64))
 void
-signal_clean_call_return(void)
+signal_clean_call_return_at(cache_pc pc)
 {
     dcontext_t *dcontext = get_thread_private_dcontext();
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
-    cache_pc pc = (cache_pc)__builtin_return_address(0);
     fragment_t *f;
     /* A signal interrupted the client, which may have held DR locks.  Its
      * handler could only queue it.  The client has now returned, so unlinking
@@ -5591,6 +5590,14 @@ signal_clean_call_return(void)
         info->interrupted = f;
         info->interrupted_pc = pc;
     }
+}
+#endif
+
+#if defined(LINUX) && defined(X86)
+void
+signal_clean_call_return(void)
+{
+    signal_clean_call_return_at((cache_pc)__builtin_return_address(0));
 }
 #endif
 

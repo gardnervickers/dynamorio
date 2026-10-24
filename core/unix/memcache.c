@@ -73,6 +73,11 @@ typedef struct _allmem_info_t {
     bool shareable;
     bool vdso;
     bool dr_vmm;
+    /* The stale_epoch in which DR saw this region created or checked it with the
+     * OS (0: never), when it was up to date though the cache is stale: see
+     * memcache_query_memory().
+     */
+    uint epoch;
 } allmem_info_t;
 
 static void
@@ -110,6 +115,10 @@ DECLARE_NEVERPROT_VAR(static int unmap_generation, 0);
  * the cache once every thread is back under DR (os_process_under_dynamorio_complete()).
  */
 DECLARE_NEVERPROT_VAR(static int stale_from_native, 0);
+/* Counts the times the cache became stale (from 1): an entry whose epoch is the
+ * current one was created by DR or checked with the OS since, and needs no check.
+ */
+DECLARE_NEVERPROT_VAR(static int stale_epoch, 1);
 
 void
 memcache_unmap_begin(void)
@@ -142,6 +151,8 @@ memcache_init(void)
                           all_memory_areas);
     vmvector_set_callbacks(all_memory_areas, allmem_info_free, allmem_info_dup,
                            allmem_should_merge, allmem_info_merge);
+    if (dr_api_entry)
+        ATOMIC_INC(int, stale_epoch);
     ATOMIC_4BYTE_ALIGNED_WRITE(&stale_from_native, dr_api_entry ? 1 : 0, false);
 }
 
@@ -166,9 +177,24 @@ memcache_up_to_date(void)
     return memcache_initialized() && atomic_aligned_read_int(&stale_from_native) == 0;
 }
 
+/* Whether a hit in the cache may be out of date: while the app may change its
+ * mappings unseen (see stale_from_native), once DR is initialized (the cache is
+ * built from the maps file during init, so it is up to date until then).
+ * XXX: the debug-only -go_native_at_bb_count marks the cache stale while other
+ * threads stay under DR, so every hit then asks the OS until exit.
+ */
+#ifdef HAVE_MEMINFO
+static bool
+memcache_hit_may_be_stale(void)
+{
+    return atomic_aligned_read_int(&stale_from_native) != 0 && dynamo_initialized;
+}
+#endif
+
 void
 memcache_mark_stale(void)
 {
+    ATOMIC_INC(int, stale_epoch);
     ATOMIC_4BYTE_ALIGNED_WRITE(&stale_from_native, 1, false);
 }
 
@@ -256,6 +282,8 @@ allmem_info_merge(void *dst_data, void *src_data)
         allmem_info_t *dst = (allmem_info_t *)dst_data;
         ASSERT(allmem_should_merge(true, dst, src));
     });
+    if (((allmem_info_t *)dst_data)->epoch != ((allmem_info_t *)src_data)->epoch)
+        ((allmem_info_t *)dst_data)->epoch = 0;
     allmem_info_free(src_data);
     return dst_data;
 }
@@ -290,6 +318,8 @@ add_all_memory_area(app_pc start, app_pc end, uint prot, int type, bool shareabl
     info->shareable = shareable;
     info->vdso = (start == vsyscall_page_start);
     info->dr_vmm = is_vmm_reserved_address(start, 1, NULL, NULL);
+    /* After init, DR adds a region as it sees the app or the OS create it. */
+    info->epoch = dynamo_initialized ? (uint)atomic_aligned_read_int(&stale_epoch) : 0;
     vmvector_add(all_memory_areas, start, end, (void *)info);
 }
 
@@ -468,6 +498,59 @@ memcache_query_memory(const byte *pc, DR_PARAM_OUT dr_mem_info_t *out_info)
         out_info->prot = info->prot;
         out_info->type = info->type;
 #ifdef HAVE_MEMINFO
+        uint epoch = (uint)atomic_aligned_read_int(&stale_epoch);
+        if (memcache_hit_may_be_stale() && info->epoch != epoch) {
+            /* The app may have unmapped or changed this region while native (see
+             * stale_from_native): check it with the OS, without the memcache lock
+             * so that other threads' queries need not wait for the maps file, once
+             * per region and epoch.  memquery_from_os() reads the maps file only,
+             * not the memory there.  The answer is the overlap of the cached
+             * region and the OS's (the cache may be wider than what is left, or the
+             * OS region than the cached one, e.g. merged anonymous mappings), with
+             * the OS's protection.  The cached type is kept unless the memory is
+             * now free: only the cache knows an image's later segments.
+             * This covers a region DR has not created or checked since the cache
+             * became stale, not the whole window: a thread still native can unmap
+             * or change a region after that, and a later hit then gets the cached
+             * answer (as every hit did before, and the -checklevel 2 comparison
+             * below can fail).  An entry whose bounds or protection never match the
+             * OS's exactly (merged image sections or anonymous mappings, the client
+             * library's entry) is checked on every hit in the window.
+             * XXX: memquery_from_os() takes memory_info_buf_lock, which is not
+             * recursive, as a miss here already did: a query from a thread that
+             * holds it (a fault inside the maps reader) would deadlock.
+             */
+            dr_mem_info_t os_info;
+            bool have_type = false;
+            uint cached_prot = info->prot;
+            memcache_unlock();
+            if (memquery_from_os(pc, &os_info, &have_type)) {
+                app_pc lo = MAX(start, os_info.base_pc);
+                app_pc hi = MIN(end, os_info.base_pc + os_info.size);
+                bool is_free = have_type && os_info.type == DR_MEMTYPE_FREE;
+                ASSERT(lo <= pc && pc < hi);
+                out_info->base_pc = lo;
+                out_info->size = hi - lo;
+                if (is_free) {
+                    out_info->prot = MEMPROT_NONE;
+                    out_info->type = DR_MEMTYPE_FREE;
+                } else
+                    out_info->prot = os_info.prot;
+                if (!is_free && lo == start && hi == end && os_info.prot == cached_prot) {
+                    /* Up to date: no need to ask again until the next epoch, if it
+                     * has not changed meanwhile.
+                     */
+                    app_pc start2, end2;
+                    memcache_lock();
+                    if (vmvector_lookup_data(all_memory_areas, (app_pc)pc, &start2, &end2,
+                                             (void **)&info) &&
+                        start2 == start && end2 == end && info->prot == cached_prot)
+                        info->epoch = epoch;
+                    memcache_unlock();
+                }
+            }
+            return true;
+        }
         DOCHECK(2, {
             byte *from_os_base_pc;
             size_t from_os_size;

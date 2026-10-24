@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -633,21 +633,33 @@ offline_instru_t::opnd_disp_is_elidable(opnd_t memop)
 
 int
 offline_instru_t::insert_save_addr(void *drcontext, instrlist_t *ilist, instr_t *where,
-                                   reg_id_t reg_ptr, int adjust, opnd_t ref, bool write)
+                                   reg_id_t reg_ptr, int adjust, instr_t *app, opnd_t ref,
+                                   bool write)
 {
     int disp = adjust;
     reg_id_t reg_addr = DR_REG_NULL;
     bool reserved = false;
     bool have_addr = false;
+    bool auth_load = false;
     drreg_status_t res;
+#ifdef AARCH64
+    /* LDRAA and LDRAB access the address in their base register without its
+     * pointer authentication code, which the register still holds.
+     */
+    auth_load = app != nullptr &&
+        (instr_get_opcode(app) == OP_ldraa || instr_get_opcode(app) == OP_ldrab);
+#endif
     if (opnd_disp_is_elidable(ref)) {
         /* Optimization: to avoid needing a scratch reg to lea into, we simply
          * store the base reg directly and add the disp during post-processing.
          */
         reg_addr = opnd_get_base(ref);
-        if (opnd_get_base(ref) == reg_ptr) {
-            /* Here we do need a scratch reg, and raw2trace can't identify this case:
-             * so we set disp to 0 and use the regular path below.
+        if (opnd_get_base(ref) == reg_ptr || opnd_get_base(ref) == dr_get_stolen_reg() ||
+            auth_load) {
+            /* Here we do need a scratch reg, and raw2trace can't identify these cases:
+             * so we set disp to 0 (since raw2trace will add it on) and use the
+             * regular path below.  (For an authenticating load, to strip the code
+             * from the base below.)
              */
             opnd_set_disp(&ref, 0);
         } else
@@ -666,6 +678,16 @@ offline_instru_t::insert_save_addr(void *drcontext, instrlist_t *ilist, instr_t 
         }
         reserved = true;
     }
+#ifdef AARCH64
+    /* drutil strips the code when it computes the whole address, but not from a
+     * base it computes for a zero disp, which raw2trace adds.
+     */
+    /* XPACD is UNDEFINED without FEAT_PAuth (unlike the HINT-space XPACLRI), and
+     * so is the load itself.
+     */
+    if (auth_load && proc_has_feature(FEATURE_PAUTH))
+        MINSERT(ilist, where, INSTR_CREATE_xpacd(drcontext, opnd_create_reg(reg_addr)));
+#endif
     MINSERT(ilist, where,
             XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_ptr, disp),
                                opnd_create_reg(reg_addr)));
@@ -751,7 +773,7 @@ offline_instru_t::instrument_memref(void *drcontext, void *bb_field, instrlist_t
         res = drreg_unreserve_register(drcontext, ilist, where, reg_tmp);
         DR_ASSERT(res == DRREG_SUCCESS); // Can't recover.
     }
-    adjust += insert_save_addr(drcontext, ilist, where, reg_ptr, adjust, ref, write);
+    adjust += insert_save_addr(drcontext, ilist, where, reg_ptr, adjust, app, ref, write);
     instrlist_set_auto_predicate(ilist, DR_PRED_NONE);
     return adjust;
 }

@@ -700,7 +700,14 @@ void signal_cache_exit(dcontext_t *dcontext);
 bool signal_holds_shared_fragment(dcontext_t *dcontext);
 
 #if defined(LINUX) && (defined(X86) || defined(AARCH64))
-/* Called from a clean-call return slow path after client code has returned. */
+/* Called after a clean call's client code has returned, when a signal is pending,
+ * with the pc in the fragment that the call returns to.
+ */
+void
+signal_clean_call_return_at(cache_pc pc);
+#endif
+#if defined(LINUX) && defined(X86)
+/* Called from an x86 clean call's slow path, in the fragment. */
 void
 signal_clean_call_return(void);
 #endif

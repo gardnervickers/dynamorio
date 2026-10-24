@@ -5964,14 +5964,32 @@ emit_clean_call_restore(dcontext_t *dcontext, byte *pc, generated_code_t *code)
     ASSERT_NOT_IMPLEMENTED(false);
 #endif
 
-    /* emit code */
-    pc = instrlist_encode_to_copy(dcontext, &ilist, vmcode_get_writable_addr(pc), pc,
-                                  NULL, IF_X86_ELSE(ZMM_ENABLED(), false));
+    /* emit code (the AArch64 pending-signal check branches to a label) */
+    pc = instrlist_encode_to_copy(
+        dcontext, &ilist, vmcode_get_writable_addr(pc), pc, NULL,
+        IF_X86_ELSE(ZMM_ENABLED(), IF_AARCH64_ELSE(true, false)));
     ASSERT(pc != NULL);
     pc = vmcode_get_executable_addr(pc);
     instrlist_clear(dcontext, &ilist);
     return pc;
 }
+
+#if defined(AARCH64) && defined(LINUX)
+byte *
+emit_clean_call_pending_signal(dcontext_t *dcontext, byte *pc, generated_code_t *code)
+{
+    instrlist_t ilist;
+    instrlist_init(&ilist);
+    append_clean_call_pending_signal(dcontext, &ilist);
+    APP(&ilist, INSTR_CREATE_br(dcontext, opnd_create_reg(DR_REG_X30)));
+    pc = instrlist_encode_to_copy(dcontext, &ilist, vmcode_get_writable_addr(pc), pc,
+                                  NULL, true);
+    ASSERT(pc != NULL);
+    pc = vmcode_get_executable_addr(pc);
+    instrlist_clear(dcontext, &ilist);
+    return pc;
+}
+#endif
 
 /* mirrored inline implementation of set_last_exit() */
 void

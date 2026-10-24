@@ -716,14 +716,13 @@ insert_parameter_preparation(dcontext_t *dcontext, instrlist_t *ilist, instr_t *
 }
 #endif /* X86 */
 
-#if defined(LINUX) && (defined(X86) || defined(AARCH64))
+#if defined(LINUX) && defined(X86)
 static void
 insert_clean_call_pending_signal_check(dcontext_t *dcontext, instrlist_t *ilist,
                                        instr_t *where, byte *encode_pc)
 {
     instr_t *slow = INSTR_CREATE_label(dcontext);
     instr_t *done = INSTR_CREATE_label(dcontext);
-#    ifdef X86
     uint saved, padding;
     /* Optimized clean calls may leave some app registers live.  Preserve both
      * those and flags on the fast path and all state around the slow C helper.
@@ -741,49 +740,7 @@ insert_clean_call_pending_signal_check(dcontext_t *dcontext, instrlist_t *ilist,
     PRE(ilist, where, INSTR_CREATE_popf(dcontext));
     PRE(ilist, where, INSTR_CREATE_pop(dcontext, opnd_create_reg(REG_XAX)));
     PRE(ilist, where, INSTR_CREATE_jmp(dcontext, opnd_create_instr(done)));
-#    else
-    /* AArch64 clean calls can leave registers live.  Check the queue using
-     * only x0/x1 and restore them and NZCV before either path continues.
-     * x30 is untouched so the slow helper can find this fragment from its
-     * own return address.
-     */
-    PRE(ilist, where,
-        XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP), OPND_CREATE_INT16(32)));
-    PRE(ilist, where,
-        INSTR_CREATE_stp(dcontext,
-                         opnd_create_base_disp(DR_REG_SP, DR_REG_NULL, 0, 0, OPSZ_16),
-                         opnd_create_reg(DR_REG_X0), opnd_create_reg(DR_REG_X1)));
-    PRE(ilist, where,
-        INSTR_CREATE_mrs(dcontext, opnd_create_reg(DR_REG_X1),
-                         opnd_create_reg(DR_REG_NZCV)));
-    PRE(ilist, where,
-        INSTR_CREATE_str(dcontext, OPND_CREATE_MEM64(DR_REG_SP, 16),
-                         opnd_create_reg(DR_REG_X1)));
-    insert_get_mcontext_base(dcontext, ilist, where, DR_REG_X0);
-    PRE(ilist, where,
-        INSTR_CREATE_ldrsb(dcontext, opnd_create_reg(DR_REG_X0),
-                           opnd_create_dcontext_field_via_reg_sz(
-                               dcontext, DR_REG_X0, SIGPENDING_OFFSET, OPSZ_1)));
-    PRE(ilist, where,
-        XINST_CREATE_cmp(dcontext, opnd_create_reg(DR_REG_X0), OPND_CREATE_INT8(0)));
-    PRE(ilist, where,
-        XINST_CREATE_jump_cond(dcontext, DR_PRED_GT, opnd_create_instr(slow)));
-    PRE(ilist, where,
-        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X1),
-                         OPND_CREATE_MEM64(DR_REG_SP, 16)));
-    PRE(ilist, where,
-        INSTR_CREATE_msr(dcontext, opnd_create_reg(DR_REG_NZCV),
-                         opnd_create_reg(DR_REG_X1)));
-    PRE(ilist, where,
-        INSTR_CREATE_ldp(dcontext, opnd_create_reg(DR_REG_X0),
-                         opnd_create_reg(DR_REG_X1),
-                         opnd_create_base_disp(DR_REG_SP, DR_REG_NULL, 0, 0, OPSZ_16)));
-    PRE(ilist, where,
-        XINST_CREATE_add(dcontext, opnd_create_reg(DR_REG_SP), OPND_CREATE_INT16(32)));
-    PRE(ilist, where, XINST_CREATE_jump(dcontext, opnd_create_instr(done)));
-#    endif
     PRE(ilist, where, slow);
-#    ifdef X86
     PRE(ilist, where, INSTR_CREATE_popf(dcontext));
     PRE(ilist, where, INSTR_CREATE_pop(dcontext, opnd_create_reg(REG_XAX)));
     saved = insert_push_all_registers(dcontext, NULL, ilist, where,
@@ -803,28 +760,43 @@ insert_clean_call_pending_signal_check(dcontext_t *dcontext, instrlist_t *ilist,
             INSTR_CREATE_lea(dcontext, opnd_create_reg(REG_XSP),
                              OPND_CREATE_MEM_lea(REG_XSP, REG_NULL, 0, padding)));
     insert_pop_all_registers(dcontext, NULL, ilist, where, get_ABI_stack_alignment());
-#    else
+    PRE(ilist, where, done);
+}
+#elif defined(LINUX) && defined(AARCH64)
+/* A signal that arrives during a clean call's callee can only be queued, as the
+ * client may hold DR locks.  After the callee, unlink the fragment if one is
+ * pending (signal_clean_call_return_at()), so that a linked loop reaches the
+ * dispatcher to deliver it.  An out-of-line context switch's clean_call_restore
+ * does that itself (see append_clean_call_restore()).  At a site with an inline
+ * context switch only x0, x1, x2, x11 and x30 are saved for certain (see
+ * insert_push_all_registers()), the flags may be live, and SP must stay where
+ * the saved app state is, for translation: the check uses only x0 and no flags,
+ * and the slow path is a call to the shared clean_call_pending_signal routine,
+ * which saves the rest (x30 is restored with the app state after it).  The check
+ * reads the dcontext through the stolen register, which such a site's callee
+ * does not use: dr_insert_clean_call_ex_varg() gives a callee that does an
+ * out-of-line switch.
+ */
+static void
+insert_clean_call_pending_signal_check(dcontext_t *dcontext, instrlist_t *ilist,
+                                       instr_t *where, byte *encode_pc)
+{
+    instr_t *done = INSTR_CREATE_label(dcontext);
+    insert_get_mcontext_base(dcontext, ilist, where, DR_REG_X0);
     PRE(ilist, where,
-        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X1),
-                         OPND_CREATE_MEM64(DR_REG_SP, 16)));
+        INSTR_CREATE_ldrsb(dcontext, opnd_create_reg(DR_REG_X0),
+                           opnd_create_dcontext_field_via_reg_sz(
+                               dcontext, DR_REG_X0, SIGPENDING_OFFSET, OPSZ_1)));
+    /* Pending only if positive (negative is a signal being delivered). */
     PRE(ilist, where,
-        INSTR_CREATE_msr(dcontext, opnd_create_reg(DR_REG_NZCV),
-                         opnd_create_reg(DR_REG_X1)));
+        INSTR_CREATE_cbz(dcontext, opnd_create_instr(done), opnd_create_reg(DR_REG_X0)));
     PRE(ilist, where,
-        INSTR_CREATE_ldp(dcontext, opnd_create_reg(DR_REG_X0),
-                         opnd_create_reg(DR_REG_X1),
-                         opnd_create_base_disp(DR_REG_SP, DR_REG_NULL, 0, 0, OPSZ_16)));
-    PRE(ilist, where,
-        XINST_CREATE_add(dcontext, opnd_create_reg(DR_REG_SP), OPND_CREATE_INT16(32)));
-    insert_push_all_registers(dcontext, NULL, ilist, where,
-                              get_ABI_stack_alignment(), OPND_CREATE_INT32(0),
-                              DR_REG_NULL, false /* inline */);
-    insert_clear_eflags(dcontext, NULL, ilist, where);
-    insert_meta_call_vargs(dcontext, ilist, where, META_CALL_RETURNS, encode_pc,
-                           (void *)signal_clean_call_return, 0, NULL);
-    insert_pop_all_registers(dcontext, NULL, ilist, where,
-                             get_ABI_stack_alignment(), false /* inline */);
-#    endif
+        INSTR_CREATE_tbnz(dcontext, opnd_create_instr(done), opnd_create_reg(DR_REG_X0),
+                          OPND_CREATE_INT(63)));
+    instrlist_insert_mov_immed_ptrsz(
+        dcontext, (ptr_int_t)get_clean_call_pending_signal(dcontext),
+        opnd_create_reg(DR_REG_X0), ilist, where, NULL, NULL);
+    PRE(ilist, where, INSTR_CREATE_blr(dcontext, opnd_create_reg(DR_REG_X0)));
     PRE(ilist, where, done);
 }
 #endif
@@ -907,7 +879,8 @@ insert_meta_call_vargs(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     }
 
 #if defined(LINUX) && (defined(X86) || defined(AARCH64))
-    if (TEST(META_CALL_CLEAN, flags) && !TEST(META_CALL_RETURNS_TO_NATIVE, flags))
+    if (TEST(META_CALL_CLEAN, flags) && !TEST(META_CALL_RETURNS_TO_NATIVE, flags) &&
+        IF_AARCH64_ELSE(!TEST(META_CALL_OUT_OF_LINE, flags), true))
         insert_clean_call_pending_signal_check(dcontext, ilist, instr, encode_pc);
 #endif
 

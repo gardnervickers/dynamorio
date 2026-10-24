@@ -1000,6 +1000,48 @@ append_clean_call_restore(dcontext_t *dcontext, instrlist_t *ilist)
     PRE(ilist, NULL,
         INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X0),
                          OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(dr_reg_stolen))));
+#    ifdef LINUX
+    /* A signal that arrived during the callee could only be queued: the client may
+     * have held DR locks.  Now that it has returned, unlink the fragment for it, so
+     * that a linked loop reaches the dispatcher to deliver it.  The whole app state
+     * is in the mcontext here, restored below, so every register but x30, the
+     * return address into the fragment, is scratch.  Checking here rather than at
+     * each call site costs those nothing; a site with an inline context switch has
+     * its own check: see insert_clean_call_pending_signal_check().
+     */
+    instr_t *no_signal = INSTR_CREATE_label(dcontext);
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X1),
+                         OPND_CREATE_MEM64(DR_REG_X0, os_tls_offset(TLS_DCONTEXT_SLOT))));
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldrsb(dcontext, opnd_create_reg(DR_REG_X1),
+                           opnd_create_dcontext_field_via_reg_sz(
+                               dcontext, DR_REG_X1, SIGPENDING_OFFSET, OPSZ_1)));
+    /* Pending only if positive (negative is a signal being delivered). */
+    PRE(ilist, NULL,
+        INSTR_CREATE_cbz(dcontext, opnd_create_instr(no_signal),
+                         opnd_create_reg(DR_REG_X1)));
+    PRE(ilist, NULL,
+        INSTR_CREATE_tbnz(dcontext, opnd_create_instr(no_signal),
+                          opnd_create_reg(DR_REG_X1), OPND_CREATE_INT(63)));
+    /* x19 is callee-saved, and restored from the mcontext below. */
+    PRE(ilist, NULL,
+        XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X19),
+                          opnd_create_reg(DR_REG_X30)));
+    PRE(ilist, NULL,
+        XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X0),
+                          opnd_create_reg(DR_REG_X30)));
+    instrlist_insert_mov_immed_ptrsz(dcontext, (ptr_int_t)signal_clean_call_return_at,
+                                     opnd_create_reg(DR_REG_X1), ilist, NULL, NULL, NULL);
+    PRE(ilist, NULL, INSTR_CREATE_blr(dcontext, opnd_create_reg(DR_REG_X1)));
+    PRE(ilist, NULL,
+        XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X30),
+                          opnd_create_reg(DR_REG_X19)));
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X0),
+                         OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(dr_reg_stolen))));
+    PRE(ilist, NULL, no_signal);
+#    endif
     PRE(ilist, NULL,
         INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X1),
                          OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30))));
@@ -1016,6 +1058,45 @@ append_clean_call_restore(dcontext_t *dcontext, instrlist_t *ilist)
                          OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
     insert_clean_call_stack_swap(dcontext, ilist, NULL, false /*to app*/);
 }
+
+#    ifdef LINUX
+/* Appends clean_call_pending_signal, up to its return.  A clean call site with an
+ * inline context switch calls it, after its callee has returned, when a signal is
+ * pending (see insert_clean_call_pending_signal_check()), with x30 holding the
+ * return address into the fragment and SP the site's.  Only the registers the site
+ * saved are scratch there, and the flags may be live: the routine saves the whole
+ * state below SP, as clean_call_save does, around the C call.  The routine is
+ * shared, so that each site has only a call to it.
+ */
+void
+append_clean_call_pending_signal(dcontext_t *dcontext, instrlist_t *ilist)
+{
+    /* sub sp, sp, #clean_call_switch_stack_size */
+    PRE(ilist, NULL,
+        XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP),
+                         OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
+    insert_push_all_registers(dcontext, NULL, ilist, NULL, (uint)PAGE_SIZE,
+                              OPND_CREATE_INT32(0), REG_NULL, true /*out_of_line*/);
+    PRE(ilist, NULL,
+        INSTR_CREATE_str(dcontext, OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30)),
+                         opnd_create_reg(DR_REG_X30)));
+    PRE(ilist, NULL,
+        XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X0),
+                          opnd_create_reg(DR_REG_X30)));
+    instrlist_insert_mov_immed_ptrsz(dcontext, (ptr_int_t)signal_clean_call_return_at,
+                                     opnd_create_reg(DR_REG_X1), ilist, NULL, NULL, NULL);
+    PRE(ilist, NULL, INSTR_CREATE_blr(dcontext, opnd_create_reg(DR_REG_X1)));
+    PRE(ilist, NULL,
+        INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X30),
+                         OPND_CREATE_MEM64(DR_REG_SP, REG_OFFSET(DR_REG_X30))));
+    insert_pop_all_registers(dcontext, NULL, ilist, NULL, (uint)PAGE_SIZE,
+                             true /*out_of_line*/);
+    /* add sp, sp, #clean_call_switch_stack_size */
+    PRE(ilist, NULL,
+        XINST_CREATE_add(dcontext, opnd_create_reg(DR_REG_SP),
+                         OPND_CREATE_INT16(get_clean_call_switch_stack_size())));
+}
+#    endif
 #endif
 
 /*###########################################################################

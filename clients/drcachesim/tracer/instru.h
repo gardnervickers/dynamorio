@@ -537,7 +537,7 @@ private:
                    per_block_t *per_block);
     int
     insert_save_addr(void *drcontext, instrlist_t *ilist, instr_t *where,
-                     reg_id_t reg_ptr, int adjust, opnd_t ref, bool write);
+                     reg_id_t reg_ptr, int adjust, instr_t *app, opnd_t ref, bool write);
     int
     insert_save_type_and_size(void *drcontext, instrlist_t *ilist, instr_t *where,
                               reg_id_t reg_ptr, reg_id_t scratch, int adjust,

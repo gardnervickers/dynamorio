@@ -5352,6 +5352,20 @@ dr_insert_clean_call_ex_varg(void *drcontext, instrlist_t *ilist, instr_t *where
         }
 #endif
     }
+#if defined(AARCH64) && defined(LINUX)
+    /* After the callee, a call site checks for a signal queued while it ran (see
+     * insert_clean_call_pending_signal_check()): with an inline context switch the
+     * site reads the dcontext through the stolen register, so a callee the analysis
+     * saw use it (and so may not have kept it) gets an out-of-line switch, whose
+     * clean_call_restore takes the TLS base from the saved context.  A call that
+     * returns to native code needs no check, which the shared clean_call_restore
+     * would make: it gets an inline switch, which the check skips.
+     */
+    if (TEST(DR_CLEANCALL_RETURNS_TO_NATIVE, save_flags))
+        cci.out_of_line_swap = false;
+    else if (!cci.reg_skip[dr_reg_stolen - DR_REG_START_GPR])
+        cci.out_of_line_swap = true;
+#endif
     if (TEST(DR_CLEANCALL_INDIRECT, save_flags))
         encode_pc = vmcode_unreachable_pc();
     else
@@ -5388,6 +5402,8 @@ dr_insert_clean_call_ex_varg(void *drcontext, instrlist_t *ilist, instr_t *where
     instrlist_set_our_mangling(ilist, true);
     if (TEST(DR_CLEANCALL_RETURNS_TO_NATIVE, save_flags))
         call_flags |= META_CALL_RETURNS_TO_NATIVE;
+    if (cci.out_of_line_swap)
+        call_flags |= META_CALL_OUT_OF_LINE;
     insert_meta_call_vargs(dcontext, ilist, insert_at, call_flags, encode_pc, callee,
                            num_args, args);
     instrlist_set_our_mangling(ilist, false);

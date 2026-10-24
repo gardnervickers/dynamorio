@@ -218,6 +218,10 @@ dump_emitted_routines(dcontext_t *dcontext, file_t file, const char *code_descri
                 print_file(file, "clean_call_save:\n");
             else if (last_pc == code->clean_call_restore)
                 print_file(file, "clean_call_restore:\n");
+#    if defined(AARCH64) && defined(LINUX)
+            else if (last_pc == code->clean_call_pending_signal)
+                print_file(file, "clean_call_pending_signal:\n");
+#    endif
             last_pc = disassemble_with_bytes(dcontext, last_pc, file);
         } while (last_pc < emitted_pc);
         print_file(file, "%s routines size: " SSZFMT " / " SSZFMT "\n\n",
@@ -481,6 +485,11 @@ shared_gencode_emit(generated_code_t *gencode _IF_X86_64(bool x86_mode))
         gencode->clean_call_restore = pc;
         pc = emit_clean_call_restore(GLOBAL_DCONTEXT, pc, gencode);
         gencode->clean_call_restore_end = pc;
+#if defined(AARCH64) && defined(LINUX)
+        pc = check_size_and_cache_line(isa_mode, gencode, pc);
+        gencode->clean_call_pending_signal = pc;
+        pc = emit_clean_call_pending_signal(GLOBAL_DCONTEXT, pc, gencode);
+#endif
     }
 
     ASSERT(pc < gencode->commit_end_pc);
@@ -2057,6 +2066,17 @@ get_clean_call_restore(dcontext_t *dcontext _IF_X86_64(gencode_mode_t mode))
     IF_ARM(ASSERT_NOT_IMPLEMENTED(false));
     return (cache_pc)code->clean_call_restore;
 }
+
+#if defined(AARCH64) && defined(LINUX)
+cache_pc
+get_clean_call_pending_signal(dcontext_t *dcontext)
+{
+    /* AArch64 has only shared gencode. */
+    generated_code_t *code = get_emitted_routines_code(GLOBAL_DCONTEXT);
+    ASSERT(code != NULL && code->clean_call_pending_signal != NULL);
+    return (cache_pc)code->clean_call_pending_signal;
+}
+#endif
 
 static inline cache_pc
 get_special_ibl_xfer_entry(dcontext_t *dcontext, int index)

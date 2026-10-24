@@ -474,6 +474,8 @@ typedef enum {
     META_CALL_RETURNS = 0x0002,
     /* alias of DR_CLEANCALL_RETURNS_TO_NATIVE */
     META_CALL_RETURNS_TO_NATIVE = 0x0004,
+    /* A clean call whose context switch is out of line (cci->out_of_line_swap). */
+    META_CALL_OUT_OF_LINE = 0x0008,
 } meta_call_flags_t;
 
 cache_pc
@@ -732,6 +734,10 @@ void
 append_clean_call_save(dcontext_t *dcontext, instrlist_t *ilist);
 void
 append_clean_call_restore(dcontext_t *dcontext, instrlist_t *ilist);
+#    ifdef LINUX
+void
+append_clean_call_pending_signal(dcontext_t *dcontext, instrlist_t *ilist);
+#    endif
 #endif
 #ifdef X86
 #    ifdef UNIX
@@ -1085,6 +1091,12 @@ typedef struct _generated_code_t {
     byte *clean_call_save;
     byte *clean_call_restore;
     byte *clean_call_restore_end;
+#if defined(AARCH64) && defined(LINUX)
+    /* Called by a clean call with an inline context switch when a signal arrived
+     * during its callee: see insert_clean_call_pending_signal_check().
+     */
+    byte *clean_call_pending_signal;
+#endif
 
     bool thread_shared;
     bool writable;
@@ -1138,6 +1150,10 @@ cache_pc
 get_clean_call_save(dcontext_t *dcontext _IF_X86_64(gencode_mode_t mode));
 cache_pc
 get_clean_call_restore(dcontext_t *dcontext _IF_X86_64(gencode_mode_t mode));
+#if defined(AARCH64) && defined(LINUX)
+cache_pc
+get_clean_call_pending_signal(dcontext_t *dcontext);
+#endif
 
 void
 protect_generated_code(generated_code_t *code, bool writable);
@@ -1377,6 +1393,11 @@ emit_clean_call_save(dcontext_t *dcontext, byte *pc, generated_code_t *code);
 
 byte *
 emit_clean_call_restore(dcontext_t *dcontext, byte *pc, generated_code_t *code);
+
+#if defined(AARCH64) && defined(LINUX)
+byte *
+emit_clean_call_pending_signal(dcontext_t *dcontext, byte *pc, generated_code_t *code);
+#endif
 
 void
 insert_save_eflags(dcontext_t *dcontext, instrlist_t *ilist, instr_t *where, uint flags,

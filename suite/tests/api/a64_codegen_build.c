@@ -211,19 +211,17 @@ static const int ops_scale_runs[NUM_OPS] = { 1, 1, 1, 52, 52, 52 };
  * budget.  Lower a budget when a change makes the code smaller; raise one only
  * for a deliberate increase.
  */
-/* The clean-call modes include the queued-signal check that a5878f53c inserts
- * after every AArch64 clean call: 564 bytes per call (141 instructions, most of
- * them its slow path's inline save and restore of every register).  Without it
- * they would be 212.0, 469.5, 320.0 and 168.0.
+/* The queued-signal check after a clean call costs an out-of-line call site
+ * nothing (clean_call_restore makes it) and an inline one 32 bytes (cleancall).
  */
 static const double budgets[NUM_OPS][NUM_MODES] = {
     /* dr, bbhook, progress, progress4, cleancall, cleancall_ool */
-    { 124.0, 124.0, 772.0, 2709.5, 880.0, 728.0 }, /* default */
-    { 124.0, 124.0, 772.0, 2709.5, 880.0, 728.0 }, /* seedbox */
-    { 0, 0, 0, 0, 0, 0 },                          /* private */
-    { 0, 0, 0, 0, 0, 0 },                          /* traces */
-    { 0, 0, 0, 0, 0, 0 },                          /* ibtraces */
-    { 0, 0, 0, 0, 0, 0 },                          /* ibtraces_shared */
+    { 124.0, 124.0, 212.0, 469.5, 352.0, 168.0 }, /* default */
+    { 124.0, 124.0, 212.0, 469.5, 352.0, 168.0 }, /* seedbox */
+    { 0, 0, 0, 0, 0, 0 },                         /* private */
+    { 0, 0, 0, 0, 0, 0 },                         /* traces */
+    { 0, 0, 0, 0, 0, 0 },                         /* ibtraces */
+    { 0, 0, 0, 0, 0, 0 },                         /* ibtraces_shared */
 };
 
 #define TESTANY(mask, var) (((mask) & (var)) != 0)
