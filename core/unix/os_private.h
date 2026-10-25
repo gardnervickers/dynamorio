@@ -171,6 +171,10 @@ typedef struct _os_thread_data_t {
      * memcache_unmap_begin() counts.
      */
     bool memcache_unmap_in_flight;
+    /* The range of the munmap in flight, removed from the memory cache again after
+     * the syscall (see memcache_unmap_syscall_end()); NULL for an mremap.
+     */
+    app_pc memcache_unmap_start, memcache_unmap_end;
 #endif
     /* The dstack of the clone record for a thread-creating clone that this thread
      * is about to make or is waiting in, until the clone returns here; see

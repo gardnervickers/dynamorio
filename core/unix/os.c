@@ -2681,20 +2681,36 @@ os_thread_init_finalize(dcontext_t *dcontext, void *os_data)
  * memcache_unmap_begin()).
  */
 static void
-memcache_unmap_syscall_begin(dcontext_t *dcontext)
+memcache_unmap_syscall_begin(dcontext_t *dcontext, app_pc start, app_pc end)
 {
     os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
     if (!ostd->memcache_unmap_in_flight) {
         ostd->memcache_unmap_in_flight = true;
         memcache_unmap_begin();
     }
+    ostd->memcache_unmap_start = start;
+    ostd->memcache_unmap_end = end;
 }
 
+/* After the syscall (post_syscall), or when it was skipped or the thread exits.
+ * A munmap removed its range from the cache before the syscall, but something may
+ * have added it back from the maps file before the syscall unmapped it:
+ * memcache_update_all_from_os(), which rebuilds the whole cache at the end of an
+ * attach, does.  So we remove the range again after the syscall, whether or not it
+ * succeeded (a range still mapped is then a miss, which asks the OS).
+ */
 static void
-memcache_unmap_syscall_end(dcontext_t *dcontext)
+memcache_unmap_syscall_end(dcontext_t *dcontext, bool post_syscall)
 {
     os_thread_data_t *ostd = (os_thread_data_t *)dcontext->os_field;
     if (ostd != NULL && ostd->memcache_unmap_in_flight) {
+        if (post_syscall && ostd->memcache_unmap_start != NULL) {
+            memcache_lock();
+            memcache_remove(ostd->memcache_unmap_start, ostd->memcache_unmap_end);
+            memcache_unlock();
+        }
+        ostd->memcache_unmap_start = NULL;
+        ostd->memcache_unmap_end = NULL;
         ostd->memcache_unmap_in_flight = false;
         memcache_unmap_end();
     }
@@ -2713,7 +2729,7 @@ os_thread_exit(dcontext_t *dcontext, bool other_thread)
         handle_execve_post(dcontext);
 
     DELETE_LOCK(ostd->suspend_lock);
-    IF_NO_MEMQUERY(memcache_unmap_syscall_end(dcontext));
+    IF_NO_MEMQUERY(memcache_unmap_syscall_end(dcontext, false /*!post_syscall*/));
 
     signal_thread_exit(dcontext, other_thread);
 
@@ -8596,7 +8612,7 @@ pre_system_call(dcontext_t *dcontext)
                                 true /* image, FIXME: though not necessarily */);
         /* FIXME: case 4983 use is_elf_so_header() */
 #ifndef HAVE_MEMINFO_QUERY
-        memcache_unmap_syscall_begin(dcontext);
+        memcache_unmap_syscall_begin(dcontext, addr, addr + len);
         memcache_lock();
         memcache_remove(addr, addr + len);
         memcache_unlock();
@@ -8618,7 +8634,7 @@ pre_system_call(dcontext_t *dcontext)
         LOG(THREAD, LOG_SYSCALLS, 2, "syscall: mremap addr=" PFX " size=" PFX "\n", addr,
             old_len);
         /* post_system_call does the work */
-        IF_NO_MEMQUERY(memcache_unmap_syscall_begin(dcontext));
+        IF_NO_MEMQUERY(memcache_unmap_syscall_begin(dcontext, NULL, NULL));
         dcontext->sys_param0 = (reg_t)addr;
         dcontext->sys_param1 = old_len;
         dcontext->sys_param2 = new_len;
@@ -9636,7 +9652,7 @@ pre_system_call(dcontext_t *dcontext)
     /* A skipped syscall gets no post-syscall handling. */
 #ifndef HAVE_MEMINFO_QUERY
     if (!execute_syscall)
-        memcache_unmap_syscall_end(dcontext);
+        memcache_unmap_syscall_end(dcontext, false /*nothing was unmapped*/);
 #endif
     dcontext->whereami = old_whereami;
     return execute_syscall;
@@ -10084,7 +10100,7 @@ post_system_call(dcontext_t *dcontext)
 
     RSTATS_INC(post_syscall);
     /* Every path below, failure included, is past the syscall. */
-    IF_NO_MEMQUERY(memcache_unmap_syscall_end(dcontext));
+    IF_NO_MEMQUERY(memcache_unmap_syscall_end(dcontext, true /*post_syscall*/));
 
     old_whereami = dcontext->whereami;
     dcontext->whereami = DR_WHERE_SYSCALL_HANDLER;

@@ -557,23 +557,27 @@ memcache_query_memory(const byte *pc, DR_PARAM_OUT dr_mem_info_t *out_info)
             uint from_os_prot;
             found = get_memory_info_from_os(pc, &from_os_base_pc, &from_os_size,
                                             &from_os_prot);
-            ASSERT(found);
+            /* While the cache is stale, a hit DR created or checked earlier in the
+             * window can be one the app has since unmapped natively (see above).
+             */
+            ASSERT(found || memcache_hit_may_be_stale());
             /* we merge adjacent identical-prot image sections: .bss into .data,
              * DR's various data segments, etc., so that mismatch is ok.
              */
-            if ((from_os_prot == info->prot ||
-                 /* allow maps to have +x (PR 213256)
-                  * +x may be caused by READ_IMPLIES_EXEC set in personality flag (i#262)
-                  */
-                 (from_os_prot & (~MEMPROT_EXEC)) ==
-                     info->prot
-                         /* DrMem#1778, i#1861: we have fake flags */
-                         IF_LINUX(||
-                                  (from_os_prot & (~MEMPROT_META_FLAGS)) ==
-                                      (info->prot & (~MEMPROT_META_FLAGS)))) &&
-                ((info->type == DR_MEMTYPE_IMAGE && from_os_base_pc >= start &&
-                  from_os_size <= (end - start)) ||
-                 (from_os_base_pc == start && from_os_size == (end - start)))) {
+            if (!found ||
+                ((from_os_prot == info->prot ||
+                  /* allow maps to have +x (PR 213256)
+                   * +x may be caused by READ_IMPLIES_EXEC set in personality flag (i#262)
+                   */
+                  (from_os_prot & (~MEMPROT_EXEC)) ==
+                      info->prot
+                          /* DrMem#1778, i#1861: we have fake flags */
+                          IF_LINUX(||
+                                   (from_os_prot & (~MEMPROT_META_FLAGS)) ==
+                                       (info->prot & (~MEMPROT_META_FLAGS)))) &&
+                 ((info->type == DR_MEMTYPE_IMAGE && from_os_base_pc >= start &&
+                   from_os_size <= (end - start)) ||
+                  (from_os_base_pc == start && from_os_size == (end - start))))) {
                 /* ok.  easier to think of forward logic. */
             } else {
                 /* /proc/maps could break/combine regions listed so region bounds as
