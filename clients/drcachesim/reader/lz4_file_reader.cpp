@@ -104,5 +104,48 @@ file_reader_t<lz4_reader_t>::read_next_entry()
     return &entry_copy_;
 }
 
+/**************************************************
+ * lz4_reader_t specializations for record_file_reader_t.
+ */
+
+/* clang-format off */ /* (make vera++ newline-after-type check happy) */
+template <>
+/* clang-format on */
+record_file_reader_t<lz4_reader_t>::~record_file_reader_t()
+{
+    if (input_file_ != nullptr && input_file_->file != nullptr) {
+        delete input_file_->file;
+        input_file_->file = nullptr;
+    }
+}
+
+template <>
+bool
+record_file_reader_t<lz4_reader_t>::open_single_file(const std::string &path)
+{
+    auto file = new lz4_istream_t(path);
+    if (!*file) {
+        delete file;
+        return false;
+    }
+    VPRINT(this, 1, "Opened input file %s\n", path.c_str());
+    input_file_ = std::unique_ptr<lz4_reader_t>(new lz4_reader_t(file));
+    return true;
+}
+
+template <>
+bool
+record_file_reader_t<lz4_reader_t>::read_next_entry()
+{
+    trace_entry_t *entry = read_next_entry_common(input_file_.get(), &eof_);
+    if (entry == nullptr)
+        return false;
+    cur_entry_ = *entry;
+    VPRINT(this, 4, "Read from file: type=%s (%d), size=%d, addr=%zu\n",
+           trace_type_names[cur_entry_.type], cur_entry_.type, cur_entry_.size,
+           cur_entry_.addr);
+    return true;
+}
+
 } // namespace drmemtrace
 } // namespace dynamorio
