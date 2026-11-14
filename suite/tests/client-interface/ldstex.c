@@ -242,6 +242,70 @@ test_clrex(void)
 }
 
 /***************************************************************************
+ * Test the signal frame after completed store-exclusives: their status
+ * registers hold their statuses, not the values from before the stores.
+ */
+
+#    ifdef AARCH64
+void
+ldstex_fault_after_stex(int *counter);
+void
+ldstex_fault_after_stxp(int *counter);
+
+static void
+handle_after_stex_signal(int signal, siginfo_t *siginfo, ucontext_t *ucxt)
+{
+    sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+    if (sc->regs[5] > 1 || sc->regs[6] > 1) {
+        print("Error: store-exclusive statuses in the signal frame: 0x%lx 0x%lx\n",
+              sc->regs[5], sc->regs[6]);
+    }
+    sc->SC_XIP += 4; /* Skip the udf. */
+}
+
+static void
+test_fault_after_stex(void)
+{
+    intercept_signal(SIGILL, (handler_3_t)&handle_after_stex_signal, false);
+    int my_var = 42;
+    ldstex_fault_after_stex(&my_var);
+    /* The same with exclusive pairs, whose stores -ldstex2cas replaces with
+     * meta instructions only.
+     */
+    long long pair[2] __attribute__((aligned(16))) = { 42, 43 };
+    ldstex_fault_after_stxp((int *)pair);
+}
+#    endif
+
+/***************************************************************************
+ * Test that an exception return clears the monitor: a system call inlined in
+ * the cache, one DR intercepts, and a signal handler, each between a load-
+ * and a store-exclusive, make the store fail, as they do natively.
+ */
+
+#    ifdef AARCH64
+int
+ldstex_eret(int *counter);
+
+static void
+handle_eret_signal(int signal, siginfo_t *siginfo, ucontext_t *ucxt)
+{
+    sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
+    sc->SC_XIP += 4; /* Skip the udf. */
+}
+
+static void
+test_eret(void)
+{
+    intercept_signal(SIGILL, (handler_3_t)&handle_eret_signal, false);
+    int my_var = 42;
+    int succeeded = ldstex_eret(&my_var);
+    if (succeeded != 0 || my_var != 42)
+        print("Error in ldstex_eret: %d stores succeeded: %d\n", succeeded, my_var);
+}
+#    endif
+
+/***************************************************************************
  * Main.
  */
 
@@ -261,6 +325,10 @@ main(int argc, const char *argv[])
         test_shapes();
         test_faults();
         test_clrex();
+#    ifdef AARCH64
+        test_fault_after_stex();
+        test_eret();
+#    endif
         /* Notify client to flush and change modes. */
         NOP;
         NOP;
@@ -934,6 +1002,81 @@ GLOBAL_LABEL(FUNCNAME:)
 #undef FUNCNAME
 
 #ifdef AARCH64
+/* void ldstex_fault_after_stex(int *counter): two exclusive pairs, then a
+ * signal in the same block.
+ */
+#define FUNCNAME ldstex_fault_after_stex
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        /* Not statuses: the frame must show the stores' statuses instead. */
+        movz     x5, #0xbeef
+        movz     x6, #0xbeef
+        ldxr     w1, [x0]
+        stxr     w5, w1, [x0]
+        ldxr     w1, [x0]
+        stxr     w6, w1, [x0]
+        udf      #0x5b
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+
+/* void ldstex_fault_after_stxp(int *counter): the same with 4-byte exclusive
+ * pairs.
+ */
+#define FUNCNAME ldstex_fault_after_stxp
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        movz     x5, #0xbeef
+        movz     x6, #0xbeef
+        ldxp     w1, w2, [x0]
+        stxp     w5, w1, w2, [x0]
+        ldxp     w1, w2, [x0]
+        stxp     w6, w1, w2, [x0]
+        udf      #0x5b
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+
+/* int ldstex_eret(int *counter): returns how many of the three stores
+ * succeeded.
+ */
+#define FUNCNAME ldstex_eret
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        mov      x5, x0
+        mov      w6, #0
+        /* getpid: an ignorable system call, inlined in the cache. */
+        ldxr     w1, [x5]
+        add      w2, w1, #0x1
+        mov      x8, #172
+        svc      #0
+        stxr     w3, w2, [x5]
+        eor      w3, w3, #0x1
+        add      w6, w6, w3
+        /* rt_sigprocmask(SIG_BLOCK, NULL, NULL, 8): one DR intercepts. */
+        ldxr     w1, [x5]
+        add      w2, w1, #0x1
+        mov      x0, #0
+        mov      x1, #0
+        mov      x2, #0
+        mov      x3, #8
+        mov      x8, #135
+        svc      #0
+        stxr     w3, w2, [x5]
+        eor      w3, w3, #0x1
+        add      w6, w6, w3
+        /* A signal: the handler skips the udf. */
+        ldxr     w1, [x5]
+        add      w2, w1, #0x1
+        udf      #0x5a
+        stxr     w3, w2, [x5]
+        eor      w3, w3, #0x1
+        add      w6, w6, w3
+        mov      w0, w6
+        ret
+        END_FUNC(FUNCNAME)
+#undef FUNCNAME
+
 /* int ldstex_inc32_with_xzr(two_counters_t *counter)
  */
 #define FUNCNAME ldstex_inc32_with_xzr

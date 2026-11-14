@@ -504,3 +504,10 @@ badf03fe : subps x30, sp, sp                         : subps  %sp %sp -> %x30
 4e9daf9b : usmmla v27.4s, v28.16b, v29.16b           : usmmla %q27 %q28 %q29 $0x00 -> %q27
 4e9fafff : usmmla v31.4s, v31.16b, v31.16b           : usmmla %q31 %q31 %q31 $0x00 -> %q31
 
+
+# FMLA/FMLS/FMULX (by element), half-precision scalar
+5f001043 : fmla h3, h2, v0.h[0]                  : fmla   %h3 %h2 %q0 $0x00 $0x01 -> %h3
+5f005135 : fmls h21, h9, v0.h[0]                 : fmls   %h21 %h9 %q0 $0x00 $0x01 -> %h21
+7f0093ff : fmulx h31, h31, v0.h[0]               : fmulx  %h31 %q0 $0x00 $0x01 -> %h31
+1ee121c8 : fcmp h14, #0.0                        : 1ee021c8 : fcmp   %h14 $0.000000
+1ee32098 : fcmpe h4, #0.0                        : 1ee02098 : fcmpe  %h4 $0.000000

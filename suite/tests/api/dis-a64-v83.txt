@@ -841,3 +841,8 @@ dac143fe : xpaci x30                                 : xpaci  %x30 -> %x30
 # XPACLRI  (XPACLRI-R-auth)
 d50320ff : xpaclri                                   : xpaclri %x30 -> %x30
 
+
+# FCADD/FCMLA <Vd>.2D
+6ec0e4be : fcadd v30.2d, v5.2d, v0.2d, #90       : fcadd  %q30 %q5 %q0 $0x005a $0x03 -> %q30
+6ec0c475 : fcmla v21.2d, v3.2d, v0.2d, #0        : fcmla  %q21 %q3 %q0 $0x0000 $0x03 -> %q21
+6ec0d475 : fcmla v21.2d, v3.2d, v0.2d, #180      : fcmla  %q21 %q3 %q0 $0x00b4 $0x03 -> %q21
