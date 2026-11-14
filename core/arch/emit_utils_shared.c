@@ -5034,7 +5034,12 @@ emit_fcache_enter_gonative(dcontext_t *dcontext, generated_code_t *code, byte *p
     APP(&ilist,
         XINST_CREATE_load(dcontext, opnd_create_reg(DR_REG_R12),
                           OPND_CREATE_MEMPTR(DR_REG_SP, -2 * XSP_SZ)));
-    APP(&ilist, INSTR_CREATE_br(dcontext, opnd_create_reg(DR_REG_R12)));
+    /* RET, not BR: the target is an arbitrary app pc (e.g. just after a syscall
+     * instruction), not a landing pad, and a BR to it from our unguarded gencode
+     * sets PSTATE.BTYPE, so in a PROT_BTI page (a BTI-built libc, as on Fedora)
+     * the app would fault with SIGILL.  RET leaves BTYPE zero.
+     */
+    APP(&ilist, INSTR_CREATE_ret(dcontext, opnd_create_reg(DR_REG_R12)));
 #    else
     APP(&ilist,
         INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_PC),
