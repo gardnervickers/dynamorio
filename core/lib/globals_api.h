@@ -111,7 +111,9 @@
 #        else
 #            define inline __inline__
 #        endif
-#        ifndef DR_DO_NOT_DEFINE_bool
+/* C23 makes bool a keyword (GCC 15 and later default to it). */
+#        if !defined(DR_DO_NOT_DEFINE_bool) && \
+            !(defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L)
 #            ifdef DR__Bool_EXISTS
 /* prefer _Bool as it avoids truncation casting non-zero to zero */
 typedef _Bool bool;
