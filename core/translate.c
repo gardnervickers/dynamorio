@@ -205,6 +205,17 @@ instr_is_rseq_mangling(dcontext_t *dcontext, instr_t *inst)
     if (instr_get_opcode(inst) == OP_mrs &&
         opnd_get_reg(instr_get_src(inst, 0)) == LIB_SEG_TLS)
         return true;
+    /* mangle_reads_thread_register() replaces that mrs with a load of the app's
+     * thread pointer from our TLS.
+     */
+    if (instr_get_opcode(inst) == OP_ldr && opnd_is_reg(instr_get_dst(inst, 0)) &&
+        reg_is_gpr(opnd_get_reg(instr_get_dst(inst, 0))) &&
+        opnd_is_base_disp(instr_get_src(inst, 0)) &&
+        opnd_get_base(instr_get_src(inst, 0)) == dr_reg_stolen &&
+        opnd_get_index(instr_get_src(inst, 0)) == DR_REG_NULL &&
+        opnd_get_disp(instr_get_src(inst, 0)) ==
+            os_tls_offset(os_get_app_tls_base_offset(TLS_REG_LIB)))
+        return true;
     if (instr_get_opcode(inst) == OP_movz || instr_get_opcode(inst) == OP_movk)
         return true;
     if (instr_get_opcode(inst) == OP_strh && opnd_is_base_disp(instr_get_dst(inst, 0)) &&
