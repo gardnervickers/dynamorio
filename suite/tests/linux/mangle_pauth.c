@@ -81,6 +81,22 @@ test_blraa(bool trigger_fault);
 void
 test_blrab(bool trigger_fault);
 
+/* Variants whose modifier register is x2 (DR's IBL target register) or x28 (DR's
+ * default stolen register), neither of which holds its app value when DR mangles
+ * the branch.
+ */
+void
+test_braa_mod_x2(bool trigger_fault);
+
+void
+test_blrab_mod_x2(bool trigger_fault);
+
+void
+test_brab_mod_x28(bool trigger_fault);
+
+void
+test_blraa_mod_x28(bool trigger_fault);
+
 uintptr_t
 strip_pac(uintptr_t ptr);
 
@@ -138,18 +154,22 @@ handle_signal(int signal, siginfo_t *siginfo, ucontext_t *ucxt)
 int
 main(int argc, const char *argv[])
 {
-#    define FOR_EACH_TEST(M) \
-        do {                 \
-            M(retaa);        \
-            M(retab);        \
-            M(braaz);        \
-            M(brabz);        \
-            M(braa);         \
-            M(brab);         \
-            M(blraaz);       \
-            M(blrabz);       \
-            M(blraa);        \
-            M(blrab);        \
+#    define FOR_EACH_TEST(M)  \
+        do {                  \
+            M(retaa);         \
+            M(retab);         \
+            M(braaz);         \
+            M(brabz);         \
+            M(braa);          \
+            M(brab);          \
+            M(blraaz);        \
+            M(blrabz);        \
+            M(blraa);         \
+            M(blrab);         \
+            M(braa_mod_x2);   \
+            M(blrab_mod_x2);  \
+            M(brab_mod_x28);  \
+            M(blraa_mod_x28); \
         } while (0)
 
 #    define NON_FAULT_TEST(instr_name)                \
@@ -365,6 +385,71 @@ GLOBAL_LABEL(FUNCNAME:)
 LOCAL_LABEL(branch_instr):
         blrab   BRANCH_TARGET_REG, MODIFIER_REG
         ldr     x30, [sp], #16
+        ret
+#undef FUNCNAME
+
+#define FUNCNAME test_braa_mod_x2
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        adr     BRANCH_TARGET_REG, LOCAL_LABEL(branch_target)
+        SAVE_BRANCH_TARGET_ADDR(BRANCH_TARGET_REG, TMP1_REG)
+        SAVE_BRANCH_INSTR_ADDR(LOCAL_LABEL(branch_instr), TMP1_REG, TMP2_REG)
+        mov     x2, #42
+        pacia   BRANCH_TARGET_REG, x2
+        CORRUPT_ADDR_IF_NEEDED(BRANCH_TARGET_REG, TRIGGER_FAULT_ARG_REG)
+LOCAL_LABEL(branch_instr):
+        braa    BRANCH_TARGET_REG, x2
+LOCAL_LABEL(branch_target):
+        ret
+#undef FUNCNAME
+
+#define FUNCNAME test_blrab_mod_x2
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        AARCH64_ADRP_GOT(GLOBAL_REF(dummy_func), BRANCH_TARGET_REG)
+        SAVE_BRANCH_TARGET_ADDR(BRANCH_TARGET_REG, TMP1_REG)
+        SAVE_BRANCH_INSTR_ADDR(LOCAL_LABEL(branch_instr), TMP1_REG, TMP2_REG)
+        mov     x2, #42
+        pacib   BRANCH_TARGET_REG, x2
+        CORRUPT_ADDR_IF_NEEDED(BRANCH_TARGET_REG, TRIGGER_FAULT_ARG_REG)
+        str     x30, [sp, #-16]!
+LOCAL_LABEL(branch_instr):
+        blrab   BRANCH_TARGET_REG, x2
+        ldr     x30, [sp], #16
+        ret
+#undef FUNCNAME
+
+/* x28 is callee-saved.  On a fault we longjmp out, which restores it. */
+#define FUNCNAME test_brab_mod_x28
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        str     x28, [sp, #-16]!
+        adr     BRANCH_TARGET_REG, LOCAL_LABEL(branch_target)
+        SAVE_BRANCH_TARGET_ADDR(BRANCH_TARGET_REG, TMP1_REG)
+        SAVE_BRANCH_INSTR_ADDR(LOCAL_LABEL(branch_instr), TMP1_REG, TMP2_REG)
+        mov     x28, #42
+        pacib   BRANCH_TARGET_REG, x28
+        CORRUPT_ADDR_IF_NEEDED(BRANCH_TARGET_REG, TRIGGER_FAULT_ARG_REG)
+LOCAL_LABEL(branch_instr):
+        brab    BRANCH_TARGET_REG, x28
+LOCAL_LABEL(branch_target):
+        ldr     x28, [sp], #16
+        ret
+#undef FUNCNAME
+
+#define FUNCNAME test_blraa_mod_x28
+        DECLARE_FUNC_SEH(FUNCNAME)
+GLOBAL_LABEL(FUNCNAME:)
+        stp     x28, x30, [sp, #-16]!
+        AARCH64_ADRP_GOT(GLOBAL_REF(dummy_func), BRANCH_TARGET_REG)
+        SAVE_BRANCH_TARGET_ADDR(BRANCH_TARGET_REG, TMP1_REG)
+        SAVE_BRANCH_INSTR_ADDR(LOCAL_LABEL(branch_instr), TMP1_REG, TMP2_REG)
+        mov     x28, #42
+        pacia   BRANCH_TARGET_REG, x28
+        CORRUPT_ADDR_IF_NEEDED(BRANCH_TARGET_REG, TRIGGER_FAULT_ARG_REG)
+LOCAL_LABEL(branch_instr):
+        blraa   BRANCH_TARGET_REG, x28
+        ldp     x28, x30, [sp], #16
         ret
 #undef FUNCNAME
 

@@ -24,6 +24,7 @@ Thread .* counts:
      .* timestamp \+ cpuid markers
 .*
 Prefetch operation frequencies:
+           3 prefetch
            2 prefetch_read_l1
            4 prefetch_read_l2
            6 prefetch_read_l3

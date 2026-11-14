@@ -835,6 +835,53 @@ test_cond()
     ASSERT(opnd_get_cond(OPND_CREATE_INT(0b1111)) == DR_PRED_NV);
 }
 
+/* Index operands and name lookups that used to misbehave (no output: these
+ * only assert).
+ */
+static void
+test_index_defaults_and_names(void *drcontext)
+{
+    dr_mcontext_t mc = {
+        .size = sizeof(mc), .flags = DR_MC_ALL, .r0 = 0x1000, .r1 = 0x20
+    };
+    opnd_t memref;
+
+    /* DR_EXTEND_DEFAULT shares UXTB's value but must mean LSL for an index:
+     * [x0, x1] = 0x1000 + 0x20.
+     */
+    memref = opnd_create_base_disp_aarch64(DR_REG_X0, DR_REG_X1, DR_EXTEND_DEFAULT, false,
+                                           0, 0, OPSZ_8);
+    ASSERT(opnd_compute_address(memref, &mc) == (app_pc)0x1020);
+
+    /* The cross-platform creator's scale shifts the index: [x0, x1, lsl #3]. */
+    memref = opnd_create_base_disp(DR_REG_X0, DR_REG_X1, 8, 0, OPSZ_8);
+    ASSERT(opnd_compute_address(memref, &mc) == (app_pc)0x1100);
+    /* ...and that is what it encodes as. */
+    instr_t *ldr = INSTR_CREATE_ldr(drcontext, opnd_create_reg(DR_REG_X2), memref);
+    uint enc = 0;
+    ASSERT(instr_encode(drcontext, ldr, (byte *)&enc) != NULL);
+    ASSERT(enc == 0xf8617802); /* ldr x2, [x0, x1, lsl #3] */
+    instr_destroy(drcontext, ldr);
+
+    /* Out-of-range ids name nothing rather than reading past the tables. */
+    ASSERT(strcmp(get_register_name((reg_id_t)(DR_REG_AFTER_LAST_VALID_ENUM + 5)),
+                  "<invalid>") == 0);
+    ASSERT(strcmp(decode_opcode_name(OP_LAST + 10), "<invalid>") == 0);
+    ASSERT(strcmp(decode_opcode_name(-1), "<invalid>") == 0);
+    ASSERT(strcmp(instr_get_isa_feature_name(100000), "<invalid>") == 0);
+
+    /* A client-built instr with a vector address but no governing predicate:
+     * no address, and no crash.
+     */
+    instr_t *gather = instr_create_1dst_1src(
+        drcontext, OP_ld1d, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_8),
+        opnd_create_vector_base_disp_aarch64(DR_REG_X0, DR_REG_Z1, OPSZ_8, DR_EXTEND_UXTX,
+                                             false, 0, 0, OPSZ_8, 0));
+    app_pc addr;
+    ASSERT(!instr_compute_address_ex(gather, &mc, 0, &addr, NULL));
+    instr_destroy(drcontext, gather);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -855,6 +902,8 @@ main(int argc, char *argv[])
     test_reg_is_simd();
 
     test_cond();
+
+    test_index_defaults_and_names(drcontext);
 
     printf("all done\n");
     return 0;

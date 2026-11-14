@@ -98,6 +98,58 @@ test_mov_instr_addr(void)
 #endif
 }
 
+/* Encodes a mov of a label address whose final address differs from the encode
+ * estimate in a halfword which is zero in the estimate, and checks that the
+ * movz/movk sequence still produces the final address.
+ */
+static void
+test_mov_instr_addr_estimate(ptr_uint_t estimate, ptr_uint_t final_pc)
+{
+    byte buf[256];
+    instrlist_t *ilist = instrlist_create(GD);
+    instr_t *label = INSTR_CREATE_label(GD);
+    instrlist_insert_mov_instr_addr(GD, label, (byte *)estimate,
+                                    opnd_create_reg(DR_REG_X0), ilist, NULL, NULL, NULL);
+    /* Put the label some distance after the mov. */
+    for (int i = 0; i < 8; i++)
+        instrlist_append(ilist, INSTR_CREATE_nop(GD));
+    instrlist_append(ilist, label);
+    instrlist_append(ilist, XINST_CREATE_return(GD));
+    byte *end = instrlist_encode_to_copy(GD, ilist, buf, (byte *)final_pc,
+                                         buf + sizeof(buf), true);
+    ASSERT(end != NULL);
+    /* The label is right before the final 4-byte return. */
+    ptr_uint_t label_addr = final_pc + (end - buf) - 4;
+
+    /* Interpret the movz/movk sequence writing x0. */
+    ptr_uint_t x0 = 0;
+    byte *pc = buf;
+    instr_t instr;
+    instr_init(GD, &instr);
+    while (pc < end) {
+        instr_reset(GD, &instr);
+        pc = decode(GD, pc, &instr);
+        ASSERT(pc != NULL);
+        int opc = instr_get_opcode(&instr);
+        if (opc != OP_movz && opc != OP_movk)
+            break;
+        ASSERT(opnd_get_reg(instr_get_dst(&instr, 0)) == DR_REG_X0);
+        /* The sources are imm16, the LSL shift type, and the shift amount, preceded
+         * for OP_movk by the destination which it also reads.
+         */
+        int imm_idx = opc == OP_movz ? 0 : 1;
+        ptr_uint_t imm = opnd_get_immed_int(instr_get_src(&instr, imm_idx));
+        uint shift = opnd_get_immed_int(instr_get_src(&instr, imm_idx + 2));
+        if (opc == OP_movz)
+            x0 = imm << shift;
+        else
+            x0 = (x0 & ~((ptr_uint_t)0xffff << shift)) | (imm << shift);
+    }
+    instr_free(GD, &instr);
+    ASSERT(x0 == label_addr);
+    instrlist_clear_and_destroy(GD, ilist);
+}
+
 /* XXX: It would be nice to share some of this code w/ the other
  * platforms but we'd need cross-platform register references or keep
  * the encoded instr around and compare operands or sthg.
@@ -251,6 +303,15 @@ main()
     test_noalloc();
 
     test_mov_instr_addr();
+
+    /* The label crosses into a new 64K region, or a new 4G region, or a new
+     * 2^48 region, whose halfword is zero in the estimate.
+     */
+    test_mov_instr_addr_estimate(0xfff0, 0xfff0);
+    test_mov_instr_addr_estimate(0xfffffff0, 0xfffffff0);
+    test_mov_instr_addr_estimate(0xfffffffffff0, 0xfffffffffff0);
+    /* The estimate is a different address than the final address. */
+    test_mov_instr_addr_estimate(0x10000, 0x123456789abcfff0);
 
     test_categories();
 

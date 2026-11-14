@@ -47,6 +47,19 @@
 
 #include "ir_aarch64.h"
 
+TEST_INSTR(dsbnxs)
+{
+    /* Testing DSB <option>nXS */
+    TEST_LOOP_EXPECT(
+        dsbnxs, 4, INSTR_CREATE_dsbnxs(dc, opnd_create_immed_uint(i, OPSZ_2b)), {
+            EXPECT_DISASSEMBLY("dsbnxs $0x00", "dsbnxs $0x01", "dsbnxs $0x02",
+                               "dsbnxs $0x03");
+            EXPECT_TRUE(instr_num_srcs(instr) == 1 && instr_num_dsts(instr) == 0);
+            EXPECT_FALSE(instr_reads_memory(instr));
+            EXPECT_FALSE(instr_writes_memory(instr));
+        });
+}
+
 TEST_INSTR(wfet)
 {
     /* Testing WFET <Xt> */
@@ -76,6 +89,9 @@ main(int argc, char *argv[])
     instr_t *instr;
 
     enable_all_test_cpu_features();
+
+    /* FEAT_XS */
+    RUN_INSTR_TEST(dsbnxs);
 
     /* FEAT_WFxT */
     RUN_INSTR_TEST(wfet);
