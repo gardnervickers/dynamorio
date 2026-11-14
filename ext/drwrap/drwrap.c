@@ -73,12 +73,13 @@ static uint verbose = 0;
 
 /* We rely on being able to clobber this register at call sites. */
 /* At return, we assume we can clobber caller-saved regs not used for return values. */
+/* R1 and X1 hold the high half of a double-width integer return value. */
 #ifdef ARM
 #    define CALL_POINT_SCRATCH_REG DR_REG_R12
-#    define RETURN_POINT_SCRATCH_REG DR_REG_R1
+#    define RETURN_POINT_SCRATCH_REG DR_REG_R12
 #elif defined(AARCH64)
 #    define CALL_POINT_SCRATCH_REG DR_REG_X12
-#    define RETURN_POINT_SCRATCH_REG DR_REG_X1
+#    define RETURN_POINT_SCRATCH_REG DR_REG_X12
 #elif defined(RISCV64)
 /* FIXME i#3544: Check if T6 is valid */
 #    define CALL_POINT_SCRATCH_REG DR_REG_T6

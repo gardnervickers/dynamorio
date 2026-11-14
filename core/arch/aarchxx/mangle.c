@@ -224,18 +224,26 @@ insert_save_or_restore_gpr_simd_registers(
 static void
 insert_save_or_restore_svep_registers(
     dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr, bool *reg_skip,
-    reg_id_t base_reg, bool save,
+    reg_id_t base_reg, bool save, bool handle_ffr,
     opnd_t (*get_mem_opnd)(uint base_reg, bool is_single_reg, reg_type_t rtype,
                            uint num_saved, callee_info_t *ci),
     callee_info_t *ci)
 {
     uint i, saved_regs = 0;
     for (i = 0; i < MCXT_NUM_SVEP_SLOTS; i++) {
-        if (reg_skip != NULL && reg_skip[MCXT_NUM_SIMD_SVE_SLOTS + i])
+        /* FFR goes through P15, so P15 must be saved and restored with it even
+         * when the callee does not use P15.
+         */
+        if (reg_skip != NULL && reg_skip[MCXT_NUM_SIMD_SVE_SLOTS + i] &&
+            !(handle_ffr && i == 15))
             continue;
 
-        opnd_t mem =
-            get_mem_opnd(base_reg, /*is_single_reg=*/true, SVE_PREG_TYPE, saved_regs, ci);
+        /* priv_mcontext_t holds each SIMD register in its own slot, so with
+         * skipped registers the slot is still the register number, as for the Q
+         * registers in insert_save_or_restore_gpr_simd_registers().
+         */
+        opnd_t mem = get_mem_opnd(base_reg, /*is_single_reg=*/true, SVE_PREG_TYPE,
+                                  ci == NULL ? i : saved_regs, ci);
         /* disp should never be greater than MAX_SVE_STR_OFFSET because it
          * is the immediate multiplied by the current vector register size
          * in bytes: STR <Pn>, [<Xn|SP>{, #<imm>, MUL VL}] and we only go up
@@ -264,8 +272,9 @@ insert_save_or_restore_sve_registers(
         if (reg_skip != NULL && reg_skip[i])
             continue;
 
-        opnd_t mem =
-            get_mem_opnd(base_reg, /*is_single_reg=*/true, SVE_ZREG_TYPE, saved_regs, ci);
+        /* One slot per register, as for the predicates below. */
+        opnd_t mem = get_mem_opnd(base_reg, /*is_single_reg=*/true, SVE_ZREG_TYPE,
+                                  ci == NULL ? i : saved_regs, ci);
         /* disp should never be greater than MAX_SVE_STR_OFFSET because it
          * is the immediate multiplied by the current vector register size
          * in bytes: STR <Zt>, [<Xn|SP>{, #<imm>, MUL VL}] and we only go up
@@ -300,7 +309,7 @@ insert_save_or_restore_sve_registers(
     // SVE P and FFR registers.
     if (save) {
         insert_save_or_restore_svep_registers(dcontext, ilist, instr, reg_skip, base_reg,
-                                              save, get_mem_opnd, ci);
+                                              save, handle_ffr, get_mem_opnd, ci);
 
         if (handle_ffr) {
             PRE(ilist, instr,
@@ -323,7 +332,7 @@ insert_save_or_restore_sve_registers(
         }
 
         insert_save_or_restore_svep_registers(dcontext, ilist, instr, reg_skip, base_reg,
-                                              save, get_mem_opnd, ci);
+                                              save, handle_ffr, get_mem_opnd, ci);
     }
 }
 

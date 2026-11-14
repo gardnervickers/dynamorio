@@ -342,7 +342,7 @@
 1000010011xxxxxx101xxxxxxxxxxxxx  n   910  SVE    ld1rh          z_h_0 : svememx6_h_5 p10_zer_lo.gov
 1000010011xxxxxx110xxxxxxxxxxxxx  n   910  SVE    ld1rh          z_s_0 : svememx6_h_5 p10_zer_lo.gov
 1000010011xxxxxx111xxxxxxxxxxxxx  n   910  SVE    ld1rh          z_d_0 : svememx6_h_5 p10_zer_lo.gov
-10100100001xxxxx000xxxxxxxxxxxxx  n   947  SVE   ld1rob          z_b_0 : svemem_gpr_shf p10_zer_lo.gov
+10100100001xxxxx000xxxxxxxxxxxxx  n   947  F64MM  ld1rob          z_b_0 : svemem_gpr_shf p10_zer_lo.gov
 101001000010xxxx001xxxxxxxxxxxxx  n   947  F64MM  ld1rob          z_b_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
 10100101101xxxxx000xxxxxxxxxxxxx  n   1230 F64MM  ld1rod          z_d_0 : svemem_gpr_shf p10_zer_lo.gov
 101001011010xxxx001xxxxxxxxxxxxx  n   1230 F64MM  ld1rod          z_d_0 : svemem_ssz_gpr_simm4 p10_zer_lo.gov
@@ -849,6 +849,6 @@
 00000101xx10xxxx0100000xxxx0xxxx  n   565  SVE     zip1  p_size_bhsd_0 : p_size_bhsd_5 p_size_bhsd_16
 00000101xx1xxxxx011000xxxxxxxxxx  n   565  SVE     zip1  z_size_bhsd_0 : z_size_bhsd_5 z_size_bhsd_16
 00000101101xxxxx000000xxxxxxxxxx  n   565  F64MM    zip1          z_q_0 : z_q_5 z_q_16
-00000101101xxxxx000001xxxxxxxxxx  n   566  SVE     zip2          z_q_0 : z_q_5 z_q_16
+00000101101xxxxx000001xxxxxxxxxx  n   566  F64MM   zip2          z_q_0 : z_q_5 z_q_16
 00000101xx10xxxx0100010xxxx0xxxx  n   566  SVE     zip2  p_size_bhsd_0 : p_size_bhsd_5 p_size_bhsd_16
 00000101xx1xxxxx011001xxxxxxxxxx  n   566  SVE     zip2  z_size_bhsd_0 : z_size_bhsd_5 z_size_bhsd_16

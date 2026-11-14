@@ -732,4 +732,12 @@ Language=English
 Application %1!s! (%2!s!). Unable to open required memory map %3!s!: error %4!d!.
 .
 
+MessageId =
+Severity = Error
+Facility = DRCore
+SymbolicName = MSG_SVE_VECTOR_LENGTH_UNSUPPORTED
+Language=English
+Application %1!s! (%2!s!). The SVE vector length of %3!s! bytes is not supported.
+.
+
 ;// ADD NEW MESSAGES HERE

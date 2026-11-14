@@ -390,26 +390,58 @@ def generate_encoder(patterns, opndsettab, opndtab, opc_props, curr_isa, next_is
 
     for opcode in sorted(case):
         c.append('    case OP_%s:' % opcode)
-        if opc_props[opcode].feat != 'BASE':
+        # An opcode's patterns can need different features (e.g. SVE's zip1 and
+        # F64MM's zip1 with Q elements), so check each pattern's own feature
+        # unless they all share one.
+        feats = set(p.feat for p in case[opcode])
+        per_pattern = len(feats) > 1
+        if not per_pattern and opc_props[opcode].feat != 'BASE':
+            # A later ISA's encoder can have a pattern for this opcode that needs
+            # another feature (e.g. SVE2's eor3 after SHA3's), so try it.
             c.append('#       if !defined(DR_HOST_NOT_TARGET) && !defined(STANDALONE_DECODER)')
             c.append('        if (!di->ignore_isa_features && !proc_has_feature(FEATURE_%s))'
                      % opc_props[opcode].feat)
-            c.append('            return ENCFAIL;')
+            c.append('            %s;' % ('break' if next_isa != '' else 'return ENCFAIL'))
             c.append('#       endif')
+
+        def feature_guard(pattern):
+            if per_pattern and pattern.feat != 'BASE':
+                return 'ENCODE_HAS_FEATURE(FEATURE_%s)' % pattern.feat
+            return None
+
         patterns = sorted(case[opcode], key=pattern_sort_key)
         last_pattern = patterns.pop()
         for pattern in patterns:
-            c.append('        enc = encode_opnds%s(pc, instr, 0x%08x, di);' % (
+            guard = feature_guard(pattern)
+            indent = '        '
+            if guard:
+                c.append('        if (%s) {' % guard)
+                indent = '            '
+            c.append(indent + 'enc = encode_opnds%s(pc, instr, 0x%08x, di);' % (
                 opnd_stem(pattern.generated_name), pattern.set_bits()))
-            c.append('        if (enc != ENCFAIL)')
-            c.append('            return enc;')
+            c.append(indent + 'if (enc != ENCFAIL)')
+            c.append(indent + '    return enc;')
+            if guard:
+                c.append('        }')
+        guard = feature_guard(last_pattern)
         # Fallthrough to call the next version of the encoder if defined.
         if next_isa != '':
-            c.append('        enc = encode_opnds%s(pc, instr, 0x%08x, di);' % (
+            indent = '        '
+            if guard:
+                c.append('        if (%s) {' % guard)
+                indent = '            '
+            c.append(indent + 'enc = encode_opnds%s(pc, instr, 0x%08x, di);' % (
                 last_pattern.generated_name, last_pattern.set_bits()))
-            c.append('        if (enc != ENCFAIL)')
-            c.append('            return enc;')
+            c.append(indent + 'if (enc != ENCFAIL)')
+            c.append(indent + '    return enc;')
+            if guard:
+                c.append('        }')
             c += ['        break;']
+        elif guard:
+            c.append('        if (!%s)' % guard)
+            c.append('            return ENCFAIL;')
+            c.append('        return encode_opnds%s(pc, instr, 0x%08x, di);' % (
+                last_pattern.generated_name, last_pattern.set_bits()))
         else:
             c.append('        return encode_opnds%s(pc, instr, 0x%08x, di);' % (
                 last_pattern.generated_name, last_pattern.set_bits()))

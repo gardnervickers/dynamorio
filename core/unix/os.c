@@ -240,6 +240,18 @@ char **our_environ;
 #    endif
 #endif
 
+#if defined(LINUX) && defined(AARCH64)
+#    ifndef PR_SVE_SET_VL
+#        define PR_SVE_SET_VL 50
+#    endif
+#    ifndef PR_SVE_SET_VL_ONEXEC
+#        define PR_SVE_SET_VL_ONEXEC (1 << 18)
+#    endif
+#    ifndef PR_SVE_VL_LEN_MASK
+#        define PR_SVE_VL_LEN_MASK 0xffff
+#    endif
+#endif
+
 #ifdef ANDROID
 /* Custom prctl flags specific to Android (xref i#1861) */
 #    define PR_SET_VMA 0x53564d41
@@ -5440,6 +5452,13 @@ ignorable_system_call_normalized(int num)
     if (num == SYS_prctl && DYNAMO_OPTION(kstats))
         return false;
 #endif
+#if defined(LINUX) && defined(AARCH64)
+    /* A prctl(PR_SVE_SET_VL) can change the vector length our context switches
+     * were generated for: see pre_system_call().
+     */
+    if (num == SYS_prctl && proc_has_feature(FEATURE_SVE))
+        return false;
+#endif
     switch (num) {
 #if defined(SYS_exit_group)
     case SYS_exit_group:
@@ -8733,13 +8752,41 @@ pre_system_call(dcontext_t *dcontext)
         }
         break;
     }
-#ifdef ANDROID
+#if defined(ANDROID) || (defined(LINUX) && defined(AARCH64))
     case SYS_prctl:
+#    if defined(LINUX) && defined(AARCH64)
+        /* Our context switches and our decoder assume the SVE vector length that
+         * we found at startup: the offsets of our SVE loads and stores scale with
+         * it.  A longer vector would be stored past the end of priv_mcontext_t's
+         * slots, and a shorter one in the wrong slots.  So we refuse to change it
+         * for this thread.  A change at the next execve is fine, as we start over
+         * there.
+         * XXX: We also refuse a length that the kernel would round to the current
+         * one; and we do not watch PTRACE_SETREGSET of NT_ARM_SVE or SME's
+         * streaming mode.
+         */
+        if ((int)sys_param(dcontext, 0) == PR_SVE_SET_VL &&
+            proc_has_feature(FEATURE_SVE)) {
+            const reg_t arg = sys_param(dcontext, 1);
+            if ((arg & PR_SVE_SET_VL_ONEXEC) == 0 &&
+                (arg & PR_SVE_VL_LEN_MASK) != proc_get_vector_length_bytes()) {
+                LOG(THREAD, LOG_SYSCALLS, 1,
+                    "refusing prctl(PR_SVE_SET_VL, " PFX "): vector length is %u\n",
+                    arg, proc_get_vector_length_bytes());
+                set_failure_return_val(dcontext, EINVAL);
+                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+                execute_syscall = false;
+                break;
+            }
+        }
+#    endif
+#    ifdef ANDROID
         dcontext->sys_param0 = sys_param(dcontext, 0);
         dcontext->sys_param1 = sys_param(dcontext, 1);
         dcontext->sys_param2 = sys_param(dcontext, 2);
         dcontext->sys_param3 = sys_param(dcontext, 3);
         dcontext->sys_param4 = sys_param(dcontext, 4);
+#    endif
         break;
 #endif
 #ifdef LINUX

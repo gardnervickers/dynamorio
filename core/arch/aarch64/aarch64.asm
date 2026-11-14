@@ -118,8 +118,8 @@ GLOBAL_LABEL(call_switch_stack:)
         str      x19, [sp, #16]
         /* Check mutex_to_free. */
         cbz      ARG4, call_dispatch_alt_stack_no_free
-        /* Release the mutex. */
-        str      wzr, [ARG4]
+        /* Release the mutex, ordering our stores to the stack it guards before it. */
+        stlr     wzr, [ARG4]
 call_dispatch_alt_stack_no_free:
         /* Copy ARG5 (return_on_return) to callee-save reg. */
         mov      w20, w4
@@ -385,10 +385,11 @@ cat_have_lock:
         /* free dstack and call the EXIT_DR_HOOK */
         CALLC1(GLOBAL_REF(dynamo_thread_stack_free_and_exit), x24) /* pass dstack */
 
-        /* give up initstack_mutex */
+        /* Give up initstack_mutex, with a store-release so that our uses of
+         * initstack above are complete before another thread can take it.
+         */
         AARCH64_ADRP_GOT(GLOBAL_REF(initstack_mutex), x0)
-        mov      x1, #0
-        str      x1, [x0]
+        stlr     wzr, [x0]
 
         /* dec exiting_thread_count (allows another thread to kill us) */
         AARCH64_ADRP_GOT(GLOBAL_REF(exiting_thread_count), x0)
@@ -398,8 +399,8 @@ cat_have_lock:
         mov      x0, x21 /* sys_arg1 */
         mov      x1, x22 /* sys_arg2 */
 #ifdef MACOS
-        mov      x3, x26  /* sys_arg3 */
-        mov      x4, x27  /* sys_arg4 */
+        mov      x2, x26  /* sys_arg3 */
+        mov      x3, x27  /* sys_arg4 */
 #endif
         mov      SYSNUM_REG, w20 /* sys_call */
 
@@ -412,9 +413,9 @@ cat_have_lock:
         /* void atomic_add(int *adr, int val) */
         DECLARE_FUNC(atomic_add)
 GLOBAL_LABEL(atomic_add:)
-1:      ldxr     w2, [x0]
+1:      ldaxr    w2, [x0]
         add      w2, w2, w1
-        stxr     w3, w2, [x0]
+        stlxr    w3, w2, [x0]
         cbnz     w3, 1b
         ret
 

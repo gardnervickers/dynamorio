@@ -2025,7 +2025,7 @@ d_r_mangle(dcontext_t *dcontext, instrlist_t *ilist, uint *flags DR_PARAM_INOUT,
 
 #ifdef AARCH64
         /* XXX i#5771: This may no longer be required when the issue is fixed. */
-        if (INTERNAL_OPTION(fake_ctr_dic))
+        if (INTERNAL_OPTION(fake_ctr_dic) && instr_is_app(instr))
             mangle_ctr_read(dcontext, ilist, instr);
 #endif
 

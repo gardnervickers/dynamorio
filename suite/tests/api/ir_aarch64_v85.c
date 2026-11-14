@@ -310,6 +310,7 @@ TEST_INSTR(st2g)
                                "st2g   %sp %sp $0x0000000000000ff0 -> (%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing ST2G    <Xt|SP>, [<Xn|SP>, #<simm>]! */
@@ -329,6 +330,7 @@ TEST_INSTR(st2g)
                 "st2g   %sp %sp $0x0000000000000ff0 -> +0x0ff0(%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing ST2G    <Xt|SP>, [<Xn|SP>, #<simm>] */
@@ -346,6 +348,7 @@ TEST_INSTR(st2g)
                              "st2g   %sp -> +0x0ff0(%sp)");
                          EXPECT_FALSE(instr_reads_memory(instr));
                          EXPECT_FALSE(instr_writes_memory(instr));
+                         EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
                      });
 }
 
@@ -370,6 +373,7 @@ TEST_INSTR(stg)
                                "stg    %sp %sp $0x0000000000000ff0 -> (%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing STG     <Xt|SP>, [<Xn|SP>, #<simm>]! */
@@ -389,6 +393,7 @@ TEST_INSTR(stg)
                 "stg    %sp %sp $0x0000000000000ff0 -> +0x0ff0(%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing STG     <Xt|SP>, [<Xn|SP>, #<simm>] */
@@ -406,6 +411,7 @@ TEST_INSTR(stg)
                              "stg    %sp -> +0x0ff0(%sp)");
                          EXPECT_FALSE(instr_reads_memory(instr));
                          EXPECT_FALSE(instr_writes_memory(instr));
+                         EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
                      });
 }
 

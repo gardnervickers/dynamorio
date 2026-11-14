@@ -2816,6 +2816,75 @@ TEST_INSTR(fcmge_sve_pred)
               opnd_create_reg_element_vector(Zn_six_offset_3[i], OPSZ_8));
 }
 
+#ifdef DR_HOST_NOT_TARGET
+#    define IF_HOST_NOT_TARGET_ELSE(x, y) x
+#else
+#    define IF_HOST_NOT_TARGET_ELSE(x, y) y
+#endif
+
+TEST_INSTR(sve_permutes_without_f64mm)
+{
+#ifndef STANDALONE_DECODER
+    /* Each of these opcodes has SVE patterns and an F64MM pattern for Q
+     * elements: without F64MM the SVE forms must still encode.
+     */
+    proc_set_feature(FEATURE_F64MM, false);
+#    define TEST_PERMUTE(op, expected)                                            \
+        TEST_LOOP(op, op##_sve_vector, 1, expected,                               \
+                  opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_4),              \
+                  opnd_create_reg_element_vector(DR_REG_Z1, OPSZ_4),              \
+                  opnd_create_reg_element_vector(DR_REG_Z2, OPSZ_4));             \
+        instr = INSTR_CREATE_##op##_sve_vector(                                   \
+            dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_16),               \
+            opnd_create_reg_element_vector(DR_REG_Z1, OPSZ_16),                   \
+            opnd_create_reg_element_vector(DR_REG_Z2, OPSZ_16));                  \
+        /* A cross-target build does not check features when encoding. */       \
+        if (IF_HOST_NOT_TARGET_ELSE(false, instr_is_encoding_possible(instr))) {  \
+            print(#op " with Q elements is encodable without F64MM\n");           \
+            *psuccess = false;                                                    \
+        }                                                                         \
+        instr_destroy(dc, instr);
+    TEST_PERMUTE(zip1, "zip1   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(zip2, "zip2   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(uzp1, "uzp1   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(uzp2, "uzp2   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(trn1, "trn1   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(trn2, "trn2   %z1.s %z2.s -> %z0.s");
+#    undef TEST_PERMUTE
+    proc_set_feature(FEATURE_F64MM, true);
+#endif
+}
+
+TEST_INSTR(fcmle_fcmlt_sve_pred)
+{
+    /* FCMLE and FCMLT with two vector registers are aliases:
+     *   FCMLE <Pd>.<Ts>, <Pg>/Z, <Zm>.<Ts>, <Zn>.<Ts>
+     *     == FCMGE <Pd>.<Ts>, <Pg>/Z, <Zn>.<Ts>, <Zm>.<Ts>
+     * and likewise FCMLT with FCMGT.
+     */
+    const char *expected_0_0[6] = {
+        "fcmge  %p0/z %z0.s %z0.s -> %p0.s",    "fcmge  %p2/z %z8.s %z7.s -> %p2.s",
+        "fcmge  %p3/z %z13.s %z12.s -> %p5.s",  "fcmge  %p5/z %z19.s %z18.s -> %p8.s",
+        "fcmge  %p6/z %z24.s %z23.s -> %p10.s", "fcmge  %p7/z %z31.s %z31.s -> %p15.s",
+    };
+    TEST_LOOP(fcmge, fcmle_sve_pred, 6, expected_0_0[i],
+              opnd_create_reg_element_vector(Pn_six_offset_0[i], OPSZ_4),
+              opnd_create_predicate_reg(Pn_half_six_offset_0[i], false),
+              opnd_create_reg_element_vector(Zn_six_offset_2[i], OPSZ_4),
+              opnd_create_reg_element_vector(Zn_six_offset_3[i], OPSZ_4));
+
+    const char *expected_1_0[6] = {
+        "fcmgt  %p0/z %z0.d %z0.d -> %p0.d",    "fcmgt  %p2/z %z8.d %z7.d -> %p2.d",
+        "fcmgt  %p3/z %z13.d %z12.d -> %p5.d",  "fcmgt  %p5/z %z19.d %z18.d -> %p8.d",
+        "fcmgt  %p6/z %z24.d %z23.d -> %p10.d", "fcmgt  %p7/z %z31.d %z31.d -> %p15.d",
+    };
+    TEST_LOOP(fcmgt, fcmlt_sve_pred, 6, expected_1_0[i],
+              opnd_create_reg_element_vector(Pn_six_offset_0[i], OPSZ_8),
+              opnd_create_predicate_reg(Pn_half_six_offset_0[i], false),
+              opnd_create_reg_element_vector(Zn_six_offset_2[i], OPSZ_8),
+              opnd_create_reg_element_vector(Zn_six_offset_3[i], OPSZ_8));
+}
+
 TEST_INSTR(fcmgt_sve_zero_pred)
 {
     /* Testing FCMGT   <Pd>.<Ts>, <Pg>/Z, <Zn>.<Ts>, #0.0 */
@@ -20748,6 +20817,8 @@ main(int argc, char *argv[])
     RUN_INSTR_TEST(fcmeq_sve_pred);
     RUN_INSTR_TEST(fcmge_sve_zero_pred);
     RUN_INSTR_TEST(fcmge_sve_pred);
+    RUN_INSTR_TEST(fcmle_fcmlt_sve_pred);
+    RUN_INSTR_TEST(sve_permutes_without_f64mm);
     RUN_INSTR_TEST(fcmgt_sve_zero_pred);
     RUN_INSTR_TEST(fcmgt_sve_pred);
     RUN_INSTR_TEST(fcmle_sve_zero_pred);

@@ -741,6 +741,26 @@ d_r_arch_init(void)
      */
     ASSERT(offsetof(local_state_extended_t, spill_space) == 0);
     ASSERT(offsetof(local_state_extended_t, table_space) == sizeof(spill_state_t));
+#if defined(AARCH64) && !defined(DR_HOST_NOT_TARGET)
+    /* Our context switches save each Z register to a dr_simd_t slot, and each P
+     * register to a dr_svep_t slot, with SVE loads and stores whose offsets
+     * scale with the vector length: so the length must divide the slot size.
+     * A longer vector would not fit, and other lengths (e.g. 48 bytes) cannot
+     * be encoded.
+     */
+    if (proc_has_feature(FEATURE_SVE)) {
+        const uint vl = proc_get_vector_length_bytes();
+        if (vl == 0 || vl > sizeof(dr_simd_t) || sizeof(dr_simd_t) % vl != 0) {
+            char vl_str[16];
+            snprintf(vl_str, BUFFER_SIZE_ELEMENTS(vl_str), "%u", vl);
+            NULL_TERMINATE_BUFFER(vl_str);
+            REPORT_FATAL_ERROR_AND_EXIT(SVE_VECTOR_LENGTH_UNSUPPORTED, 3,
+                                        get_application_name(), get_application_pid(),
+                                        vl_str);
+            ASSERT_NOT_REACHED();
+        }
+    }
+#endif
 #ifdef WINDOWS
     /* syscalls_init() should have already set the syscall_method so go ahead
      * and create the globlal_do_syscall now */

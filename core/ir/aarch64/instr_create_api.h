@@ -6534,9 +6534,12 @@
  * \param Pg   The governing predicate register, P (Predicate)
  * \param Zm   The first source vector register, Z (Scalable)
  * \param Zn   The second source vector register, Z (Scalable)
+ *
+ * FCMLE with two vector registers is an alias of FCMGE with the
+ * vector registers swapped, so this creates an #OP_fcmge instruction.
  */
 #define INSTR_CREATE_fcmle_sve_pred(dc, Pd, Pg, Zm, Zn) \
-    INSTR_PRED(instr_create_1dst_3src(dc, OP_fcmle, Pd, Pg, Zm, Zn), DR_PRED_MASKED)
+    INSTR_PRED(instr_create_1dst_3src(dc, OP_fcmge, Pd, Pg, Zn, Zm), DR_PRED_MASKED)
 
 /**
  * Creates a FCMLT instruction.
@@ -6550,9 +6553,12 @@
  * \param Pg   The governing predicate register, P (Predicate)
  * \param Zm   The first source vector register, Z (Scalable)
  * \param Zn   The second source vector register, Z (Scalable)
+ *
+ * FCMLT with two vector registers is an alias of FCMGT with the
+ * vector registers swapped, so this creates an #OP_fcmgt instruction.
  */
 #define INSTR_CREATE_fcmlt_sve_pred(dc, Pd, Pg, Zm, Zn) \
-    INSTR_PRED(instr_create_1dst_3src(dc, OP_fcmlt, Pd, Pg, Zm, Zn), DR_PRED_MASKED)
+    INSTR_PRED(instr_create_1dst_3src(dc, OP_fcmgt, Pd, Pg, Zn, Zm), DR_PRED_MASKED)
 
 /**
  * Creates a CMPEQ instruction.

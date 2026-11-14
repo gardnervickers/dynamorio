@@ -1237,8 +1237,13 @@ d_r_write_lock(read_write_lock_t *rw)
      */
     if (INTERNAL_OPTION(spin_yield_rwlock)) {
         d_r_mutex_lock(&rw->lock);
-        /* We have the lock so we do not need a load-acquire. */
-        while (rw->num_readers > 0) {
+        /* Holding the lock is not enough: a reader increments num_readers and
+         * then load-acquires our lock word, and we must load-acquire
+         * num_readers after our lock store in turn.  On AArch64 a plain load
+         * may be satisfied before the store-release that took the lock is
+         * visible, letting a reader and us both proceed.
+         */
+        while (atomic_aligned_read_int(&rw->num_readers) > 0) {
             /* contended write */
             DEADLOCK_AVOIDANCE_LOCK(&rw->lock, false, LOCK_NOT_OWNABLE);
             /* FIXME: last places where we yield instead of wait */
@@ -1250,9 +1255,10 @@ d_r_write_lock(read_write_lock_t *rw)
 
     d_r_mutex_lock(&rw->lock);
     /* We still do this in a loop, since the event signal doesn't guarantee
-       that num_readers is 0 when unblocked.
+       that num_readers is 0 when unblocked.  The load-acquire is needed for the
+       reason given above.
      */
-    while (rw->num_readers > 0) {
+    while (atomic_aligned_read_int(&rw->num_readers) > 0) {
         /* contended write */
         DEADLOCK_AVOIDANCE_LOCK(&rw->lock, false, LOCK_NOT_OWNABLE);
         rwlock_wait_contended_writer(rw);
@@ -1265,8 +1271,8 @@ d_r_write_trylock(read_write_lock_t *rw)
 {
     if (d_r_mutex_trylock(&rw->lock)) {
         ASSERT_NOT_TESTED();
-        /* We have the lock so we do not need a load-acquire. */
-        if (rw->num_readers == 0) {
+        /* See d_r_write_lock() for why this is a load-acquire. */
+        if (atomic_aligned_read_int(&rw->num_readers) == 0) {
             rw->writer = d_r_get_thread_id();
             return true;
         } else {

@@ -5604,6 +5604,12 @@ emit_special_ibl_xfer(dcontext_t *dcontext, byte *pc, generated_code_t *code, ui
     }
 
     APP(&ilist, XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG2), tgt));
+#ifdef AARCH64
+    /* We jump to the ibl through SCRATCH_REG1, and the ibl expects the app's value
+     * of it in its TLS slot, as an exit stub leaves it.
+     */
+    APP(&ilist, SAVE_TO_TLS(dcontext, SCRATCH_REG1, TLS_REG1_SLOT));
+#endif
 
     /* insert customized instructions right before xfer to ibl */
     if (custom_ilist != NULL)
