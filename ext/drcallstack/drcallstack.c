@@ -141,12 +141,19 @@ drcallstack_init_walk(dr_mcontext_t *mc, DR_PARAM_OUT drcallstack_walk_t **walk_
 #endif
 
     /* Set up libunwind.
-     * We'd prefer to use unw_init_local2() and pass UNW_INIT_SIGNAL_FRAME
-     * since the context we're examining is not our own, but unw_init_local2()
-     * is not available on older libunwind and as this build may be run on
-     * other machines we have to go with the lowest common denominator.
+     * mc->pc is the next instruction to execute (for a drwrap pre-callback, the
+     * callee's first instruction), not a return address.  Plain unw_init_local()
+     * looks up the unwind info for pc-1, which at a function entry is the
+     * preceding function's, so the first step uses the wrong CFI and can skip
+     * or misreport the real caller.
+     * UNW_INIT_SIGNAL_FRAME makes it use pc itself.  unw_init_local2() needs
+     * libunwind 1.3+.
      */
+#if UNW_VERSION_MAJOR > 1 || (UNW_VERSION_MAJOR == 1 && UNW_VERSION_MINOR >= 3)
+    unw_init_local2(&walk->cursor, &walk->uc, UNW_INIT_SIGNAL_FRAME);
+#else
     unw_init_local(&walk->cursor, &walk->uc);
+#endif
 
     return DRCALLSTACK_SUCCESS;
 }

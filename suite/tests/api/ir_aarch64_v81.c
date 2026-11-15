@@ -293,9 +293,9 @@ TEST_INSTR(stllr)
     reg_id_t Rt_0_0[3] = { DR_REG_W0, DR_REG_W10, DR_REG_W30 };
     reg_id_t Rn_0_0[3] = { DR_REG_X0, DR_REG_X10, DR_REG_SP };
     const char *expected_0_0[3] = {
-        "stllr  (%x0)[4byte] -> %w0",
-        "stllr  (%x10)[4byte] -> %w10",
-        "stllr  (%sp)[4byte] -> %w30",
+        "stllr  %w0 -> (%x0)[4byte]",
+        "stllr  %w10 -> (%x10)[4byte]",
+        "stllr  %w30 -> (%sp)[4byte]",
     };
     for (int i = 0; i < 3; i++) {
         instr = INSTR_CREATE_stllr(
@@ -310,9 +310,9 @@ TEST_INSTR(stllr)
     reg_id_t Rt_1_0[3] = { DR_REG_X0, DR_REG_X10, DR_REG_X30 };
     reg_id_t Rn_1_0[3] = { DR_REG_X0, DR_REG_X10, DR_REG_SP };
     const char *expected_1_0[3] = {
-        "stllr  (%x0)[8byte] -> %x0",
-        "stllr  (%x10)[8byte] -> %x10",
-        "stllr  (%sp)[8byte] -> %x30",
+        "stllr  %x0 -> (%x0)[8byte]",
+        "stllr  %x10 -> (%x10)[8byte]",
+        "stllr  %x30 -> (%sp)[8byte]",
     };
     for (int i = 0; i < 3; i++) {
         instr = INSTR_CREATE_stllr(
@@ -331,9 +331,9 @@ TEST_INSTR(stllrb)
     reg_id_t Rt_0_0[3] = { DR_REG_W0, DR_REG_W10, DR_REG_W30 };
     reg_id_t Rn_0_0[3] = { DR_REG_X0, DR_REG_X10, DR_REG_SP };
     const char *expected_0_0[3] = {
-        "stllrb (%x0)[1byte] -> %w0",
-        "stllrb (%x10)[1byte] -> %w10",
-        "stllrb (%sp)[1byte] -> %w30",
+        "stllrb %w0 -> (%x0)[1byte]",
+        "stllrb %w10 -> (%x10)[1byte]",
+        "stllrb %w30 -> (%sp)[1byte]",
     };
     for (int i = 0; i < 3; i++) {
         instr = INSTR_CREATE_stllrb(
@@ -352,9 +352,9 @@ TEST_INSTR(stllrh)
     reg_id_t Rt_0_0[3] = { DR_REG_W0, DR_REG_W10, DR_REG_W30 };
     reg_id_t Rn_0_0[3] = { DR_REG_X0, DR_REG_X10, DR_REG_SP };
     const char *expected_0_0[3] = {
-        "stllrh (%x0)[2byte] -> %w0",
-        "stllrh (%x10)[2byte] -> %w10",
-        "stllrh (%sp)[2byte] -> %w30",
+        "stllrh %w0 -> (%x0)[2byte]",
+        "stllrh %w10 -> (%x10)[2byte]",
+        "stllrh %w30 -> (%sp)[2byte]",
     };
     for (int i = 0; i < 3; i++) {
         instr = INSTR_CREATE_stllrh(

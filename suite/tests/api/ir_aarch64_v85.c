@@ -310,6 +310,7 @@ TEST_INSTR(st2g)
                                "st2g   %sp %sp $0x0000000000000ff0 -> (%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing ST2G    <Xt|SP>, [<Xn|SP>, #<simm>]! */
@@ -329,6 +330,7 @@ TEST_INSTR(st2g)
                 "st2g   %sp %sp $0x0000000000000ff0 -> +0x0ff0(%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing ST2G    <Xt|SP>, [<Xn|SP>, #<simm>] */
@@ -346,6 +348,7 @@ TEST_INSTR(st2g)
                              "st2g   %sp -> +0x0ff0(%sp)");
                          EXPECT_FALSE(instr_reads_memory(instr));
                          EXPECT_FALSE(instr_writes_memory(instr));
+                         EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
                      });
 }
 
@@ -370,6 +373,7 @@ TEST_INSTR(stg)
                                "stg    %sp %sp $0x0000000000000ff0 -> (%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing STG     <Xt|SP>, [<Xn|SP>, #<simm>]! */
@@ -389,6 +393,7 @@ TEST_INSTR(stg)
                 "stg    %sp %sp $0x0000000000000ff0 -> +0x0ff0(%sp) %sp");
             EXPECT_FALSE(instr_reads_memory(instr));
             EXPECT_FALSE(instr_writes_memory(instr));
+            EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
         });
 
     /* Testing STG     <Xt|SP>, [<Xn|SP>, #<simm>] */
@@ -406,6 +411,7 @@ TEST_INSTR(stg)
                              "stg    %sp -> +0x0ff0(%sp)");
                          EXPECT_FALSE(instr_reads_memory(instr));
                          EXPECT_FALSE(instr_writes_memory(instr));
+                         EXPECT_TRUE(instr_num_memory_write_access(instr) == 0);
                      });
 }
 
@@ -787,6 +793,15 @@ TEST_INSTR(xaflag)
     });
 }
 
+TEST_INSTR(sb)
+{
+    /* Testing SB */
+    TEST_LOOP_EXPECT(sb, 1, INSTR_CREATE_sb(dc), {
+        EXPECT_DISASSEMBLY("sb");
+        EXPECT_TRUE(instr_num_srcs(instr) == 0 && instr_num_dsts(instr) == 0);
+    });
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -836,6 +851,7 @@ main(int argc, char *argv[])
     /* FEAT_FlagM2 */
     RUN_INSTR_TEST(axflag);
     RUN_INSTR_TEST(xaflag);
+    RUN_INSTR_TEST(sb);
 
     print("All v8.5 tests complete.\n");
 #ifndef STANDALONE_DECODER

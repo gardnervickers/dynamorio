@@ -150,6 +150,19 @@ TEST_INSTR(eor3_sve)
               opnd_create_reg_element_vector(Zn_six_offset_2[i], OPSZ_8));
 }
 
+TEST_INSTR(eor3_sve_without_sha3)
+{
+    /* The encoder for SHA3's (Advanced SIMD) eor3 comes first: without SHA3 it
+     * must still let SVE2's eor3 be encoded.
+     */
+    proc_set_feature(FEATURE_SHA3, false);
+    TEST_LOOP(eor3, eor3_sve, 1, "eor3   %z5.d %z6.d %z7.d -> %z5.d",
+              opnd_create_reg_element_vector(DR_REG_Z5, OPSZ_8),
+              opnd_create_reg_element_vector(DR_REG_Z6, OPSZ_8),
+              opnd_create_reg_element_vector(DR_REG_Z7, OPSZ_8));
+    proc_set_feature(FEATURE_SHA3, true);
+}
+
 TEST_INSTR(fmlalb_sve)
 {
 
@@ -9233,6 +9246,7 @@ main(int argc, char *argv[])
     RUN_INSTR_TEST(bsl2n_sve);
     RUN_INSTR_TEST(bsl_sve);
     RUN_INSTR_TEST(eor3_sve);
+    RUN_INSTR_TEST(eor3_sve_without_sha3);
     RUN_INSTR_TEST(fmlalb_sve);
     RUN_INSTR_TEST(fmlalt_sve);
     RUN_INSTR_TEST(fmlslb_sve);

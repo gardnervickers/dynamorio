@@ -52,18 +52,23 @@ DECL_EXTERN(replace_native_xfer_target)
 #define FUNCNAME replace_native_xfer
         DECLARE_FUNC(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
-        push     {r0} /* save return value from replacement function */
-        /* put app retaddr into the slot we made above the 2 pushes */
+        /* Keep the replacement function's return value, which is in r0-r1 for a
+         * 64-bit result, across the calls below.  The 16-byte frame is r0, r1,
+         * the app return address, and padding to keep sp 8-byte aligned.
+         */
+        sub      sp, sp, #8
+        push     {r0, r1}
         blx      GLOBAL_REF(replace_native_xfer_app_retaddr)
-        push     {r0}
+        str      r0, [sp, #8]
 
         /* now get our target */
         blx      GLOBAL_REF(replace_native_xfer_target)
         mov      r3, r0
 
         /* restore regs and go to ibl */
-        pop      {lr}
-        pop      {r0}
+        pop      {r0, r1}
+        ldr      lr, [sp]
+        add      sp, sp, #8
         bx       r3
         /* never reached */
         bx       lr

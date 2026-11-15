@@ -248,9 +248,9 @@ dump_sigcontext(dcontext_t *dcontext, sigcontext_t *sc)
                 break;
             }
             default:
-                SYSLOG_INTERNAL_WARNING("%s %d Unknown section found in signal context "
-                                        "with magic number 0x%x",
-                                        __func__, __LINE__, next_head->magic);
+                /* E.g. TPIDR2, ZA, FPMR: state we do not track. */
+                LOG(THREAD, LOG_ASYNCH, 2, "\tskipping record with magic 0x%x\n",
+                    next_head->magic);
                 break;
             }
             offset += next_head->size;
@@ -300,8 +300,6 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
         while ((next_head = sigcontext_record_at(sc_full->sc->__reserved, offset,
                                                  sizeof(sc_full->sc->__reserved))) !=
                NULL) {
-            ASSERT(next_head->magic == ESR_MAGIC || next_head->magic == SVE_MAGIC ||
-                   next_head->magic == EXTRA_MAGIC);
             switch (next_head->magic) {
             case ESR_MAGIC: break;
             case EXTRA_MAGIC: break;
@@ -349,8 +347,11 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                 break;
             }
             default:
-                SYSLOG_INTERNAL_WARNING("%s %d Unhandled section with magic number 0x%x",
-                                        __func__, __LINE__, next_head->magic);
+                /* Newer kernels add records (TPIDR2, ZA, ZT, FPMR, POE, GCS...)
+                 * that hold state we do not track: skip them.
+                 */
+                LOG(GLOBAL, LOG_ASYNCH, 2, "%s: skipping sigcontext record 0x%x\n",
+                    __func__, next_head->magic);
             }
             offset += next_head->size;
         }

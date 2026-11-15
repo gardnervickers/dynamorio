@@ -109,50 +109,78 @@ instr_is_sub_stk_ptr(instr_t *instr)
     return (enc & MOV_STK_ENC_MASK) == SUB_SP_ENC;
 }
 
+/* The matchers below recognize only the 64-bit forms: a 32-bit store and load of
+ * Wn would leave the top half of Xn to the callee.  They also return the
+ * instruction's unsigned or signed offset field, so that a save and a restore
+ * can be checked to use the same stack slot.
+ */
+#define STP_LDP_64BIT_BIT 0x80000000 /* opc<1>: 64-bit registers */
+#define STR_LDR_64BIT_BIT 0x40000000 /* size<0>, with size<1> set: X registers */
+#define STP_LDP_IMM_MASK 0x003f8000  /* imm7 */
+#define STR_LDR_IMM_MASK 0x003ffc00  /* imm12 */
+
 static inline bool
-instr_is_push_reg_pair(instr_t *instr, reg_id_t *reg1, reg_id_t *reg2)
+instr_is_push_reg_pair(instr_t *instr, reg_id_t *reg1, reg_id_t *reg2, uint *offs)
 {
-    uint enc = *(uint *)instr->bytes;
-    enc = enc & STP_LDP_ENC_MASK;
-    if ((enc & STP_LDP_REG_MASK) != STP_SP_ENC)
+    uint raw = *(uint *)instr->bytes;
+    uint enc = raw & STP_LDP_ENC_MASK;
+    if ((enc & STP_LDP_REG_MASK) != STP_SP_ENC || !TESTALL(STP_LDP_64BIT_BIT, raw))
         return false;
     *reg1 = (reg_id_t)(enc & 31) + DR_REG_START_GPR;
     *reg2 = (reg_id_t)(enc >> 10 & 31) + DR_REG_START_GPR;
+    *offs = raw & STP_LDP_IMM_MASK;
     return true;
 }
 
 static inline bool
-instr_is_pop_reg_pair(instr_t *instr, reg_id_t *reg1, reg_id_t *reg2)
+instr_is_pop_reg_pair(instr_t *instr, reg_id_t *reg1, reg_id_t *reg2, uint *offs)
 {
-    uint enc = *(uint *)instr->bytes;
-    enc = enc & STP_LDP_ENC_MASK;
-    if ((enc & STP_LDP_REG_MASK) != LDP_SP_ENC)
+    uint raw = *(uint *)instr->bytes;
+    uint enc = raw & STP_LDP_ENC_MASK;
+    if ((enc & STP_LDP_REG_MASK) != LDP_SP_ENC || !TESTALL(STP_LDP_64BIT_BIT, raw))
         return false;
     *reg1 = (reg_id_t)(enc & 31) + DR_REG_START_GPR;
     *reg2 = (reg_id_t)(enc >> 10 & 31) + DR_REG_START_GPR;
+    *offs = raw & STP_LDP_IMM_MASK;
     return true;
 }
 
 static inline bool
-instr_is_push_reg(instr_t *instr, reg_id_t *reg)
+instr_is_push_reg(instr_t *instr, reg_id_t *reg, uint *offs)
 {
-    uint enc = *(uint *)instr->bytes;
-    enc = enc & STR_LDR_ENC_MASK;
-    if ((enc & STR_LDR_REG_MASK) != STR_SP_ENC)
+    uint raw = *(uint *)instr->bytes;
+    uint enc = raw & STR_LDR_ENC_MASK;
+    if ((enc & STR_LDR_REG_MASK) != STR_SP_ENC || !TESTALL(STR_LDR_64BIT_BIT, raw))
         return false;
     *reg = (reg_id_t)(enc & 31) + DR_REG_START_GPR;
+    *offs = raw & STR_LDR_IMM_MASK;
     return true;
 }
 
 static inline bool
-instr_is_pop_reg(instr_t *instr, reg_id_t *reg)
+instr_is_pop_reg(instr_t *instr, reg_id_t *reg, uint *offs)
 {
-    uint enc = *(uint *)instr->bytes;
-    enc = enc & STR_LDR_ENC_MASK;
-    if ((enc & STR_LDR_REG_MASK) != LDR_SP_ENC)
+    uint raw = *(uint *)instr->bytes;
+    uint enc = raw & STR_LDR_ENC_MASK;
+    if ((enc & STR_LDR_REG_MASK) != LDR_SP_ENC || !TESTALL(STR_LDR_64BIT_BIT, raw))
         return false;
     *reg = (reg_id_t)(enc & 31) + DR_REG_START_GPR;
+    *offs = raw & STR_LDR_IMM_MASK;
     return true;
+}
+
+/* Records that the callee saves and restores reg itself.  callee_save_regs is
+ * indexed from DR_REG_START_GPR, like reg_used.  The matchers above decode
+ * register number 31 as DR_REG_XSP, but in these stores and loads it is XZR,
+ * which needs no saving.
+ */
+static inline void
+mark_callee_save_reg(callee_info_t *ci, reg_id_t reg)
+{
+    if (reg < DR_REG_X0 || reg > DR_REG_X30)
+        return;
+    ci->callee_save_regs[reg - DR_REG_START_GPR] = true;
+    ci->num_callee_save_regs++;
 }
 
 static inline reg_id_t
@@ -163,7 +191,7 @@ find_nzcv_spill_reg(callee_info_t *ci)
     for (i = DR_NUM_GPR_REGS - 2; i >= 0; i--) {
         reg_id_t reg = DR_REG_START_GPR + (reg_id_t)i;
         ASSERT(reg != DR_REG_XSP && "hit SP starting at x30");
-        if (reg == ci->spill_reg || ci->reg_used[i])
+        if (reg == ci->spill_reg || reg == dr_reg_stolen || ci->reg_used[i])
             continue;
         spill_reg = reg;
         break;
@@ -359,17 +387,17 @@ analyze_callee_save_reg(dcontext_t *dcontext, callee_info_t *ci)
             (ci->fwd_tgt != NULL && instr_get_app_pc(bot) < ci->fwd_tgt) ||
             instr_is_cti(top) || instr_is_cti(bot))
             break;
-        if (instr_is_push_reg_pair(top, &reg1, &reg2)) {
+        uint offs, offs_c;
+        if (instr_is_push_reg_pair(top, &reg1, &reg2, &offs)) {
             /* If a save reg pair is found and the register, check if the last
              * instruction is a corresponding load.
              */
             reg_id_t reg1_c, reg2_c;
-            if (instr_is_pop_reg_pair(bot, &reg1_c, &reg2_c) && reg1 == reg1_c &&
-                reg2 == reg2_c) {
+            if (instr_is_pop_reg_pair(bot, &reg1_c, &reg2_c, &offs_c) && reg1 == reg1_c &&
+                reg2 == reg2_c && offs == offs_c) {
                 /* found a save/restore pair */
-                ci->callee_save_regs[reg1] = true;
-                ci->callee_save_regs[reg2] = true;
-                ci->num_callee_save_regs += 2;
+                mark_callee_save_reg(ci, reg1);
+                mark_callee_save_reg(ci, reg2);
                 /* remove & destroy the pairs */
                 instrlist_remove(ilist, top);
                 instr_destroy(GLOBAL_DCONTEXT, top);
@@ -380,15 +408,15 @@ analyze_callee_save_reg(dcontext_t *dcontext, callee_info_t *ci)
                 bot = instrlist_last(ilist);
             } else
                 break;
-        } else if (instr_is_push_reg(top, &reg1)) {
+        } else if (instr_is_push_reg(top, &reg1, &offs)) {
             /* If a save reg pair is found and the register, check if the last
              * instruction is a corresponding restore.
              */
             reg_id_t reg1_c;
-            if (instr_is_pop_reg(bot, &reg1_c) && reg1 == reg1_c) {
+            if (instr_is_pop_reg(bot, &reg1_c, &offs_c) && reg1 == reg1_c &&
+                offs == offs_c) {
                 /* found a save/restore pair */
-                ci->callee_save_regs[reg1] = true;
-                ci->num_callee_save_regs += 1;
+                mark_callee_save_reg(ci, reg1);
                 /* remove & destroy the pairs */
                 instrlist_remove(ilist, top);
                 instr_destroy(GLOBAL_DCONTEXT, top);
@@ -470,6 +498,20 @@ check_callee_ilist_inline(dcontext_t *dcontext, callee_info_t *ci)
         if (instr_uses_reg(instr, DR_REG_FPSR) || instr_uses_reg(instr, DR_REG_FPCR)) {
             LOG(THREAD, LOG_CLEANCALL, 1,
                 "CLEANCALL: callee " PFX " cannot be inlined: FPSR or FPCR accessed.\n",
+                ci->start);
+            opt_inline = false;
+            break;
+        }
+
+        /* A PC-relative operand (adr, adrp, ldr literal) needs no check: the
+         * inlined copy is meta code that d_r_mangle() passes to mangle_rel_addr(),
+         * which rewrites it to use the absolute address.
+         */
+
+        /* The stolen register holds our TLS base while the inlined code runs. */
+        if (instr_uses_reg(instr, dr_reg_stolen)) {
+            LOG(THREAD, LOG_CLEANCALL, 1,
+                "CLEANCALL: callee " PFX " cannot be inlined: stolen register used.\n",
                 ci->start);
             opt_inline = false;
             break;

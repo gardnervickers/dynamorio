@@ -409,15 +409,28 @@ test_dr_rename_delete(void)
         dr_delete_file(tmp_dst);
 }
 
+/* The test runs in several configurations at once (e.g. the satisfy_w_xor_x
+ * one), all in the same directory: make each one's names unique.
+ */
+static const char *
+unique_name(char *buf, size_t size, const char *prefix, const char *name)
+{
+    dr_snprintf(buf, size, "%s%s.%d", prefix, name, (int)dr_get_process_id());
+    buf[size - 1] = '\0';
+    return buf;
+}
+
 static void
 test_dir(void)
 {
     char cwd[MAXIMUM_PATH];
     char buf[MAXIMUM_PATH];
+    char name[MAXIMUM_PATH];
 
     if (!dr_get_current_directory(cwd, BUFFER_SIZE_ELEMENTS(cwd)))
         dr_fprintf(STDERR, "failed to get current directory\n");
-    dr_snprintf(buf, BUFFER_SIZE_ELEMENTS(buf), "%s/newdir", cwd);
+    dr_snprintf(buf, BUFFER_SIZE_ELEMENTS(buf), "%s/%s", cwd,
+                unique_name(name, BUFFER_SIZE_ELEMENTS(name), "", "newdir"));
     if (!dr_create_dir(buf))
         dr_fprintf(STDERR, "failed to create dir\n");
     if (!dr_directory_exists(buf))
@@ -427,9 +440,11 @@ test_dir(void)
 }
 
 static void
-test_relative_path(const char *path)
+test_relative_path(const char *prefix)
 {
     const char *towrite = "test\n";
+    char path[MAXIMUM_PATH];
+    unique_name(path, BUFFER_SIZE_ELEMENTS(path), prefix, "foo");
     file_t fd = dr_open_file(path, DR_FILE_WRITE_OVERWRITE);
     if (fd != INVALID_FILE) {
         dr_write_file(fd, towrite, strlen(towrite));
@@ -445,25 +460,27 @@ test_relative(void)
 {
     char cwd[MAXIMUM_PATH];
     char buf[MAXIMUM_PATH];
+    char dir[MAXIMUM_PATH];
     bool ok;
 
     if (!dr_get_current_directory(cwd, BUFFER_SIZE_ELEMENTS(cwd)))
         dr_fprintf(STDERR, "failed to get current directory\n");
 
-    test_relative_path("./foo");
-    test_relative_path("../foo");
+    test_relative_path("./");
+    test_relative_path("../");
     /* we should be in <build_dir>/suite/tests, so ok to go up two levels */
-    test_relative_path("../../foo");
+    test_relative_path("../../");
 
-    ok = dr_create_dir("newdir");
+    unique_name(dir, BUFFER_SIZE_ELEMENTS(dir), "", "newdir");
+    ok = dr_create_dir(dir);
     if (!ok)
         dr_fprintf(STDERR, "failed to create dir\n");
-    if (!dr_directory_exists("newdir"))
+    if (!dr_directory_exists(dir))
         dr_fprintf(STDERR, "failed to detect dir rel\n");
-    dr_snprintf(buf, BUFFER_SIZE_ELEMENTS(buf), "%s/newdir", cwd);
+    dr_snprintf(buf, BUFFER_SIZE_ELEMENTS(buf), "%s/%s", cwd, dir);
     if (!dr_directory_exists(buf))
         dr_fprintf(STDERR, "failed to detect dir abs\n");
-    if (!dr_delete_dir("newdir"))
+    if (!dr_delete_dir(dir))
         dr_fprintf(STDERR, "failed to delete newly created dir\n");
 }
 

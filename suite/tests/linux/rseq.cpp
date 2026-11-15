@@ -171,7 +171,13 @@ register_rseq()
          * FTR: if we use some other value as signature (like zero),  this
          * becomes an EPERM vs EINVAL check.
          */
-        int res = syscall(SYS_rseq, reg_rseq, sizeof(*reg_rseq), 0, RSEQ_SIG);
+        /* The kernel compares the length too: pass the one glibc registered
+         * with, which is the original 32 bytes unless glibc uses more, rather
+         * than the size of the uapi struct rseq (64 bytes with Linux 6.x headers,
+         * which would be EINVAL).
+         */
+        const unsigned int reg_len = __rseq_size > 32 ? __rseq_size : 32;
+        int res = syscall(SYS_rseq, reg_rseq, reg_len, 0, RSEQ_SIG);
         assert(res == -1 && (errno == EBUSY || errno == ENOSYS));
     } else {
 #endif

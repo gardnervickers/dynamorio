@@ -1163,7 +1163,20 @@ if (BUILD_TESTS)
       # XXX: We can only successfully build this if static libpthread is available,
       # which is only recent glibc 2.34+ such as Ubuntu22+. We also limit to 64-bit
       # due to pain building 32-bit on a 64-bit machine.
-      if (X64 AND "${libpthread}" MATCHES ".a$")
+      # The compression libraries drmemtrace links must be static too (e.g.
+      # Fedora ships no libsnappy.a).
+      set(purestatic_libs_ok ON)
+      foreach (lib libsnappy liblz4)
+        if (${lib})
+          get_filename_component(libdir "${${lib}}" DIRECTORY)
+          string(REGEX REPLACE "^lib" "" libname "${lib}")
+          find_library(${lib}_static NAMES lib${libname}.a HINTS "${libdir}")
+          if (NOT ${lib}_static)
+            set(purestatic_libs_ok OFF)
+          endif ()
+        endif ()
+      endforeach ()
+      if (X64 AND "${libpthread}" MATCHES ".a$" AND purestatic_libs_ok)
         add_executable(tool.drcacheoff.purestatic tests/burst_static.cpp)
         append_property_list(TARGET tool.drcacheoff.purestatic
           LINK_FLAGS "-static -Wl,--no-export-dynamic")

@@ -83,26 +83,12 @@ main()
             return 1;
         }
     }
-    /* DR should have taken -steal_fds == 96.  To avoid hardcoding the
-     * typical max we assume it's just a power of 2.
+    /* DR keeps its -steal_fds range at the top of the app's soft limit without
+     * lowering the limits the app sees, so there is nothing to check here.
      */
-    if ((rlimit.rlim_max & (rlimit.rlim_max - 1)) == 0) {
-        print("RLIMIT_NOFILE max is %llu but shouldn't be power of 2 "
-              "under DR\n",
-              /* The size of rlim_max depends on whether __USE_FILE_OFFSET64
-               * is defined. We simply cast it to 8-byte for printing.
-               */
-              (unsigned long long)rlimit.rlim_max);
-        /* We continue to make it easier to run this app natively. */
-    } else {
-        if (((rlimit.rlim_max + DR_STEAL_FDS) & (rlimit.rlim_max + DR_STEAL_FDS - 1)) !=
-            0)
-            print("Expected rlim_max + DR_STEAL_FDS to be a power of 2 under DR\n");
-    }
 
-    /* Test i#357 by trying to close the client's file.
-     * Above, we verified that DR has indeed stolen some FDs from the high side.
-     * Now we try to dup/close those and confirm that we fail.
+    /* Test i#357: FDs above the app's limit, natively invalid, must stay
+     * unusable by the app under DR too.
      */
     /* Test dup/close for stolen FDs. */
     for (int i = rlimit.rlim_max; i < rlimit.rlim_max + DR_STEAL_FDS; i++) {
@@ -242,10 +228,6 @@ main()
     if (syscall(SYS_getrlimit, RLIMIT_NOFILE, &crlimit) != 0) {
         perror("getrlimit failed");
         return 1;
-    }
-    if ((crlimit.rlim_max & (crlimit.rlim_max - 1)) == 0) {
-        print("RLIMIT_NOFILE max is %d but shouldn't be power of 2 under DR\n",
-              crlimit.rlim_max);
     }
 #    endif
 

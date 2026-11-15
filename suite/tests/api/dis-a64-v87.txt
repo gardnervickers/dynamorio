@@ -32,6 +32,12 @@
 # See dis-a64-sve.txt for the formatting.
 
 # Tests:
+# DSB <option>nXS|#<imm>
+d503323f : dsb oshnxs                      : dsbnxs $0x00
+d503363f : dsb nshnxs                      : dsbnxs $0x01
+d5033a3f : dsb ishnxs                      : dsbnxs $0x02
+d5033e3f : dsb synxs                       : dsbnxs $0x03
+
 # WFET <Xt>
 d5031000 : wfet x0                         : wfet   %x0
 d5031002 : wfet x2                         : wfet   %x2

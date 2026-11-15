@@ -1,0 +1,3 @@
+faults: 100, sum: 5250
+translated on the signal stack: yes
+signal stack headroom: ok

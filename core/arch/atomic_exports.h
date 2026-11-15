@@ -469,7 +469,8 @@ atomic_add_exchange_int64(volatile int64 *var, int64 value)
                                      "   stlxr  %w1, %" r "0, [%x2]      \n\t"    \
                                      "   cbnz  %w1, 1b                \n\t"       \
                                      : "=&r"(tmp1), "=&r"(tmp2)                   \
-                                     : "r"(var));                                 \
+                                     : "r"(var)                                   \
+                                     : "memory");                                 \
             }
 DEF_ATOMIC_incdec(ATOMIC_INC_int, int, "w", "add") DEF_ATOMIC_incdec(ATOMIC_INC_int64,
                                                                      int64, "x", "add")
@@ -490,7 +491,8 @@ DEF_ATOMIC_incdec(ATOMIC_INC_int, int, "w", "add") DEF_ATOMIC_incdec(ATOMIC_INC_
                                      "   stlxr  %w1, %" r "0, [%x2]      \n\t"    \
                                      "   cbnz  %w1, 1b                \n\t"       \
                                      : "=&r"(tmp1), "=&r"(tmp2)                   \
-                                     : "r"(var), "r"(val));                       \
+                                     : "r"(var), "r"(val)                         \
+                                     : "memory");                                 \
             }
             DEF_ATOMIC_ADD(ATOMIC_ADD_int, int, "w") DEF_ATOMIC_ADD(ATOMIC_ADD_int64,
                                                                     int64, "x")
@@ -508,7 +510,8 @@ DEF_ATOMIC_incdec(ATOMIC_INC_int, int, "w", "add") DEF_ATOMIC_incdec(ATOMIC_INC_
                                      "   stlxr  %w0, %" reg "1, [%x2]        \n\t"    \
                                      "   cbnz  %w0, 1b                    \n\t"       \
                                      : "=&r"(tmp), "=&r"(ret)                         \
-                                     : "r"(var), "r"(val));                           \
+                                     : "r"(var), "r"(val)                             \
+                                     : "memory");                                     \
                 return ret;                                                           \
             }
                 DEF_ATOMIC_ADD_EXCHANGE(atomic_add_exchange_int, int, "w")
@@ -532,7 +535,8 @@ DEF_ATOMIC_incdec(ATOMIC_INC_int, int, "w", "add") DEF_ATOMIC_incdec(ATOMIC_INC_
                                      "2: clrex                        \n\t"           \
                                      "   cset  %w2, eq                \n\t"           \
                                      : "=&r"(tmp1), "=&r"(tmp2), "=r"(ret)            \
-                                     : "r"(var), "r"(compare), "r"(exchange));        \
+                                     : "r"(var), "r"(compare), "r"(exchange)          \
+                                     : "cc", "memory");                               \
                 return ret;                                                           \
             }
                         DEF_atomic_compare_exchange(atomic_compare_exchange_int, int, "w")
@@ -548,18 +552,23 @@ DEF_ATOMIC_incdec(ATOMIC_INC_int, int, "w", "add") DEF_ATOMIC_incdec(ATOMIC_INC_
                          "   stlxr  %w1, %w3, [%x2]        \n\t"
                          "   cbnz  %w1, 1b                \n\t"
                          : "=&r"(ret), "=&r"(tmp)
-                         : "r"(var), "r"(newval));
+                         : "r"(var), "r"(newval)
+                         : "memory");
     return ret;
 }
 
-#        define MEMORY_STORE_BARRIER() __asm__ __volatile__("dmb st")
-/* i#4719: QEMU crashes on "wfi" so we use the superset "wfe".
- * XXX: Consider issuing "sev" on lock release?
+/* The "memory" clobber keeps the compiler from moving stores across the barrier,
+ * which the hardware barrier alone does not prevent.
  */
-#        define SPINLOCK_PAUSE()             \
-            do {                             \
-                __asm__ __volatile__("wfe"); \
-            } while (0) /* wait for interrupt */
+#        define MEMORY_STORE_BARRIER() __asm__ __volatile__("dmb ishst" : : : "memory")
+/* A spin loop must not use "wfe": nothing arms the exclusive monitor (our trylock
+ * ends in "clrex") and unlocking issues no "sev", so "wfe" would sleep until some
+ * unrelated event such as a timer interrupt.  (i#4719: "wfi" crashes QEMU.)
+ */
+#        define SPINLOCK_PAUSE()                               \
+            do {                                               \
+                __asm__ __volatile__("yield" : : : "memory"); \
+            } while (0)
 
 static inline bool
 atomic_inc_and_test(volatile int *var)

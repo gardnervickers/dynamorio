@@ -2903,6 +2903,10 @@ instr_num_memory_write_access(instr_t *instr)
     int i;
     opnd_t curop;
     int count = 0;
+    const int opc = instr_get_opcode(instr);
+
+    if (opc_is_not_a_real_memory_store(opc))
+        return 0;
 
     for (i = 0; i < instr_num_dsts(instr); i++) {
         curop = instr_get_dst(instr, i);

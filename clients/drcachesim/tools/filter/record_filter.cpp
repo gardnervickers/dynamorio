@@ -51,6 +51,9 @@
 #ifdef HAS_ZIP
 #    include "common/zipfile_ostream.h"
 #endif
+#ifdef HAS_LZ4
+#    include "common/lz4_ostream.h"
+#endif
 #include "memref.h"
 #include "memtrace_stream.h"
 #include "raw2trace_shared.h"
@@ -296,6 +299,15 @@ record_filter_t::get_writer(per_shard_t *per_shard, memtrace_stream_t *shard_str
         VPRINT(this, 3, "Using the gzip writer for %s\n", per_shard->output_path.c_str());
         per_shard->file_writer =
             std::unique_ptr<std::ostream>(new gzip_ostream_t(per_shard->output_path));
+        per_shard->writer = per_shard->file_writer.get();
+        return "";
+    }
+#endif
+#ifdef HAS_LZ4
+    if (ends_with(per_shard->output_path, ".lz4")) {
+        VPRINT(this, 3, "Using the lz4 writer for %s\n", per_shard->output_path.c_str());
+        per_shard->file_writer =
+            std::unique_ptr<std::ostream>(new lz4_ostream_t(per_shard->output_path));
         per_shard->writer = per_shard->file_writer.get();
         return "";
     }

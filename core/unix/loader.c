@@ -1580,6 +1580,57 @@ redirect_dl_iterate_phdr_app(int (*callback)(struct dl_phdr_info *info, size_t s
     return res;
 }
 
+#    if !defined(ANDROID) && defined(X64)
+/* glibc's struct dl_find_object for targets without DLFO_STRUCT_HAS_EH_DBASE or
+ * DLFO_STRUCT_HAS_EH_COUNT (x86_64, AArch64, RISC-V 64).  We use our own tag as
+ * <dlfcn.h> defines the real one only on glibc 2.35+.
+ */
+typedef struct _redirect_dl_find_object_t {
+    unsigned long long dlfo_flags;
+    void *dlfo_map_start;
+    void *dlfo_map_end;
+    void *dlfo_link_map;
+    void *dlfo_eh_frame;
+    unsigned long long dlfo_reserved[7];
+} redirect_dl_find_object_t;
+
+/* i#7297: libgcc_s built against glibc 2.35+ finds FDEs with _dl_find_object()
+ * instead of dl_iterate_phdr(), and does not fall back.  The private copy never
+ * ran rtld's setup: before glibc 2.43 its _dl_find_object() knows no modules, and
+ * from 2.43 libc's _dl_find_object() jumps through _rtld_global_ro's
+ * dl_find_object pointer, which only rtld fills in, so C++ exceptions in a client
+ * jump to 0.  We answer for the private modules, as redirect_dl_iterate_phdr()
+ * does.
+ */
+static int
+redirect__dl_find_object(void *pc, redirect_dl_find_object_t *result)
+{
+    int res = -1;
+    privmod_t *mod;
+    acquire_recursive_lock(&privload_lock);
+    mod = privload_lookup_by_pc((app_pc)pc);
+    if (mod != NULL && mod->base != get_dynamorio_dll_start()) {
+        ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)mod->base;
+        os_privmod_data_t *opd = (os_privmod_data_t *)mod->os_privmod_data;
+        memset(result, 0, sizeof(*result));
+        result->dlfo_map_start = mod->base;
+        result->dlfo_map_end = mod->base + mod->size;
+        for (uint i = 0; i < elf_hdr->e_phnum; i++) {
+            ELF_PROGRAM_HEADER_TYPE *phdr =
+                (ELF_PROGRAM_HEADER_TYPE *)(mod->base + elf_hdr->e_phoff +
+                                            i * elf_hdr->e_phentsize);
+            if (phdr->p_type == PT_GNU_EH_FRAME) {
+                result->dlfo_eh_frame = (void *)(phdr->p_vaddr + opd->load_delta);
+                break;
+            }
+        }
+        res = 0;
+    }
+    release_recursive_lock(&privload_lock);
+    return res;
+}
+#    endif
+
 #endif /* LINUX */
 
 #if defined(LINUX) && defined(AARCH64)
@@ -1877,6 +1928,10 @@ static const redirect_import_t redirect_imports[] = {
     /* i#1717: C++ exceptions call this */
     { "dl_iterate_phdr", (app_pc)redirect_dl_iterate_phdr,
       (app_pc)redirect_dl_iterate_phdr_app },
+#    if !defined(ANDROID) && defined(X64)
+    /* i#7297: libgcc_s's C++ exception unwinding calls this on glibc 2.35+. */
+    { "_dl_find_object", (app_pc)redirect__dl_find_object },
+#    endif
 #    ifdef AARCH64
     /* A private libc's getauxval() crashes: see redirect_getauxval(). */
     { "getauxval", (app_pc)redirect_getauxval },

@@ -595,12 +595,17 @@ append_restore_simd_reg(dcontext_t *dcontext, instrlist_t *ilist, bool absolute)
         XINST_CREATE_add_2src(dcontext, opnd_create_reg(DR_REG_X1),
                               opnd_create_reg(REG_DCXT),
                               OPND_CREATE_INTPTR(offsetof(priv_mcontext_t, simd))));
-    for (i = 0; i < 32; i++) {
-        /* ldr q(i), [x1, #(i * sizeof(dr_simd_t))] */
-        APP(ilist,
-            INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_Q0 + i),
-                             opnd_create_base_disp(DR_REG_X1, DR_REG_NULL, 0,
-                                                   i * sizeof(dr_simd_t), OPSZ_16)));
+    /* With SVE, each Z register load below also writes its Q register, the Z
+     * register's low 128 bits, from the same slot.
+     */
+    if (!proc_has_feature(FEATURE_SVE)) {
+        for (i = 0; i < 32; i++) {
+            /* ldr q(i), [x1, #(i * sizeof(dr_simd_t))] */
+            APP(ilist,
+                INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_Q0 + i),
+                                 opnd_create_base_disp(DR_REG_X1, DR_REG_NULL, 0,
+                                                       i * sizeof(dr_simd_t), OPSZ_16)));
+        }
     }
     if (proc_has_feature(FEATURE_SVE)) {
         for (i = 0; i < 32; i++) {
@@ -799,18 +804,23 @@ append_save_simd_reg(dcontext_t *dcontext, instrlist_t *ilist, bool absolute)
         XINST_CREATE_add_2src(dcontext, opnd_create_reg(DR_REG_X1),
                               opnd_create_reg(REG_DCXT),
                               OPND_CREATE_INTPTR(offsetof(priv_mcontext_t, simd))));
-    for (i = 0; i < 32; i++) {
-        /* str q(i), [x1, #(i * sizeof(dr_simd_t))]
-         * From the AArch64 manual:
-         * "The signed immediate byte offset is a multiple of 16 in the range
-         * -1024 to 1008, defaulting to 0 and encoded in the imm7 field as
-         * <imm>/16."
-         */
-        APP(ilist,
-            INSTR_CREATE_str(dcontext,
-                             opnd_create_base_disp(DR_REG_X1, DR_REG_NULL, 0,
-                                                   i * sizeof(dr_simd_t), OPSZ_16),
-                             opnd_create_reg(DR_REG_Q0 + i)));
+    /* With SVE, each Z register store below also stores its Q register, the Z
+     * register's low 128 bits, to the same slot.
+     */
+    if (!proc_has_feature(FEATURE_SVE)) {
+        for (i = 0; i < 32; i++) {
+            /* str q(i), [x1, #(i * sizeof(dr_simd_t))]
+             * From the AArch64 manual:
+             * "The signed immediate byte offset is a multiple of 16 in the range
+             * -1024 to 1008, defaulting to 0 and encoded in the imm7 field as
+             * <imm>/16."
+             */
+            APP(ilist,
+                INSTR_CREATE_str(dcontext,
+                                 opnd_create_base_disp(DR_REG_X1, DR_REG_NULL, 0,
+                                                       i * sizeof(dr_simd_t), OPSZ_16),
+                                 opnd_create_reg(DR_REG_Q0 + i)));
+        }
     }
     if (proc_has_feature(FEATURE_SVE)) {
         for (i = 0; i < 32; i++) {

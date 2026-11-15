@@ -86,8 +86,11 @@ static reg_id_t regs[] = {
 
 #define NUM_REGS (sizeof(regs) / sizeof(*regs))
 
+#define SP_ARG 100
+
 /* Table of test cases.
  * Positive values represent registers, with the parameters being 1, 2, 3,...
+ * SP_ARG represents the application's stack pointer.
  * Zero represents zero. Other negative values represent other constant values.
  * It is not an error to use a register number that is too large for the current
  * architecture as such values are automatically converted to constants.
@@ -132,6 +135,17 @@ static const struct {
     { 11, { 1, 2, 3, 4, 5, 6, 7, 8, 2, 4, 6 } },
     { 12, { 1, 2, 3, 4, 5, 6, 7, 8, 2, 4, -1, -2 } },
     { 12, { 1, 2, 3, 4, 5, 6, 7, 8, 2, 4, 6, 8 } },
+#ifdef AARCH64
+    /* The stack pointer, in register and stack slots (an STP cannot store
+     * SP, so a first stack pair of SP and a register needs care).
+     */
+    { 2, { SP_ARG, 1 } },
+    { 9, { 1, 2, 3, 4, 5, 6, 7, 8, SP_ARG } },
+    { 10, { 1, 2, 3, 4, 5, 6, 7, 8, SP_ARG, 2 } },
+    { 10, { 1, 2, 3, 4, 5, 6, 7, 8, SP_ARG, 0 } },
+    { 10, { 1, 2, 3, 4, 5, 6, 7, 8, 2, SP_ARG } },
+    { 12, { 1, 2, 3, 4, 5, 6, 7, 8, 3, SP_ARG, SP_ARG, 4 } },
+#endif
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(*tests))
@@ -158,6 +172,12 @@ fail(const char *s)
 static ptr_uint_t
 convert_arg_to_int(int x)
 {
+    if (x == SP_ARG) {
+        dr_mcontext_t mc = { sizeof(mc), DR_MC_CONTROL };
+        if (!dr_get_mcontext(dr_get_current_drcontext(), &mc))
+            fail("dr_get_mcontext");
+        return mc.xsp;
+    }
     if (x < 0) {
         if (-x > NUM_CONSTANTS)
             fail("bad constant");
@@ -171,6 +191,8 @@ convert_arg_to_int(int x)
 static opnd_t
 convert_arg_to_opnd(int x)
 {
+    if (x == SP_ARG)
+        return opnd_create_reg(DR_REG_XSP);
     if (0 < x && x <= NUM_REGS)
         return opnd_create_reg(regs[x - 1]);
     else

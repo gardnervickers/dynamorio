@@ -56,6 +56,7 @@ struct lz4_reader_t {
 };
 
 typedef file_reader_t<lz4_reader_t> lz4_file_reader_t;
+typedef record_file_reader_t<lz4_reader_t> lz4_record_file_reader_t;
 
 } // namespace drmemtrace
 } // namespace dynamorio

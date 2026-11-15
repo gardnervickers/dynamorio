@@ -10302,6 +10302,16 @@ decode_category(uint encoding, instr_t *instr)
  * The includes must be ordered newest to oldest so that the codec function
  * declarations are before they are attempted to be used.
  */
+/* Whether the generated encoders may use a pattern that needs this feature,
+ * for opcodes whose patterns need different features.
+ */
+#if !defined(DR_HOST_NOT_TARGET) && !defined(STANDALONE_DECODER)
+#    define ENCODE_HAS_FEATURE(feature) \
+        (di->ignore_isa_features || proc_has_feature(feature))
+#else
+#    define ENCODE_HAS_FEATURE(feature) true
+#endif
+
 #include "opnd_decode_funcs.h"
 #include "opnd_encode_funcs.h"
 #include "isa_features.h"

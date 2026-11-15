@@ -1034,15 +1034,15 @@ module_get_os_privmod_data(app_pc base, size_t size, bool dyn_reloc,
         } else if (prog_hdr->p_type == PT_TLS && prog_hdr->p_memsz > 0) {
             /* TLS (Thread Local Storage) relocation information */
             pd->tls_block_size = prog_hdr->p_memsz;
-            pd->tls_align = prog_hdr->p_align;
+            /* ELF gives 0 and 1 the same meaning, no alignment.  We use 1, as
+             * ALIGN_FORWARD(x, 0) is 0 and would put the next module's TLS block at
+             * offset 0, over earlier ones.
+             */
+            pd->tls_align = prog_hdr->p_align == 0 ? 1 : prog_hdr->p_align;
             pd->tls_image = (app_pc)prog_hdr->p_vaddr + load_delta;
             pd->tls_image_size = prog_hdr->p_filesz;
-            if (pd->tls_align == 0)
-                pd->tls_first_byte = 0;
-            else {
-                /* the first tls variable's offset of the alignment. */
-                pd->tls_first_byte = prog_hdr->p_vaddr & (pd->tls_align - 1);
-            }
+            /* the first tls variable's offset of the alignment. */
+            pd->tls_first_byte = prog_hdr->p_vaddr & (pd->tls_align - 1);
         }
         ++prog_hdr;
     }

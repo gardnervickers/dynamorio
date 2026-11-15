@@ -161,10 +161,11 @@ decode_ldstex(dcontext_t *dcontext, byte *pc_, byte *orig_pc_, instr_t *instr_ld
             instr_get_opcode(instr) == OP_xx || instr_is_nonbranch_pcrel(instr))
             break;
         if (instr_is_ubr_arch(instr) || instr_is_cbr_arch(instr)) {
+            /* decode_from_copy() made the target relative to orig_pc. */
             ptr_uint_t target = (ptr_uint_t)instr_get_branch_target_pc(instr);
-            if (target < (ptr_uint_t)pc || target > (ptr_uint_t)(pc + 2 * N))
+            if (target < (ptr_uint_t)orig_pc || target > (ptr_uint_t)(orig_pc + 2 * N))
                 break;
-            if (target == (ptr_uint_t)pc)
+            if (target == (ptr_uint_t)orig_pc)
                 seen_branch_to_start = true;
         }
         if (instr_is_exclusive_load(instr))
@@ -206,7 +207,7 @@ decode_ldstex(dcontext_t *dcontext, byte *pc_, byte *orig_pc_, instr_t *instr_ld
         for (i = ldstex_beg; i < ldstex_end; i++) {
             instr_t *instr = &ibuf[i];
             if (instr_is_ubr_arch(instr) || instr_is_cbr_arch(instr)) {
-                int target = (uint *)instr_get_branch_target_pc(instr) - pc;
+                int target = (uint *)instr_get_branch_target_pc(instr) - orig_pc;
                 if (target > len) {
                     failed = true;
                     break;

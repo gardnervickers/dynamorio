@@ -41,14 +41,24 @@ START_FILE
 
         DECLARE_FUNC(replace_native_xfer)
 GLOBAL_LABEL(replace_native_xfer:)
-        stp     x0, x30, [sp, #-16]!
+        /* We are at the replaced function's return: keep its return value, which
+         * can be in x0-x1 and (for floating-point and homogeneous aggregates)
+         * q0-q3, across the calls below.
+         */
+        stp     x0, x1, [sp, #-96]!
+        str     x30, [sp, #16]
+        stp     q0, q1, [sp, #32]
+        stp     q2, q3, [sp, #64]
         bl      GLOBAL_REF(replace_native_xfer_app_retaddr)
         /* Store return address to x30 position. */
-        str     x0, [sp, #8]
+        str     x0, [sp, #16]
         bl      GLOBAL_REF(replace_native_xfer_target)
-        mov     x1, x0
-        ldp     x0, x30, [sp], #16
-        br      x1
+        mov     x12, x0
+        ldp     q2, q3, [sp, #64]
+        ldp     q0, q1, [sp, #32]
+        ldr     x30, [sp, #16]
+        ldp     x0, x1, [sp], #96
+        br      x12
         /* never reached */
         END_FUNC(replace_native_xfer)
 

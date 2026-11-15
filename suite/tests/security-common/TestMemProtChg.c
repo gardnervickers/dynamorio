@@ -42,13 +42,25 @@ static char buffer[BUFFER_SIZE];
  * Natively on modern hw+os this app dies right away due to NX.
  */
 #define ADD_READ | ALLOW_READ
-static int prot_codes[7] = { ALLOW_READ,
+/* On AArch64 DR faults, as the hardware does, when the app executes from
+ * memory without PROT_EXEC; and on FEAT_EPAN hardware with Linux >= 5.13
+ * PROT_EXEC alone gives execute-only memory, which DR cannot decode.  There we
+ * keep the code readable and executable under every protection it runs from.
+ */
+#ifdef AARCH64
+#    define ADD_EXEC_A64 | ALLOW_EXEC
+#    define ADD_READ_A64 | ALLOW_READ
+#else
+#    define ADD_EXEC_A64
+#    define ADD_READ_A64
+#endif
+static int prot_codes[7] = { ALLOW_READ ADD_EXEC_A64,
                              ALLOW_READ | ALLOW_EXEC,
-                             ALLOW_WRITE ADD_READ,
-                             ALLOW_READ | ALLOW_WRITE,
+                             ALLOW_WRITE ADD_READ ADD_EXEC_A64,
+                             ALLOW_READ | ALLOW_WRITE ADD_EXEC_A64,
                              ALLOW_READ | ALLOW_WRITE | ALLOW_EXEC,
                              ALLOW_WRITE | ALLOW_EXEC ADD_READ,
-                             ALLOW_EXEC };
+                             ALLOW_EXEC ADD_READ_A64 };
 
 static void
 do_test(char *buf, size_t len)

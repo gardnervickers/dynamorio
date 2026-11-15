@@ -253,7 +253,11 @@ generate_indirect_jump(instrlist_t *ilist, drvector_t *tags, byte *encode_pc)
 static void
 generate_code()
 {
-    const size_t sequence_size = IF_X86_ELSE(73, 340); /* Measured manually. */
+    /* Measured manually.  On AArch64 each of the two instrlist_insert_mov_instr_addr()
+     * sequences is a MOVZ plus 3 MOVKs, since every halfword of an instr address is
+     * set (the final address can differ from the estimate in any halfword).
+     */
+    const size_t sequence_size = IF_X86_ELSE(73, 348);
     /* The final return takes up 1 byte. */
     code_size = NUM_SEQUENCES * sequence_size + IF_X86_ELSE(1, 4);
     generated_code =

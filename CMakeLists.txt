@@ -765,6 +765,10 @@ if (UNIX) # unlikely to be an issue on Windows
   # Note that for later gcc uint and ushort seem to be "soft typedefs":
   # defined, but overridable: ?!?
   include(CheckTypeSize)
+  # Probe in the C standard we compile in (-std=gnu99 below): a compiler whose
+  # default is C23 has bool built in, which gnu99 does not.
+  set(DR_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -std=gnu99")
   CHECK_TYPE_SIZE(uint DR_DO_NOT_DEFINE_uint)
   CHECK_TYPE_SIZE(ushort DR_DO_NOT_DEFINE_ushort)
   CHECK_TYPE_SIZE(bool DR_DO_NOT_DEFINE_bool)
@@ -788,6 +792,7 @@ if (UNIX) # unlikely to be an issue on Windows
       message(FATAL_ERROR "incompatible \"_Bool\" type is larger than 1 byte")
     endif (NOT ${DR__Bool_EXISTS} EQUAL 1)
   endif (DR__Bool_EXISTS)
+  set(CMAKE_REQUIRED_FLAGS "${DR_SAVED_REQUIRED_FLAGS}")
 endif (UNIX)
 
 ###########################################################################

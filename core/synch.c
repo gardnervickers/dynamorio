@@ -650,7 +650,16 @@ at_safe_spot(thread_record_t *trec, priv_mcontext_t *mc,
                  * of time holding locks.
                  */
                 (!should_suspend_client_thread(trec->dcontext, desired_state) ||
-                 trec->dcontext->client_data->mutex_count == 0);
+                 trec->dcontext->client_data->mutex_count == 0) &&
+                /* If a client thread has set is_exiting in cleanup_and_terminate, it
+                 * next increments exiting_thread_count and waits for the
+                 * thread_initexit_lock to exit: and for static DR that satisfies
+                 * is_in_client_lib(), but if we kill it then exiting_thread_count
+                 * will never decrement and we'll fail to synch.
+                 * Better to consider unsafe and let the thread exit and retry.
+                 * XXX i#7673: Adding a client join feature could avoid complexity here.
+                 */
+                !trec->dcontext->is_exiting;
         }
         if (is_native_thread_state_valid(trec->dcontext, mc->pc, (byte *)mc->xsp)) {
             safe = true;
@@ -1645,6 +1654,9 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                      ) &&
                     IS_CLIENT_THREAD(threads[i]->dcontext)) {
                     all_synched = false;
+                    /* XXX i#7673: Adding a client join feature could avoid complexity
+                     * here.
+                     */
                     continue; /* skip this thread for now till non-client are finished */
                 }
                 if (IS_CLIENT_THREAD(threads[i]->dcontext) &&
@@ -2690,8 +2702,8 @@ detach_externally_on_new_stack()
         if (threads[i]->dcontext == my_dcontext) {
             my_idx = i;
             my_tr = threads[i];
-            DEBUG_DECLARE(ok =)
-            thread_get_nudged_mcontext(threads[i], &my_mcontext);
+            my_mcontext = *get_mcontext(my_dcontext);
+            my_mcontext.pc = my_dcontext->next_tag;
             DEBUG_DECLARE(ok =)
             translate_mcontext(threads[i], &my_mcontext, true /*restore mem*/,
                                NULL /*f*/);

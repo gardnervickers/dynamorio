@@ -240,6 +240,24 @@ char **our_environ;
 #    endif
 #endif
 
+#if defined(LINUX) && defined(AARCH64)
+#    ifndef PR_SVE_SET_VL
+#        define PR_SVE_SET_VL 50
+#    endif
+#    ifndef PR_SVE_SET_VL_ONEXEC
+#        define PR_SVE_SET_VL_ONEXEC (1 << 18)
+#    endif
+#    ifndef PR_SVE_VL_LEN_MASK
+#        define PR_SVE_VL_LEN_MASK 0xffff
+#    endif
+#    ifndef PR_SVE_GET_VL
+#        define PR_SVE_GET_VL 51
+#    endif
+#    ifndef PR_SVE_VL_INHERIT
+#        define PR_SVE_VL_INHERIT (1 << 17)
+#    endif
+#endif
+
 #ifdef ANDROID
 /* Custom prctl flags specific to Android (xref i#1861) */
 #    define PR_SET_VMA 0x53564d41
@@ -2447,6 +2465,12 @@ os_tls_thread_exit(local_state_t *local_state)
     if (should_zero_tls_at_thread_exit()) {
         tls_thread_free(tls_type, index);
 
+#    if (defined(AARCHXX) || defined(RISCV64)) && !defined(MACOS)
+        if (os_tls->custom_privlib_tls) {
+            privload_tls_exit((void *)read_thread_register(TLS_REG_LIB));
+        }
+#    endif
+
 #    if defined(X86) && defined(X64) && !defined(MACOS)
         if (tls_type == TLS_TYPE_ARCH_PRCTL) {
             /* syscall re-sets gs register so re-clear it */
@@ -4254,21 +4278,6 @@ thread_get_mcontext(thread_record_t *tr, priv_mcontext_t *mc)
     return true;
 }
 
-#ifdef LINUX
-bool
-thread_get_nudged_mcontext(thread_record_t *tr, priv_mcontext_t *mc)
-{
-    /* This only works for a thread that just received a nduge signal. */
-    os_thread_data_t *ostd = (os_thread_data_t *)tr->dcontext->os_field;
-    ASSERT(ostd != NULL);
-    ASSERT(ostd->nudged_sigcxt != NULL);
-    sigcontext_to_mcontext(mc, ostd->nudged_sigcxt, DR_MC_ALL);
-    IF_ARM(dr_set_isa_mode(tr->dcontext, get_sigcontext_isa_mode(ostd->nudged_sigcxt),
-                           NULL));
-    return true;
-}
-#endif
-
 bool
 thread_set_mcontext(thread_record_t *tr, priv_mcontext_t *mc)
 {
@@ -4347,6 +4356,12 @@ client_thread_run(void)
     ASSERT(rc != -1); /* this better be a new thread */
     dcontext = get_thread_private_dcontext();
     ASSERT(dcontext != NULL);
+#if (defined(AARCHXX) || defined(RISCV64)) && !defined(MACOS)
+    if (!INTERNAL_OPTION(private_loader)) {
+        /* Record that dr_create_client_thread() used privload_tls_init(). */
+        get_os_tls()->custom_privlib_tls = true;
+    }
+#endif
     LOG(THREAD, LOG_ALL, 1, "\n***** CLIENT THREAD %d *****\n\n", d_r_get_thread_id());
     /* We stored the func and args in particular clone record fields */
     func = (void (*)(void *param))dcontext->next_tag;
@@ -4415,14 +4430,30 @@ dr_create_client_thread(void (*func)(void *param), void *arg)
      * app threads, so we're doing this here and not in os_clone_pre().
      * XXX: Find a way to put this in os_clone_* to simplify the code?
      */
-    void *tls = (void *)read_thread_register(LIB_SEG_TLS);
-    write_thread_register(NULL);
+    void *our_tls = (void *)read_thread_register(LIB_SEG_TLS);
+    if (INTERNAL_OPTION(private_loader)) {
+        write_thread_register(NULL);
+    } else {
+        /* Try to leverage privload TLS setup to ensure the client thread has
+         * some TLS in place in case it invokes some app code (though client-safe
+         * code is better, in some cases it is a big advantage to be able to run
+         * some limited app code in a static-DR setup).
+         */
+        void *child_tls = privload_tls_init(our_tls);
+        write_thread_register(child_tls);
+        byte **dr_tls_base_addr = (byte **)get_dr_tls_base_addr();
+        ASSERT(dr_tls_base_addr != NULL);
+        *dr_tls_base_addr = NULL;
+        /* client_thread_run() will set get_os_tls()->custom_privlib_tls for
+         * triggering privload_tls_exit() in os_tls_thread_exit().
+         */
+    }
 #    endif
     thread_id_t newpid = dynamorio_clone(flags, xsp, NULL, NULL, NULL, client_thread_run);
     /* i#3526 switch DR's tls back to the original one before cloning. */
     os_clone_post(dcontext);
 #    if defined(AARCHXX) || defined(RISCV64)
-    write_thread_register(tls);
+    write_thread_register(our_tls);
 #    endif
     /* i#501 the app's tls was switched in os_clone_pre. */
     if (INTERNAL_OPTION(private_loader))
@@ -5342,8 +5373,19 @@ make_unwritable(byte *pc, size_t size)
          */
         IF_NO_MEMQUERY(memcache_initialized() &&)
 #endif
-            get_memory_info(pc, NULL, NULL, &prot))
+            get_memory_info(pc, NULL, NULL, &prot)) {
         prot &= ~PROT_WRITE;
+#if defined(LINUX) && defined(AARCH64)
+        /* Linux internally maps -wx permissions to rwx. Older kernels do this for --x as
+         * well but recent kernels (>= 5.13) running on hardware that supports FEAT_EPAN
+         * do not, so we need to explicitly add PROT_READ to preserve DR's ability to
+         * decode instructions from this page.
+         */
+        if (TESTANY(PROT_EXEC, prot)) {
+            prot |= PROT_READ;
+        }
+#endif
+    }
 
     ASSERT(start_page == pc && ALIGN_FORWARD(size, PAGE_SIZE) == size);
     /* inc stats before making unwritable, in case messing w/ data segment */
@@ -5438,6 +5480,13 @@ ignorable_system_call_normalized(int num)
 #if defined(KSTATS) && defined(LINUX) && defined(AARCH64)
     /* A prctl(PR_SET_TSC) can make the counter our kstats read fault. */
     if (num == SYS_prctl && DYNAMO_OPTION(kstats))
+        return false;
+#endif
+#if defined(LINUX) && defined(AARCH64)
+    /* A prctl(PR_SVE_SET_VL) can change the vector length our context switches
+     * were generated for: see pre_system_call().
+     */
+    if (num == SYS_prctl && proc_has_feature(FEATURE_SVE))
         return false;
 #endif
     switch (num) {
@@ -8733,13 +8782,50 @@ pre_system_call(dcontext_t *dcontext)
         }
         break;
     }
-#ifdef ANDROID
+#if defined(ANDROID) || (defined(LINUX) && defined(AARCH64))
     case SYS_prctl:
+#    ifdef ANDROID
         dcontext->sys_param0 = sys_param(dcontext, 0);
         dcontext->sys_param1 = sys_param(dcontext, 1);
         dcontext->sys_param2 = sys_param(dcontext, 2);
         dcontext->sys_param3 = sys_param(dcontext, 3);
         dcontext->sys_param4 = sys_param(dcontext, 4);
+#    endif
+#    if defined(LINUX) && defined(AARCH64)
+        /* Our context switches and our decoder assume the SVE vector length that
+         * we found at startup: the offsets of our SVE loads and stores scale with
+         * it.  A longer vector would be stored past the end of priv_mcontext_t's
+         * slots, and a shorter one in the wrong slots.  So a change for this
+         * thread must fail.  A change at the next execve is fine, as we start over
+         * there.
+         * The kernel rounds the requested length to one the CPU supports, which is
+         * often the current one (always, on a CPU with a single length), so we let
+         * the call run, and post_system_call() undoes a change of length and fails
+         * the call.  sys_param3 keeps the settings to restore.
+         * XXX: We do not watch PTRACE_SETREGSET of NT_ARM_SVE or SME's streaming
+         * mode.
+         */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = sys_param(dcontext, 1);
+        if ((int)sys_param(dcontext, 0) == PR_SVE_SET_VL &&
+            proc_has_feature(FEATURE_SVE) &&
+            (sys_param(dcontext, 1) & PR_SVE_SET_VL_ONEXEC) == 0) {
+            const reg_t arg = sys_param(dcontext, 1);
+            const int cur = dynamorio_syscall(SYS_prctl, 1, PR_SVE_GET_VL);
+            if (cur < 0 &&
+                (arg & PR_SVE_VL_LEN_MASK) != proc_get_vector_length_bytes()) {
+                /* We could not undo a change, so refuse up front. */
+                LOG(THREAD, LOG_SYSCALLS, 1,
+                    "refusing prctl(PR_SVE_SET_VL, " PFX "): vector length is %u\n",
+                    arg, proc_get_vector_length_bytes());
+                set_failure_return_val(dcontext, EINVAL);
+                DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
+                execute_syscall = false;
+                break;
+            }
+            dcontext->sys_param3 = (reg_t)(ptr_int_t)cur;
+        }
+#    endif
         break;
 #endif
 #ifdef LINUX
@@ -10077,6 +10163,33 @@ handle_app_brk(dcontext_t *dcontext, byte *lowest_brk /*if known*/, byte *old_br
 /* This routine is *not* called is pre_system_call() returns false to skip
  * the syscall.
  */
+#if defined(LINUX) && defined(AARCH64)
+/* See the SYS_prctl case of pre_system_call(): we undo a change of the SVE vector
+ * length and fail the call.
+ */
+static void
+post_prctl_sve_set_vl(dcontext_t *dcontext, bool success, ptr_int_t result)
+{
+    if ((int)dcontext->sys_param0 != PR_SVE_SET_VL || !success ||
+        !proc_has_feature(FEATURE_SVE) ||
+        (dcontext->sys_param1 & PR_SVE_SET_VL_ONEXEC) != 0 ||
+        (result & PR_SVE_VL_LEN_MASK) == proc_get_vector_length_bytes())
+        return;
+    const int prev = (int)dcontext->sys_param3;
+    LOG(THREAD, LOG_SYSCALLS, 1,
+        "failing prctl(PR_SVE_SET_VL, " PFX "): it set vector length %u, we need %u\n",
+        dcontext->sys_param1, (uint)(result & PR_SVE_VL_LEN_MASK),
+        proc_get_vector_length_bytes());
+    if (prev >= 0) {
+        IF_DEBUG(int res =)
+        dynamorio_syscall(SYS_prctl, 2, PR_SVE_SET_VL,
+                          prev & (PR_SVE_VL_LEN_MASK | PR_SVE_VL_INHERIT));
+        ASSERT(res >= 0 && (res & PR_SVE_VL_LEN_MASK) == proc_get_vector_length_bytes());
+    }
+    set_failure_return_val(dcontext, EINVAL);
+}
+#endif
+
 /* XXX: split out specific handlers into separate routines
  */
 void
@@ -10414,8 +10527,12 @@ post_system_call(dcontext_t *dcontext)
         }
         break;
     }
-#ifdef ANDROID
+#if defined(ANDROID) || (defined(LINUX) && defined(AARCH64))
     case SYS_prctl: {
+#    if defined(LINUX) && defined(AARCH64)
+        post_prctl_sve_set_vl(dcontext, success, result);
+#    endif
+#    ifdef ANDROID
         int code = (int)dcontext->sys_param0;
         int subcode = (ulong)dcontext->sys_param1;
         if (success && code == PR_SET_VMA && subcode == PR_SET_VMA_ANON_NAME) {
@@ -10435,6 +10552,7 @@ post_system_call(dcontext_t *dcontext)
             IF_NO_MEMQUERY(memcache_update_locked(
                 addr, addr + len, memprot, -1 /*type unchanged*/, true /*exists*/));
         }
+#    endif
         break;
     }
 #endif

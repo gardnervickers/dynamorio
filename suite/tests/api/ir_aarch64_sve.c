@@ -2816,6 +2816,75 @@ TEST_INSTR(fcmge_sve_pred)
               opnd_create_reg_element_vector(Zn_six_offset_3[i], OPSZ_8));
 }
 
+#ifdef DR_HOST_NOT_TARGET
+#    define IF_HOST_NOT_TARGET_ELSE(x, y) x
+#else
+#    define IF_HOST_NOT_TARGET_ELSE(x, y) y
+#endif
+
+TEST_INSTR(sve_permutes_without_f64mm)
+{
+#ifndef STANDALONE_DECODER
+    /* Each of these opcodes has SVE patterns and an F64MM pattern for Q
+     * elements: without F64MM the SVE forms must still encode.
+     */
+    proc_set_feature(FEATURE_F64MM, false);
+#    define TEST_PERMUTE(op, expected)                                            \
+        TEST_LOOP(op, op##_sve_vector, 1, expected,                               \
+                  opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_4),              \
+                  opnd_create_reg_element_vector(DR_REG_Z1, OPSZ_4),              \
+                  opnd_create_reg_element_vector(DR_REG_Z2, OPSZ_4));             \
+        instr = INSTR_CREATE_##op##_sve_vector(                                   \
+            dc, opnd_create_reg_element_vector(DR_REG_Z0, OPSZ_16),               \
+            opnd_create_reg_element_vector(DR_REG_Z1, OPSZ_16),                   \
+            opnd_create_reg_element_vector(DR_REG_Z2, OPSZ_16));                  \
+        /* A cross-target build does not check features when encoding. */       \
+        if (IF_HOST_NOT_TARGET_ELSE(false, instr_is_encoding_possible(instr))) {  \
+            print(#op " with Q elements is encodable without F64MM\n");           \
+            *psuccess = false;                                                    \
+        }                                                                         \
+        instr_destroy(dc, instr);
+    TEST_PERMUTE(zip1, "zip1   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(zip2, "zip2   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(uzp1, "uzp1   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(uzp2, "uzp2   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(trn1, "trn1   %z1.s %z2.s -> %z0.s");
+    TEST_PERMUTE(trn2, "trn2   %z1.s %z2.s -> %z0.s");
+#    undef TEST_PERMUTE
+    proc_set_feature(FEATURE_F64MM, true);
+#endif
+}
+
+TEST_INSTR(fcmle_fcmlt_sve_pred)
+{
+    /* FCMLE and FCMLT with two vector registers are aliases:
+     *   FCMLE <Pd>.<Ts>, <Pg>/Z, <Zm>.<Ts>, <Zn>.<Ts>
+     *     == FCMGE <Pd>.<Ts>, <Pg>/Z, <Zn>.<Ts>, <Zm>.<Ts>
+     * and likewise FCMLT with FCMGT.
+     */
+    const char *expected_0_0[6] = {
+        "fcmge  %p0/z %z0.s %z0.s -> %p0.s",    "fcmge  %p2/z %z8.s %z7.s -> %p2.s",
+        "fcmge  %p3/z %z13.s %z12.s -> %p5.s",  "fcmge  %p5/z %z19.s %z18.s -> %p8.s",
+        "fcmge  %p6/z %z24.s %z23.s -> %p10.s", "fcmge  %p7/z %z31.s %z31.s -> %p15.s",
+    };
+    TEST_LOOP(fcmge, fcmle_sve_pred, 6, expected_0_0[i],
+              opnd_create_reg_element_vector(Pn_six_offset_0[i], OPSZ_4),
+              opnd_create_predicate_reg(Pn_half_six_offset_0[i], false),
+              opnd_create_reg_element_vector(Zn_six_offset_2[i], OPSZ_4),
+              opnd_create_reg_element_vector(Zn_six_offset_3[i], OPSZ_4));
+
+    const char *expected_1_0[6] = {
+        "fcmgt  %p0/z %z0.d %z0.d -> %p0.d",    "fcmgt  %p2/z %z8.d %z7.d -> %p2.d",
+        "fcmgt  %p3/z %z13.d %z12.d -> %p5.d",  "fcmgt  %p5/z %z19.d %z18.d -> %p8.d",
+        "fcmgt  %p6/z %z24.d %z23.d -> %p10.d", "fcmgt  %p7/z %z31.d %z31.d -> %p15.d",
+    };
+    TEST_LOOP(fcmgt, fcmlt_sve_pred, 6, expected_1_0[i],
+              opnd_create_reg_element_vector(Pn_six_offset_0[i], OPSZ_8),
+              opnd_create_predicate_reg(Pn_half_six_offset_0[i], false),
+              opnd_create_reg_element_vector(Zn_six_offset_2[i], OPSZ_8),
+              opnd_create_reg_element_vector(Zn_six_offset_3[i], OPSZ_8));
+}
+
 TEST_INSTR(fcmgt_sve_zero_pred)
 {
     /* Testing FCMGT   <Pd>.<Ts>, <Pg>/Z, <Zn>.<Ts>, #0.0 */
@@ -20663,6 +20732,199 @@ TEST_INSTR(bfcvtnt_sve_pred)
               opnd_create_reg_element_vector(Zn_six_offset_2[i], OPSZ_4));
 }
 
+/* SVE memory operands whose displacement or transfer size scales with the vector
+ * length, decoded and re-encoded at every architectural vector length.  The
+ * lengths that are not powers of 2 need OPSZ_ values such as OPSZ_144 (a Z
+ * register at VL 1152) and OPSZ_18 (a P register at VL 1152).
+ */
+typedef enum {
+    VL_IMM9, /* imm9 split over bits 21:16 (high) and 12:10 (low). */
+    VL_IMM6, /* imm6 at bits 21:16. */
+    VL_IMM5, /* Unsigned imm5 at bits 20:16. */
+    VL_IMM4, /* imm4 at bits 19:16. */
+} vl_imm_field_t;
+
+typedef struct {
+    const char *name;
+    uint base; /* Encoding with a zero immediate. */
+    vl_imm_field_t field;
+    /* The displacement is imm * fixed_scale, or with fixed_scale == 0,
+     * imm * VL-in-bytes * vl_num / vl_den.
+     */
+    int fixed_scale;
+    int vl_num;
+    int vl_den;
+    /* The memory transfer size: OPSZ_SCALABLE means the Z register size and
+     * OPSZ_SCALABLE_PRED the P register size.
+     */
+    opnd_size_t mem_size;
+} vl_mem_test_t;
+
+static uint
+vl_encode_imm(vl_imm_field_t field, int imm)
+{
+    switch (field) {
+    case VL_IMM9: return ((imm >> 3) & 0x3f) << 16 | (imm & 0x7) << 10;
+    case VL_IMM6: return (imm & 0x3f) << 16;
+    case VL_IMM5: return (imm & 0x1f) << 16;
+    case VL_IMM4: return (imm & 0xf) << 16;
+    }
+    return 0;
+}
+
+static bool
+vl_find_mem(instr_t *instr, opnd_t *mem)
+{
+    for (int i = 0; i < instr_num_srcs(instr); i++) {
+        if (opnd_is_base_disp(instr_get_src(instr, i))) {
+            *mem = instr_get_src(instr, i);
+            return true;
+        }
+    }
+    for (int i = 0; i < instr_num_dsts(instr); i++) {
+        if (opnd_is_base_disp(instr_get_dst(instr, i))) {
+            *mem = instr_get_dst(instr, i);
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST_INSTR(sve_all_vector_lengths)
+{
+    static const int vls[] = { 128,  256,  384,  512,  640,  768,  896,  1024,
+                               1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048 };
+    static const vl_mem_test_t tests[] = {
+        /* STR/LDR <Zt>, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "str z", 0xe5804041, VL_IMM9, 0, 1, 1, OPSZ_SCALABLE },
+        { "ldr z", 0x85804041, VL_IMM9, 0, 1, 1, OPSZ_SCALABLE },
+        /* STR/LDR <Pt>, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "str p", 0xe5800041, VL_IMM9, 0, 1, 8, OPSZ_SCALABLE_PRED },
+        { "ldr p", 0x85800041, VL_IMM9, 0, 1, 8, OPSZ_SCALABLE_PRED },
+        /* LD1B { <Zt>.H }, <Pg>/Z, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "ld1b z.h", 0xa420ac41, VL_IMM4, 0, 1, 2, OPSZ_1 },
+        /* LD1B { <Zt>.D }, <Pg>/Z, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "ld1b z.d", 0xa460ac41, VL_IMM4, 0, 1, 8, OPSZ_1 },
+        /* LD1W { <Zt>.D }, <Pg>/Z, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "ld1w z.d", 0xa560ac41, VL_IMM4, 0, 1, 2, OPSZ_4 },
+        /* LDNT1W { <Zt>.S }, <Pg>/Z, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "ldnt1w", 0xa500ec41, VL_IMM4, 0, 1, 1, OPSZ_4 },
+        /* LD3B { <Zt1>.B, <Zt2>.B, <Zt3>.B }, <Pg>/Z, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "ld3b", 0xa440ec41, VL_IMM4, 0, 3, 1, OPSZ_1 },
+        /* ST1D { <Zt>.D }, <Pg>, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "st1d", 0xe5e0ec41, VL_IMM4, 0, 1, 1, OPSZ_8 },
+        /* ST2H { <Zt1>.H, <Zt2>.H }, <Pg>, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "st2h", 0xe4b0ec41, VL_IMM4, 0, 2, 1, OPSZ_2 },
+        /* PRFB <prfop>, <Pg>, [<Xn|SP>{, #<imm>, MUL VL}] */
+        { "prfb", 0x85c00c20, VL_IMM6, 0, 1, 1, OPSZ_0 },
+        /* LD1D { <Zt>.D }, <Pg>/Z, [<Zn>.D{, #<imm>}] (a gather) */
+        { "ld1d gather", 0xc5a0cc22, VL_IMM5, 8, 0, 0, OPSZ_8 },
+    };
+    static const int imms[][4] = {
+        [VL_IMM9] = { -256, 255, 1, -3 },
+        [VL_IMM6] = { -32, 31, 1, -3 },
+        [VL_IMM5] = { 0, 31, 1, 3 },
+        [VL_IMM4] = { -8, 7, 1, -3 },
+    };
+    const int original_vl = dr_get_vector_length();
+
+    for (int v = 0; v < (int)(sizeof(vls) / sizeof(vls[0])); v++) {
+        const int vl = vls[v];
+        const uint vl_bytes = vl / 8;
+        if (!dr_set_vector_length(vl)) {
+            print("dr_set_vector_length(%d) failed\n", vl);
+            *psuccess = false;
+            continue;
+        }
+        const opnd_size_t z_size = opnd_size_from_bytes(vl_bytes);
+        const opnd_size_t p_size = opnd_size_from_bytes(vl_bytes / 8);
+        if (z_size == OPSZ_NA || p_size == OPSZ_NA ||
+            opnd_size_in_bytes(z_size) != vl_bytes ||
+            opnd_size_in_bytes(p_size) != vl_bytes / 8 ||
+            reg_get_size(DR_REG_Z0) != z_size || reg_get_size(DR_REG_Z31) != z_size ||
+            reg_get_size(DR_REG_P0) != p_size || reg_get_size(DR_REG_FFR) != p_size) {
+            print("VL %d: wrong Z/P register size\n", vl);
+            *psuccess = false;
+            continue;
+        }
+        for (int t = 0; t < (int)(sizeof(tests) / sizeof(tests[0])); t++) {
+            const vl_mem_test_t *test = &tests[t];
+            opnd_size_t mem_size = test->mem_size;
+            if (mem_size == OPSZ_SCALABLE)
+                mem_size = z_size;
+            else if (mem_size == OPSZ_SCALABLE_PRED)
+                mem_size = p_size;
+            const int scale = test->fixed_scale != 0
+                ? test->fixed_scale
+                : (int)vl_bytes * test->vl_num / test->vl_den;
+            for (int k = 0; k < 4; k++) {
+                const int imm = imms[test->field][k];
+                uint enc = test->base | vl_encode_imm(test->field, imm);
+                const int disp = imm * scale;
+                instr_t *decoded = instr_create(dc);
+                opnd_t mem;
+                byte *end = decode(dc, (byte *)&enc, decoded);
+                if (end == NULL || !instr_valid(decoded) || !vl_find_mem(decoded, &mem)) {
+                    print("VL %d %s imm %d: 0x%08x did not decode\n", vl, test->name, imm,
+                          enc);
+                    *psuccess = false;
+                    instr_destroy(dc, decoded);
+                    continue;
+                }
+                if (opnd_get_disp(mem) != disp || opnd_get_size(mem) != mem_size ||
+                    opnd_size_in_bytes(opnd_get_size(mem)) !=
+                        opnd_size_in_bytes(mem_size)) {
+                    print("VL %d %s imm %d: disp %d size %d, expected disp %d size %d\n",
+                          vl, test->name, imm, opnd_get_disp(mem), opnd_get_size(mem),
+                          disp, mem_size);
+                    *psuccess = false;
+                }
+                if (test->mem_size == OPSZ_SCALABLE ||
+                    test->mem_size == OPSZ_SCALABLE_PRED) {
+                    char dis[128], want[32];
+                    instr_disassemble_to_buffer(dc, decoded, dis, sizeof(dis));
+                    snprintf(want, sizeof(want), "[%ubyte]",
+                             opnd_size_in_bytes(mem_size));
+                    if (strstr(dis, want) == NULL) {
+                        print("VL %d %s imm %d: disassembled as %s, no %s\n", vl,
+                              test->name, imm, dis, want);
+                        *psuccess = false;
+                    }
+                }
+                uint reenc = 0;
+                if (instr_encode(dc, decoded, (byte *)&reenc) == NULL || reenc != enc) {
+                    print("VL %d %s imm %d: 0x%08x re-encoded as 0x%08x\n", vl,
+                          test->name, imm, enc, reenc);
+                    *psuccess = false;
+                }
+                /* A displacement that is not a multiple of the scale has no
+                 * encoding.
+                 */
+                if (scale > 1) {
+                    instr_t *copy = instr_clone(dc, decoded);
+                    opnd_set_disp(&mem, disp + 1);
+                    for (int i = 0; i < instr_num_srcs(copy); i++) {
+                        if (opnd_is_base_disp(instr_get_src(copy, i)))
+                            instr_set_src(copy, i, mem);
+                    }
+                    for (int i = 0; i < instr_num_dsts(copy); i++) {
+                        if (opnd_is_base_disp(instr_get_dst(copy, i)))
+                            instr_set_dst(copy, i, mem);
+                    }
+                    if (instr_is_encoding_possible(copy)) {
+                        print("VL %d %s imm %d: disp %d should not encode\n", vl,
+                              test->name, imm, disp + 1);
+                        *psuccess = false;
+                    }
+                    instr_destroy(dc, copy);
+                }
+                instr_destroy(dc, decoded);
+            }
+        }
+    }
+    dr_set_vector_length(original_vl);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -20748,6 +21010,8 @@ main(int argc, char *argv[])
     RUN_INSTR_TEST(fcmeq_sve_pred);
     RUN_INSTR_TEST(fcmge_sve_zero_pred);
     RUN_INSTR_TEST(fcmge_sve_pred);
+    RUN_INSTR_TEST(fcmle_fcmlt_sve_pred);
+    RUN_INSTR_TEST(sve_permutes_without_f64mm);
     RUN_INSTR_TEST(fcmgt_sve_zero_pred);
     RUN_INSTR_TEST(fcmgt_sve_pred);
     RUN_INSTR_TEST(fcmle_sve_zero_pred);
@@ -21184,6 +21448,8 @@ main(int argc, char *argv[])
     RUN_INSTR_TEST(sqdecp_sve_wide);
 
     RUN_INSTR_TEST(bfcvtnt_sve_pred);
+
+    RUN_INSTR_TEST(sve_all_vector_lengths);
 
     print("All sve tests complete.\n");
 #ifndef STANDALONE_DECODER

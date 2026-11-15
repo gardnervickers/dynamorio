@@ -5034,7 +5034,12 @@ emit_fcache_enter_gonative(dcontext_t *dcontext, generated_code_t *code, byte *p
     APP(&ilist,
         XINST_CREATE_load(dcontext, opnd_create_reg(DR_REG_R12),
                           OPND_CREATE_MEMPTR(DR_REG_SP, -2 * XSP_SZ)));
-    APP(&ilist, INSTR_CREATE_br(dcontext, opnd_create_reg(DR_REG_R12)));
+    /* RET, not BR: the target is an arbitrary app pc (e.g. just after a syscall
+     * instruction), not a landing pad, and a BR to it from our unguarded gencode
+     * sets PSTATE.BTYPE, so in a PROT_BTI page (a BTI-built libc, as on Fedora)
+     * the app would fault with SIGILL.  RET leaves BTYPE zero.
+     */
+    APP(&ilist, INSTR_CREATE_ret(dcontext, opnd_create_reg(DR_REG_R12)));
 #    else
     APP(&ilist,
         INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_PC),
@@ -5604,6 +5609,12 @@ emit_special_ibl_xfer(dcontext_t *dcontext, byte *pc, generated_code_t *code, ui
     }
 
     APP(&ilist, XINST_CREATE_load(dcontext, opnd_create_reg(SCRATCH_REG2), tgt));
+#if defined(AARCH64) || defined(RISCV64)
+    /* We jump to the ibl through SCRATCH_REG1, and the ibl expects the app's value
+     * of it in its TLS slot, as an exit stub leaves it.
+     */
+    APP(&ilist, SAVE_TO_TLS(dcontext, SCRATCH_REG1, TLS_REG1_SLOT));
+#endif
 
     /* insert customized instructions right before xfer to ibl */
     if (custom_ilist != NULL)

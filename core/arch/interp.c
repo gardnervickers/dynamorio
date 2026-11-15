@@ -6076,8 +6076,15 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
             instrlist_destroy(dcontext, bb);
         }
 
-        /* XXX i#5062 In the future this call should be placed inside mangle_trace() */
-        IF_AARCH64(fixup_indirect_trace_exit(dcontext, ilist));
+        /* As end_and_emit_trace() does, fix up the indirect exits once the blocks
+         * are mangled: here if we mangled them one at a time above, else after
+         * mangle_trace() below.
+         * XXX i#5062 In the future this call should be placed inside mangle_trace()
+         */
+#ifdef AARCH64
+        if (!mangle_at_end)
+            fixup_indirect_trace_exit(dcontext, ilist);
+#endif
         IF_RISCV64(ASSERT_NOT_IMPLEMENTED(false));
 
         /* PR 214962: re-apply client changes, this time storing translation
@@ -6094,6 +6101,7 @@ recreate_fragment_ilist(dcontext_t *dcontext, byte *pc,
                     ilist = NULL;
                     goto recreate_fragment_done;
                 }
+                IF_AARCH64(fixup_indirect_trace_exit(dcontext, ilist));
             } /* else we mangled one bb at a time up above */
 
 #ifdef INTERNAL
