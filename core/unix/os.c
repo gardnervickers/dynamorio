@@ -250,6 +250,12 @@ char **our_environ;
 #    ifndef PR_SVE_VL_LEN_MASK
 #        define PR_SVE_VL_LEN_MASK 0xffff
 #    endif
+#    ifndef PR_SVE_GET_VL
+#        define PR_SVE_GET_VL 51
+#    endif
+#    ifndef PR_SVE_VL_INHERIT
+#        define PR_SVE_VL_INHERIT (1 << 17)
+#    endif
 #endif
 
 #ifdef ANDROID
@@ -8778,22 +8784,37 @@ pre_system_call(dcontext_t *dcontext)
     }
 #if defined(ANDROID) || (defined(LINUX) && defined(AARCH64))
     case SYS_prctl:
+#    ifdef ANDROID
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = sys_param(dcontext, 1);
+        dcontext->sys_param2 = sys_param(dcontext, 2);
+        dcontext->sys_param3 = sys_param(dcontext, 3);
+        dcontext->sys_param4 = sys_param(dcontext, 4);
+#    endif
 #    if defined(LINUX) && defined(AARCH64)
         /* Our context switches and our decoder assume the SVE vector length that
          * we found at startup: the offsets of our SVE loads and stores scale with
          * it.  A longer vector would be stored past the end of priv_mcontext_t's
-         * slots, and a shorter one in the wrong slots.  So we refuse to change it
-         * for this thread.  A change at the next execve is fine, as we start over
+         * slots, and a shorter one in the wrong slots.  So a change for this
+         * thread must fail.  A change at the next execve is fine, as we start over
          * there.
-         * XXX: We also refuse a length that the kernel would round to the current
-         * one; and we do not watch PTRACE_SETREGSET of NT_ARM_SVE or SME's
-         * streaming mode.
+         * The kernel rounds the requested length to one the CPU supports, which is
+         * often the current one (always, on a CPU with a single length), so we let
+         * the call run, and post_system_call() undoes a change of length and fails
+         * the call.  sys_param3 keeps the settings to restore.
+         * XXX: We do not watch PTRACE_SETREGSET of NT_ARM_SVE or SME's streaming
+         * mode.
          */
+        dcontext->sys_param0 = sys_param(dcontext, 0);
+        dcontext->sys_param1 = sys_param(dcontext, 1);
         if ((int)sys_param(dcontext, 0) == PR_SVE_SET_VL &&
-            proc_has_feature(FEATURE_SVE)) {
+            proc_has_feature(FEATURE_SVE) &&
+            (sys_param(dcontext, 1) & PR_SVE_SET_VL_ONEXEC) == 0) {
             const reg_t arg = sys_param(dcontext, 1);
-            if ((arg & PR_SVE_SET_VL_ONEXEC) == 0 &&
+            const int cur = dynamorio_syscall(SYS_prctl, 1, PR_SVE_GET_VL);
+            if (cur < 0 &&
                 (arg & PR_SVE_VL_LEN_MASK) != proc_get_vector_length_bytes()) {
+                /* We could not undo a change, so refuse up front. */
                 LOG(THREAD, LOG_SYSCALLS, 1,
                     "refusing prctl(PR_SVE_SET_VL, " PFX "): vector length is %u\n",
                     arg, proc_get_vector_length_bytes());
@@ -8802,14 +8823,8 @@ pre_system_call(dcontext_t *dcontext)
                 execute_syscall = false;
                 break;
             }
+            dcontext->sys_param3 = (reg_t)(ptr_int_t)cur;
         }
-#    endif
-#    ifdef ANDROID
-        dcontext->sys_param0 = sys_param(dcontext, 0);
-        dcontext->sys_param1 = sys_param(dcontext, 1);
-        dcontext->sys_param2 = sys_param(dcontext, 2);
-        dcontext->sys_param3 = sys_param(dcontext, 3);
-        dcontext->sys_param4 = sys_param(dcontext, 4);
 #    endif
         break;
 #endif
@@ -10148,6 +10163,33 @@ handle_app_brk(dcontext_t *dcontext, byte *lowest_brk /*if known*/, byte *old_br
 /* This routine is *not* called is pre_system_call() returns false to skip
  * the syscall.
  */
+#if defined(LINUX) && defined(AARCH64)
+/* See the SYS_prctl case of pre_system_call(): we undo a change of the SVE vector
+ * length and fail the call.
+ */
+static void
+post_prctl_sve_set_vl(dcontext_t *dcontext, bool success, ptr_int_t result)
+{
+    if ((int)dcontext->sys_param0 != PR_SVE_SET_VL || !success ||
+        !proc_has_feature(FEATURE_SVE) ||
+        (dcontext->sys_param1 & PR_SVE_SET_VL_ONEXEC) != 0 ||
+        (result & PR_SVE_VL_LEN_MASK) == proc_get_vector_length_bytes())
+        return;
+    const int prev = (int)dcontext->sys_param3;
+    LOG(THREAD, LOG_SYSCALLS, 1,
+        "failing prctl(PR_SVE_SET_VL, " PFX "): it set vector length %u, we need %u\n",
+        dcontext->sys_param1, (uint)(result & PR_SVE_VL_LEN_MASK),
+        proc_get_vector_length_bytes());
+    if (prev >= 0) {
+        IF_DEBUG(int res =)
+        dynamorio_syscall(SYS_prctl, 2, PR_SVE_SET_VL,
+                          prev & (PR_SVE_VL_LEN_MASK | PR_SVE_VL_INHERIT));
+        ASSERT(res >= 0 && (res & PR_SVE_VL_LEN_MASK) == proc_get_vector_length_bytes());
+    }
+    set_failure_return_val(dcontext, EINVAL);
+}
+#endif
+
 /* XXX: split out specific handlers into separate routines
  */
 void
@@ -10485,8 +10527,12 @@ post_system_call(dcontext_t *dcontext)
         }
         break;
     }
-#ifdef ANDROID
+#if defined(ANDROID) || (defined(LINUX) && defined(AARCH64))
     case SYS_prctl: {
+#    if defined(LINUX) && defined(AARCH64)
+        post_prctl_sve_set_vl(dcontext, success, result);
+#    endif
+#    ifdef ANDROID
         int code = (int)dcontext->sys_param0;
         int subcode = (ulong)dcontext->sys_param1;
         if (success && code == PR_SET_VMA && subcode == PR_SET_VMA_ANON_NAME) {
@@ -10506,6 +10552,7 @@ post_system_call(dcontext_t *dcontext)
             IF_NO_MEMQUERY(memcache_update_locked(
                 addr, addr + len, memprot, -1 /*type unchanged*/, true /*exists*/));
         }
+#    endif
         break;
     }
 #endif
