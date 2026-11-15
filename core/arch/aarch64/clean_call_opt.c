@@ -503,17 +503,10 @@ check_callee_ilist_inline(dcontext_t *dcontext, callee_info_t *ci)
             break;
         }
 
-        /* An inlined copy keeps the callee's raw bits, and we do not re-relativize
-         * a PC-relative operand (adr, adrp, ldr literal: XXX i#4016), so the
-         * copy would address memory relative to the code cache instead.
+        /* A PC-relative operand (adr, adrp, ldr literal) needs no check: the
+         * inlined copy is meta code that d_r_mangle() passes to mangle_rel_addr(),
+         * which rewrites it to use the absolute address.
          */
-        if (instr_has_rel_addr_reference(instr)) {
-            LOG(THREAD, LOG_CLEANCALL, 1,
-                "CLEANCALL: callee " PFX " cannot be inlined: PC-relative operand.\n",
-                ci->start);
-            opt_inline = false;
-            break;
-        }
 
         /* The stolen register holds our TLS base while the inlined code runs. */
         if (instr_uses_reg(instr, dr_reg_stolen)) {
