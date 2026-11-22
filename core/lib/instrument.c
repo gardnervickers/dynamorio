@@ -6717,6 +6717,105 @@ dr_redirect_execution(dr_mcontext_t *mcontext)
     return false;
 }
 
+/* Whether dr_redirect_execution()'s pass through the dispatcher
+ * (dispatch_enter_dynamorio(), d_r_dispatch(), dispatch_enter_fcache()) would act
+ * on nothing before entering tag's fragment.  A lock that another thread holds
+ * would make that pass wait, so it counts as something to act on.
+ */
+static bool
+redirect_is_quiet(dcontext_t *dcontext, app_pc tag)
+{
+    if (dcontext->whereami != DR_WHERE_FCACHE &&
+        dcontext->whereami != DR_WHERE_CLEAN_CALLEE)
+        return false;
+    if (get_at_syscall(dcontext) || is_building_trace(dcontext) || dcontext->go_native ||
+        dcontext->native_exec_postsyscall != NULL ||
+        dcontext->client_data->to_do != NULL ||
+        dcontext->client_data->invoke_another_syscall)
+        return false;
+    if (should_wait_at_safe_spot(dcontext) || !vmm_heap_low_on_memory_quiet() ||
+        !fragment_reentry_is_quiet(dcontext))
+        return false;
+#ifdef UNIX
+    if (!signal_reentry_is_quiet(dcontext))
+        return false;
+#endif
+#ifdef AARCH64
+    if (dcontext->icache_pending_end != NULL)
+        return false;
+#endif
+#ifdef X86
+    if (debug_register_fire_on_addr(tag))
+        return false;
+#endif
+    return !DYNAMO_OPTION(coarse_units) && !is_in_dynamo_dll(tag) &&
+        tag != BACK_TO_NATIVE_AFTER_SYSCALL;
+}
+
+DR_API
+byte *
+dr_redirect_entry(void *drcontext, app_pc pc)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    fragment_t *f;
+    cache_pc entry;
+    app_pc tag;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext(),
+                  "dr_redirect_entry(): drcontext must be the current thread's");
+    tag = canonicalize_pc_target(dcontext, pc);
+    if (!redirect_is_quiet(dcontext, tag))
+        return NULL;
+    f = fragment_lookup(dcontext, tag);
+    if (f == NULL || TEST(FRAG_COARSE_GRAIN, f->flags) ||
+        /* monitor_cache_enter() counts trace head executions. */
+        (!DYNAMO_OPTION(disable_traces) && TEST(FRAG_IS_TRACE_HEAD, f->flags)))
+        return NULL;
+#if defined(UNIX) && !defined(DGC_DIAGNOSTICS) && defined(X86)
+    if (INTERNAL_OPTION(mangle_app_seg) && TEST(FRAG_HAS_MOV_SEG, f->flags))
+        return NULL;
+#endif
+    /* Leave the state that pass leaves for the cache. */
+    dcontext->next_tag = tag;
+    set_last_exit(dcontext, (linkstub_t *)get_client_linkstub());
+    dcontext->last_fragment = linkstub_fragment(dcontext, dcontext->last_exit);
+    IF_UNIX(dcontext->asynch_target = tag;)
+#if defined(AARCH64) || defined(RISCV64)
+    /* Entry to the cache requires an indirect branch: the prefix restores it. */
+    entry = FCACHE_PREFIX_ENTRY_PC(f);
+#else
+    entry = FCACHE_ENTRY_PC(f);
+#endif
+    set_fcache_target(dcontext, entry);
+    return PC_AS_JMP_TGT(FRAG_ISA_MODE(f->flags), entry);
+}
+
+DR_API
+void
+dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where,
+                              opnd_t entry)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(drcontext != NULL,
+                  "dr_insert_redirect_entry_jump(): drcontext cannot be NULL");
+    CLIENT_ASSERT(opnd_is_memory_reference(entry),
+                  "dr_insert_redirect_entry_jump(): entry must be in memory");
+#if defined(AARCH64)
+    CLIENT_ASSERT(!opnd_uses_reg(entry, DR_REG_X0) && !opnd_uses_reg(entry, DR_REG_X1),
+                  "dr_insert_redirect_entry_jump(): entry cannot use x0 or x1");
+    /* The fragment prefix restores x0 and x1, as after fcache_enter. */
+    MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
+    MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X1, TLS_REG1_SLOT));
+    MINSERT(ilist, where, XINST_CREATE_load(dcontext, opnd_create_reg(DR_REG_X0), entry));
+    MINSERT(ilist, where, XINST_CREATE_jump_reg(dcontext, opnd_create_reg(DR_REG_X0)));
+#elif defined(X86)
+    MINSERT(ilist, where, INSTR_CREATE_jmp_ind(dcontext, entry));
+#else
+    /* FIXME i#1551, i#3544: NYI on ARM and RISCV64. */
+    CLIENT_ASSERT(false, "dr_insert_redirect_entry_jump(): not supported on this ISA");
+#endif
+}
+
 DR_API
 byte *
 dr_redirect_native_target(void *drcontext)

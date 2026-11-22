@@ -5766,6 +5766,32 @@ enter_nolinking(dcontext_t *dcontext, fragment_t *was_I_flushed, bool cache_tran
 }
 
 /* Returns false iff was_I_flushed ends up being deleted */
+/* Whether enter_couldbelinking() and enter_nolinking() for a cache transition
+ * would find nothing to do for this thread: no flush to wait for or act on, no
+ * pending deletion it has yet to observe, no reset and no client flush request.
+ * Takes no lock: a linking lock that another thread holds would make them wait,
+ * so it counts as something to do.  See dr_redirect_entry().
+ */
+bool
+fragment_reentry_is_quiet(dcontext_t *dcontext)
+{
+    per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    uint local_flushtime_global;
+    if (RUNNING_WITHOUT_CODE_CACHE() || pt == NULL)
+        return false;
+    if (mutex_testlock(&pt->linking_lock) || pt->could_be_linking ||
+        pt->wait_for_unlink || pt->flush_queue_nonempty)
+        return false;
+    ATOMIC_4BYTE_ALIGNED_READ(&flushtime_global, &local_flushtime_global);
+    if (DYNAMO_OPTION(shared_deletion) &&
+        pt->flushtime_last_update < local_flushtime_global)
+        return false;
+    if (reset_pending != 0 || fcache_is_flush_pending(dcontext) ||
+        dcontext->client_data->flush_list != NULL || client_flush_requests != NULL)
+        return false;
+    return true;
+}
+
 bool
 enter_couldbelinking(dcontext_t *dcontext, fragment_t *was_I_flushed,
                      bool cache_transition)

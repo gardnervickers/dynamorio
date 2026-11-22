@@ -5592,6 +5592,17 @@ unlink_fragment_for_signal(dcontext_t *dcontext, fragment_t *f,
     return changed || shared;
 }
 
+/* Whether a dispatcher pass would find no signal work for this thread: none
+ * pending or being delivered, no fragment unlinked for one, and no nudge.
+ */
+bool
+signal_reentry_is_quiet(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    return info != NULL && info->interrupted == NULL && dcontext->signals_pending == 0 &&
+        dcontext->nudge_pending == NULL && dcontext->interrupted_for_nudge == NULL;
+}
+
 bool
 signal_holds_shared_fragment(dcontext_t *dcontext)
 {

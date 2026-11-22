@@ -936,6 +936,42 @@ DR_API
 bool
 dr_redirect_execution(dr_mcontext_t *context);
 
+DR_API
+/**
+ * Returns a code cache entry for resuming at application address \p pc from a
+ * clean call, with the same effect as dr_redirect_execution() with \p pc and the
+ * application state the clean call returns with, or NULL when that would do more
+ * than enter \p pc's fragment.  It does more when a signal or nudge is pending,
+ * another thread is synchronizing with or flushing for this thread, this thread
+ * has a flush, a pending deletion, a reset, a client flush request or (on AArch64
+ * without hardware cache consistency) an instruction cache invalidation to act on,
+ * a lock it would take is held, or \p pc has no fragment yet.  Call
+ * dr_redirect_execution() for those.
+ *
+ * To use the entry, store it in memory, return from the clean call, and jump to
+ * it with dr_insert_redirect_entry_jump().  The clean call must be the thread's
+ * last action before that jump: in particular it must not make a system call,
+ * which could deliver a signal.  A signal that arrives after this routine
+ * returns is delivered when the thread next leaves the code cache.  No kernel
+ * transfer event is raised for this transfer.
+ *
+ * \note This routine may only be called from a clean call from the cache.
+ */
+byte *
+dr_redirect_entry(void *drcontext, app_pc pc);
+
+DR_API
+/**
+ * Inserts meta instructions before \p where that jump to a code cache entry
+ * returned by dr_redirect_entry(), which memory operand \p entry holds, with
+ * every application register holding its application value.  On AArch64 they
+ * use the thread's x0 and x1 spill slots, and \p entry must not use x0 or x1.
+ * Supported on x86 and AArch64.
+ */
+void
+dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where,
+                              opnd_t entry);
+
 /** Flags to request non-default preservation of state in a clean call */
 #define SPILL_SLOT_REDIRECT_NATIVE_TGT SPILL_SLOT_1
 
