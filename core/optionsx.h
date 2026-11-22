@@ -945,6 +945,13 @@ OPTION_DEFAULT_INTERNAL(
 /* PR 361894: if no TLS available, we fall back to thread-private */
 PC_OPTION_DEFAULT(bool, shared_bbs, IF_HAVE_TLS_ELSE(true, false),
                   "use thread-shared basic blocks")
+#ifdef UNIX
+/* A private block cannot link to or from a shared one, so a private block that
+ * executes an ignorable syscall makes two cache exits each time it runs.
+ */
+PC_OPTION_DEFAULT(bool, shared_ignorable_syscall_bbs, true,
+                  "share basic blocks that execute ignorable syscalls in the cache")
+#endif
 /* Note that if we want traces off by default we would have to turn
  * off -shared_traces to avoid tripping over un-initialized ibl tables
  * PR 361894: if no TLS available, we fall back to thread-private
