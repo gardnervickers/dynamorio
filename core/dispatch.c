@@ -806,6 +806,12 @@ dispatch_enter_dynamorio(dcontext_t *dcontext)
            ((dcontext->go_native || dcontext->last_exit == get_reset_linkstub()) &&
             wherewasi == DR_WHERE_DISPATCH));
     dcontext->whereami = DR_WHERE_DISPATCH;
+#if defined(AARCH64) && defined(LINUX)
+    /* A client that got an entry from dr_redirect_entry() and came here instead of
+     * jumping to it is no longer on its way there.
+     */
+    dcontext->redirect_entry_armed = false;
+#endif
     ASSERT_LOCAL_HEAP_UNPROTECTED(dcontext);
     ASSERT(check_should_be_protected(DATASEC_RARELY_PROT));
     /* CANNOT hold any locks across cache execution, as our thread synch

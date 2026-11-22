@@ -870,6 +870,8 @@ void
 d_r_write_lock(read_write_lock_t *rw);
 bool
 d_r_write_trylock(read_write_lock_t *rw);
+bool
+d_r_read_trylock(read_write_lock_t *rw);
 void
 d_r_read_unlock(read_write_lock_t *rw);
 void

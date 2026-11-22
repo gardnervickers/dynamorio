@@ -939,23 +939,37 @@ dr_redirect_execution(dr_mcontext_t *context);
 DR_API
 /**
  * Returns a code cache entry for resuming at application address \p pc from a
- * clean call, with the same effect as dr_redirect_execution() with \p pc and the
- * application state the clean call returns with, or NULL when that would do more
- * than enter \p pc's fragment.  It does more when a signal or nudge is pending,
- * another thread is synchronizing with or flushing for this thread, this thread
- * has a flush, a pending deletion, a reset, a client flush request or (on AArch64
- * without hardware cache consistency) an instruction cache invalidation to act on,
- * a lock it would take is held, or \p pc has no fragment yet.  Call
- * dr_redirect_execution() for those.
+ * clean call, or NULL when dr_redirect_execution() with \p pc and the application
+ * state the clean call returns with would do more than look up and enter \p pc's
+ * fragment.  It does more when a signal or nudge is pending, another thread is
+ * synchronizing with or flushing for this thread, this thread has a flush, a
+ * pending deletion, a reset, a client flush request or (without hardware cache
+ * consistency) an instruction cache invalidation to act on, or \p pc has no
+ * fragment yet.  Call dr_redirect_execution() for those.
+ *
+ * Resuming at the entry has the effect of that dr_redirect_execution() call with
+ * two exceptions.  No kernel transfer event (#DR_XFER_CLIENT_REDIRECT) is raised
+ * for it, even if one is registered, and DR's statistics count neither a cache
+ * exit nor a cache entry.
+ *
+ * This routine never waits.  It tries this thread's linking lock and the shared
+ * fragment tables' read locks, and returns NULL when one is not free, as
+ * dr_redirect_execution() would wait for it.  The only system call it can make
+ * is to wake a thread that began to wait for one of those locks while this
+ * routine held it.
  *
  * To use the entry, store it in memory, return from the clean call, and jump to
- * it with dr_insert_redirect_entry_jump().  The clean call must be the thread's
- * last action before that jump: in particular it must not make a system call,
- * which could deliver a signal.  A signal that arrives after this routine
- * returns is delivered when the thread next leaves the code cache.  No kernel
- * transfer event is raised for this transfer.
+ * it with dr_insert_redirect_entry_jump().  Once this routine has returned an
+ * entry, the clean call must end with that jump or with dr_redirect_execution(),
+ * and not by returning to its call site.  A signal that arrives after this
+ * routine returns is handled as one that arrives while the dispatcher enters
+ * the cache: the jump checks for one that was queued and then leaves through
+ * the dispatcher, as dr_redirect_execution() does, and a later one unlinks the
+ * fragment.
  *
  * \note This routine may only be called from a clean call from the cache.
+ *
+ * \note Implemented on AArch64 Linux.  Returns NULL on other platforms.
  */
 byte *
 dr_redirect_entry(void *drcontext, app_pc pc);
@@ -964,9 +978,12 @@ DR_API
 /**
  * Inserts meta instructions before \p where that jump to a code cache entry
  * returned by dr_redirect_entry(), which memory operand \p entry holds, with
- * every application register holding its application value.  On AArch64 they
- * use the thread's x0 and x1 spill slots, and \p entry must not use x0 or x1.
- * Supported on x86 and AArch64.
+ * every application register holding its application value.  They use the
+ * thread's x0 and x1 spill slots, and \p entry must not use x0 or x1.  If a
+ * signal is pending by then, they leave for the dispatcher instead, which
+ * delivers it and resumes at the same application address.
+ *
+ * \note AArch64 Linux only.
  */
 void
 dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where,

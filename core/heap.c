@@ -1585,7 +1585,8 @@ reached_beyond_vmm(which_vmm_t which)
 bool
 vmm_heap_low_on_memory_quiet(void)
 {
-    return !low_on_memory_pending && !mutex_testlock(&low_on_memory_pending_lock.lock);
+    return !atomic_read_bool(&low_on_memory_pending) &&
+        !mutex_testlock(&low_on_memory_pending_lock.lock);
 }
 
 void

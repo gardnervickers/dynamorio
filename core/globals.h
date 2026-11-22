@@ -827,6 +827,15 @@ struct _dcontext_t {
      * a new callback's as well, we should be able to get rid of this
      */
     bool initialized; /* has this context been used yet? */
+#if defined(AARCH64) && defined(LINUX)
+    /* Set from dr_redirect_entry() returning an entry until the thread reaches
+     * redirect_entry_enter: meanwhile the current clean call ends with a jump to
+     * asynch_target's fragment, not a return to its call site.  It sits in
+     * padding: the dcontext's size decides when a process with several threads
+     * grows its heap, and with that when it makes system calls.
+     */
+    bool redirect_entry_armed;
+#endif
     thread_id_t owning_thread;
 #ifdef UNIX
     process_id_t owning_process; /* handle shared address space w/o shared pid */

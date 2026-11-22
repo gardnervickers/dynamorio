@@ -1046,8 +1046,8 @@ enter_nolinking(dcontext_t *dcontext, fragment_t *watch, bool temporary);
 bool
 enter_couldbelinking(dcontext_t *dcontext, fragment_t *watch, bool temporary);
 
-bool
-fragment_reentry_is_quiet(dcontext_t *dcontext);
+fragment_t *
+fragment_reentry_lookup(dcontext_t *dcontext, app_pc tag);
 
 void
 enter_threadexit(dcontext_t *dcontext);
