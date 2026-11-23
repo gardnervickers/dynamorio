@@ -6818,8 +6818,11 @@ flush_fragments_end_synch(dcontext_t *dcontext, bool keep_initexit_lock)
              * -shared_syscalls by using unprotected storage (thus a slight hole
              * but very hard to exploit for security purposes: can get stale code
              * executed, but we already have that window, or crash us).
-             * FIXME: Does not work w/ -ignore_syscalls, but those are private
-             * for now.
+             * It does not apply to a syscall that runs inside the cache (an
+             * ignorable one): that thread never set at_syscall, so it is counted
+             * as any thread in the cache is and acknowledges the flush when its
+             * block exits.  That holds whether its block is private or, with
+             * -shared_ignorable_syscall_bbs, shared.
              */
 #ifdef DEBUG
             uint pre_flushtime;
