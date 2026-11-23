@@ -58,7 +58,7 @@ enum {
 #define MAX_YIELDS 100000000
 
 /* Raw TLS words.  A taken-over block spills SCRATCH and tests MODE. */
-enum { SPILL, MODE, ENTRY, ROUTINE, TLS_WORDS };
+enum { SPILL, MODE, ROUTINE, TLS_WORDS };
 #define SCRATCH DR_REG_X9
 
 static reg_id_t tls_segment;
@@ -138,7 +138,7 @@ redirect_through_dispatcher(void *drcontext, app_pc pc)
 }
 
 /* Ends the clean call at pc's block: directly if DR returns an entry, which the
- * call site then jumps to.  after_entry runs once DR has returned one.
+ * routine DR wrote then enters.  after_entry runs once DR has returned one.
  */
 static void
 resume_at(void *drcontext, reg_t mode, app_pc pc, bool expect_entry,
@@ -153,7 +153,6 @@ resume_at(void *drcontext, reg_t mode, app_pc pc, bool expect_entry,
         redirect_through_dispatcher(drcontext, pc);
     if (after_entry != NULL)
         (*after_entry)(drcontext);
-    *tls_word(ENTRY) = (reg_t)entry;
 }
 
 /* Reports that DR refused an entry for pc, and resumes there the long way. */
@@ -280,7 +279,8 @@ callee_flush(void)
 }
 
 /* Emits the shared routine once, outside the code cache: restore SCRATCH, call
- * callee_routine, and jump to the entry it stored.
+ * callee_routine, and fall through to DR's routine, which enters the fragment
+ * dr_redirect_entry() returned.
  */
 static void
 emit_routine(void *drcontext)
@@ -294,14 +294,17 @@ emit_routine(void *drcontext)
     dr_insert_clean_call_ex(
         drcontext, ilist, end, (void *)callee_routine,
         DR_CLEANCALL_READS_APP_CONTEXT | DR_CLEANCALL_ALWAYS_OUT_OF_LINE, 0);
-    dr_insert_redirect_entry_jump(drcontext, ilist, end,
-                                  dr_raw_tls_opnd(drcontext, tls_segment, slot(ENTRY)));
     routine =
         dr_nonheap_alloc(size, DR_MEMPROT_READ | DR_MEMPROT_WRITE | DR_MEMPROT_EXEC);
     DR_ASSERT(routine != NULL);
     last = instrlist_encode(drcontext, ilist, routine, true);
     DR_ASSERT(last != NULL && last <= routine + size);
     instrlist_clear_and_destroy(drcontext, ilist);
+    last = dr_emit_redirect_entry_routine(drcontext, last, routine + size - last);
+    DR_ASSERT(last != NULL);
+    /* There is one per process. */
+    DR_ASSERT(dr_emit_redirect_entry_routine(drcontext, last, routine + size - last) ==
+              NULL);
     for (line = routine; line < last; line += 4)
         __asm__ __volatile__("dc cvau, %0" : : "r"(line) : "memory");
     __asm__ __volatile__("dsb ish" : : : "memory");
@@ -337,8 +340,7 @@ take_over(void *drcontext, instrlist_t *bb, bool in_fragment)
         dr_insert_read_raw_tls(drcontext, bb, first, tls_segment, slot(SPILL), SCRATCH);
         dr_insert_clean_call_ex(drcontext, bb, first, (void *)callee_fragment,
                                 DR_CLEANCALL_READS_APP_CONTEXT, 0);
-        dr_insert_redirect_entry_jump(
-            drcontext, bb, first, dr_raw_tls_opnd(drcontext, tls_segment, slot(ENTRY)));
+        dr_insert_redirect_entry_jump(drcontext, bb, first);
     } else {
         dr_insert_read_raw_tls(drcontext, bb, first, tls_segment, slot(ROUTINE), SCRATCH);
         instrlist_meta_preinsert(bb, first,

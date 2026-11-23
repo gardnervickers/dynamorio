@@ -829,8 +829,9 @@ struct _dcontext_t {
     bool initialized; /* has this context been used yet? */
 #if defined(AARCH64) && defined(LINUX)
     /* Set from dr_redirect_entry() returning an entry until the thread reaches
-     * redirect_entry_enter: meanwhile the current clean call ends with a jump to
-     * asynch_target's fragment, not a return to its call site.  It sits in
+     * the routine of dr_emit_redirect_entry_routine(): meanwhile the current clean
+     * call ends with that routine's entry to asynch_target's fragment, not a
+     * return to its call site.  It sits in
      * padding: the dcontext's size decides when a process with several threads
      * grows its heap, and with that when it makes system calls.
      */
