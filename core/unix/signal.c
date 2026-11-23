@@ -5629,8 +5629,8 @@ signal_clean_call_return_at(cache_pc pc)
         /* This clean call does not return to the fragment at pc, if pc is in one at
          * all: it ends with a jump to asynch_target's fragment
          * (dr_redirect_entry()).  Unlink that one, at its entry.  It may be gone
-         * by now: either way redirect_entry_enter sees the pending signal and
-         * leaves for the dispatcher.
+         * by now: either way the routine of dr_emit_redirect_entry_routine() sees
+         * the pending signal and leaves for the dispatcher.
          */
         f = fragment_lookup(dcontext, dcontext->asynch_target);
         if (f != NULL)
@@ -5975,10 +5975,12 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
 #if defined(AARCH64) && defined(LINUX)
     if (dcontext->redirect_entry_armed) {
         /* dr_redirect_entry() has returned an entry and the thread has not yet
-         * reached redirect_entry_enter, so this is the end of that clean call
-         * (clean_call_restore, or clean_call_pending_signal): it is not on its way
-         * back to its call site, which need not be in a fragment, but to
-         * asynch_target's fragment.
+         * reached the store in the routine of dr_emit_redirect_entry_routine()
+         * that clears the mark, so this is the end of that clean call
+         * (clean_call_restore, or clean_call_pending_signal) or the start of the
+         * routine: it is not on its way back to its call site, which need not be in
+         * a fragment, but to asynch_target's fragment.  After that store, the
+         * routine is on its way there too, and asynch_target is found below.
          */
         return fragment_lookup(dcontext, dcontext->asynch_target);
     }
@@ -6384,6 +6386,12 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             LOG(THREAD, LOG_ASYNCH, 2, "\tnot certain can delay so handling now\n");
         }
     } else if (in_generated_routine(dcontext, pc) ||
+#if defined(AARCH64) && defined(LINUX)
+               /* The routine of dr_emit_redirect_entry_routine() enters the cache
+                * as gencode does, from the client's memory.
+                */
+               in_redirect_entry_routine(pc) ||
+#endif
                /* XXX: should also check fine stubs */
                safe_is_in_coarse_stubs(dcontext, pc, xsp)) {
         /* Assumption: dynamo errors have been caught already inside

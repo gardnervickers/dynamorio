@@ -1096,8 +1096,6 @@ typedef struct _generated_code_t {
      * during its callee: see insert_clean_call_pending_signal_check().
      */
     byte *clean_call_pending_signal;
-    /* Where dr_insert_redirect_entry_jump() enters the cache. */
-    byte *redirect_entry_enter;
 #endif
 
     bool thread_shared;
@@ -1155,8 +1153,6 @@ get_clean_call_restore(dcontext_t *dcontext _IF_X86_64(gencode_mode_t mode));
 #if defined(AARCH64) && defined(LINUX)
 cache_pc
 get_clean_call_pending_signal(dcontext_t *dcontext);
-cache_pc
-get_redirect_entry_enter(dcontext_t *dcontext);
 #endif
 
 void
@@ -1401,8 +1397,10 @@ emit_clean_call_restore(dcontext_t *dcontext, byte *pc, generated_code_t *code);
 #if defined(AARCH64) && defined(LINUX)
 byte *
 emit_clean_call_pending_signal(dcontext_t *dcontext, byte *pc, generated_code_t *code);
-byte *
-emit_redirect_entry_enter(dcontext_t *dcontext, byte *pc, generated_code_t *code);
+/* The longest routine emit_redirect_entry_routine() writes. */
+#    define REDIRECT_ENTRY_ROUTINE_WORDS 19
+uint
+emit_redirect_entry_routine(dcontext_t *dcontext, uint *buf);
 #endif
 
 void

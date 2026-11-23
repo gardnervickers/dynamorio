@@ -221,8 +221,6 @@ dump_emitted_routines(dcontext_t *dcontext, file_t file, const char *code_descri
 #    if defined(AARCH64) && defined(LINUX)
             else if (last_pc == code->clean_call_pending_signal)
                 print_file(file, "clean_call_pending_signal:\n");
-            else if (last_pc == code->redirect_entry_enter)
-                print_file(file, "redirect_entry_enter:\n");
 #    endif
             last_pc = disassemble_with_bytes(dcontext, last_pc, file);
         } while (last_pc < emitted_pc);
@@ -493,11 +491,6 @@ shared_gencode_emit(generated_code_t *gencode _IF_X86_64(bool x86_mode))
         pc = emit_clean_call_pending_signal(GLOBAL_DCONTEXT, pc, gencode);
 #endif
     }
-#if defined(AARCH64) && defined(LINUX)
-    pc = check_size_and_cache_line(isa_mode, gencode, pc);
-    gencode->redirect_entry_enter = pc;
-    pc = emit_redirect_entry_enter(GLOBAL_DCONTEXT, pc, gencode);
-#endif
 
     ASSERT(pc < gencode->commit_end_pc);
     gencode->gen_end_pc = pc;
@@ -2084,13 +2077,44 @@ get_clean_call_pending_signal(dcontext_t *dcontext)
     return (cache_pc)code->clean_call_pending_signal;
 }
 
-cache_pc
-get_redirect_entry_enter(dcontext_t *dcontext)
+/* The one routine from emit_redirect_entry_routine_at(), in client memory. */
+static cache_pc redirect_entry_routine_start;
+static cache_pc redirect_entry_routine_end;
+
+/* Writes the routine of emit_redirect_entry_routine() at pc, which has room for
+ * size bytes, and records where it is for the signal handler.  Returns the end of
+ * the routine, or NULL if it does not fit or a routine was written before.
+ */
+byte *
+emit_redirect_entry_routine_at(dcontext_t *dcontext, byte *pc, size_t size)
 {
-    /* AArch64 has only shared gencode. */
-    generated_code_t *code = get_emitted_routines_code(GLOBAL_DCONTEXT);
-    ASSERT(code != NULL && code->redirect_entry_enter != NULL);
-    return (cache_pc)code->redirect_entry_enter;
+    uint buf[REDIRECT_ENTRY_ROUTINE_WORDS];
+    uint words = emit_redirect_entry_routine(dcontext, buf);
+    if (redirect_entry_routine_start != NULL || words * sizeof(uint) > size ||
+        !ALIGNED(pc, sizeof(uint)))
+        return NULL;
+    memcpy(pc, buf, words * sizeof(uint));
+    machine_cache_sync(pc, pc + words * sizeof(uint), true);
+    redirect_entry_routine_end = pc + words * sizeof(uint);
+    /* Published last: the signal handler reads the start first. */
+    redirect_entry_routine_start = pc;
+    return redirect_entry_routine_end;
+}
+
+/* Where dr_insert_redirect_entry_jump() enters that routine, with x0 and x1 saved:
+ * past its first instruction, which saves them.  NULL before it is written.
+ */
+cache_pc
+get_redirect_entry_routine_jump_target(void)
+{
+    return redirect_entry_routine_start == NULL ? NULL : redirect_entry_routine_start + 4;
+}
+
+bool
+in_redirect_entry_routine(cache_pc pc)
+{
+    cache_pc start = redirect_entry_routine_start;
+    return start != NULL && pc >= start && pc < redirect_entry_routine_end;
 }
 #endif
 

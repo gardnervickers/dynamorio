@@ -945,7 +945,8 @@ DR_API
  * synchronizing with or flushing for this thread, this thread has a flush, a
  * pending deletion, a reset, a client flush request or (without hardware cache
  * consistency) an instruction cache invalidation to act on, or \p pc has no
- * fragment yet.  Call dr_redirect_execution() for those.
+ * fragment yet.  Call dr_redirect_execution() for those.  It also returns NULL
+ * until dr_emit_redirect_entry_routine() has succeeded.
  *
  * Resuming at the entry has the effect of that dr_redirect_execution() call with
  * two exceptions.  No kernel transfer event (#DR_XFER_CLIENT_REDIRECT) is raised
@@ -958,14 +959,15 @@ DR_API
  * is to wake a thread that began to wait for one of those locks while this
  * routine held it.
  *
- * To use the entry, store it in memory, return from the clean call, and jump to
- * it with dr_insert_redirect_entry_jump().  Once this routine has returned an
- * entry, the clean call must end with that jump or with dr_redirect_execution(),
- * and not by returning to its call site.  A signal that arrives after this
- * routine returns is handled as one that arrives while the dispatcher enters
- * the cache: the jump checks for one that was queued and then leaves through
- * the dispatcher, as dr_redirect_execution() does, and a later one unlinks the
- * fragment.
+ * To use the entry, return from the clean call into the routine of
+ * dr_emit_redirect_entry_routine(), or jump to it with
+ * dr_insert_redirect_entry_jump(); the routine finds the entry itself.  Once this
+ * routine has returned an entry, the clean call must end that way or with
+ * dr_redirect_execution(), and not by returning to its call site.  A signal that
+ * arrives after this routine returns is handled as one that arrives while the
+ * dispatcher enters the cache: the routine checks for one that was queued and
+ * then leaves through the dispatcher, as dr_redirect_execution() does, and a
+ * later one unlinks the fragment.
  *
  * \note This routine may only be called from a clean call from the cache.
  *
@@ -976,18 +978,40 @@ dr_redirect_entry(void *drcontext, app_pc pc);
 
 DR_API
 /**
- * Inserts meta instructions before \p where that jump to a code cache entry
- * returned by dr_redirect_entry(), which memory operand \p entry holds, with
- * every application register holding its application value.  They use the
- * thread's x0 and x1 spill slots, and \p entry must not use x0 or x1.  If a
- * signal is pending by then, they leave for the dispatcher instead, which
- * delivers it and resumes at the same application address.
+ * Writes at \p pc, which has room for \p size bytes, the routine that enters the
+ * code cache entry dr_redirect_entry() returned, and returns the end of what it
+ * wrote, or NULL if it does not fit or a routine was written before: there is one
+ * per process.  The routine runs with every application register holding its
+ * application value: a clean call outside the cache returns into it, or code
+ * from dr_insert_redirect_entry_jump() jumps to it.  If a signal is pending by
+ * then, it leaves for the dispatcher instead, which delivers it and resumes at
+ * the same application address.  It uses the thread's x0 and x1 spill slots.
+ *
+ * The memory must be readable, writable and executable now, stay executable for
+ * the rest of the process, and never be reused: DR treats a signal that arrives
+ * in it as one on its own way into the cache.  DR makes the routine visible to
+ * instruction fetch.  It lives in the client's memory rather than among DR's
+ * generated routines, which keeps DR's own memory use unchanged.  At most 76
+ * bytes are needed.
+ *
+ * \note AArch64 Linux only: returns NULL on other platforms.
+ */
+byte *
+dr_emit_redirect_entry_routine(void *drcontext, byte *pc, size_t size);
+
+DR_API
+/**
+ * Inserts meta instructions before \p where that jump to the routine of
+ * dr_emit_redirect_entry_routine(), which must have been written, with every
+ * application register holding its application value.  They store x0 and x1 in
+ * the thread's spill slots.  Use them to end a clean call that dr_redirect_entry()
+ * returned an entry for and that is not followed by the routine itself, e.g. one
+ * inside a fragment.
  *
  * \note AArch64 Linux only.
  */
 void
-dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where,
-                              opnd_t entry);
+dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where);
 
 /** Flags to request non-default preservation of state in a clean call */
 #define SPILL_SLOT_REDIRECT_NATIVE_TGT SPILL_SLOT_1

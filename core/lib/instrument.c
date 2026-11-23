@@ -6762,6 +6762,9 @@ dr_redirect_entry(void *drcontext, app_pc pc)
     CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
     CLIENT_ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext(),
                   "dr_redirect_entry(): drcontext must be the current thread's");
+    /* Without the routine there is no way to use an entry. */
+    if (get_redirect_entry_routine_jump_target() == NULL)
+        return NULL;
     tag = canonicalize_pc_target(dcontext, pc);
     if (!redirect_is_quiet(dcontext, tag))
         return NULL;
@@ -6781,8 +6784,9 @@ dr_redirect_entry(void *drcontext, app_pc pc)
     /* Entry to the cache requires an indirect branch: the prefix restores it. */
     entry = FCACHE_PREFIX_ENTRY_PC(f);
     set_fcache_target(dcontext, entry);
-    /* From here to redirect_entry_enter, a signal that can only be queued is one
-     * for asynch_target's fragment: see signal_clean_call_return_at().
+    /* From here to the routine of dr_emit_redirect_entry_routine(), a signal that
+     * can only be queued is one for asynch_target's fragment: see
+     * signal_clean_call_return_at().
      */
     dcontext->redirect_entry_armed = true;
     return PC_AS_JMP_TGT(FRAG_ISA_MODE(f->flags), entry);
@@ -6793,27 +6797,40 @@ dr_redirect_entry(void *drcontext, app_pc pc)
 }
 
 DR_API
-void
-dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where,
-                              opnd_t entry)
+byte *
+dr_emit_redirect_entry_routine(void *drcontext, byte *pc, size_t size)
 {
 #if defined(AARCH64) && defined(LINUX)
     dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(drcontext != NULL,
+                  "dr_emit_redirect_entry_routine(): drcontext cannot be NULL");
+    return emit_redirect_entry_routine_at(dcontext, pc, size);
+#else
+    /* XXX: not implemented on other platforms: dr_redirect_entry() returns NULL. */
+    return NULL;
+#endif
+}
+
+DR_API
+void
+dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where)
+{
+#if defined(AARCH64) && defined(LINUX)
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    cache_pc target = get_redirect_entry_routine_jump_target();
     CLIENT_ASSERT(drcontext != NULL,
                   "dr_insert_redirect_entry_jump(): drcontext cannot be NULL");
-    CLIENT_ASSERT(opnd_is_memory_reference(entry),
-                  "dr_insert_redirect_entry_jump(): entry must be in memory");
-    CLIENT_ASSERT(!opnd_uses_reg(entry, DR_REG_X0) && !opnd_uses_reg(entry, DR_REG_X1),
-                  "dr_insert_redirect_entry_jump(): entry cannot use x0 or x1");
-    /* The fragment prefix restores x0 and x1, as after fcache_enter, and so does
-     * fcache_return if redirect_entry_enter finds a signal pending.
+    CLIENT_ASSERT(target != NULL,
+                  "dr_insert_redirect_entry_jump(): no dr_emit_redirect_entry_routine()");
+    /* The routine expects the app's x0 and x1 in their TLS slots, where the
+     * fragment prefix and fcache_return restore them from.
      */
     MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
     MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X1, TLS_REG1_SLOT));
-    MINSERT(ilist, where, XINST_CREATE_load(dcontext, opnd_create_reg(DR_REG_X0), entry));
-    instrlist_insert_mov_immed_ptrsz(
-        dcontext, (ptr_int_t)get_redirect_entry_enter(dcontext),
-        opnd_create_reg(DR_REG_X1), ilist, where, NULL, NULL);
+    instrlist_insert_mov_immed_ptrsz(dcontext, (ptr_int_t)target,
+                                     opnd_create_reg(DR_REG_X1), ilist, where, NULL,
+                                     NULL);
     MINSERT(ilist, where, XINST_CREATE_jump_reg(dcontext, opnd_create_reg(DR_REG_X1)));
 #else
     /* dr_redirect_entry() returns no entry on other platforms. */
