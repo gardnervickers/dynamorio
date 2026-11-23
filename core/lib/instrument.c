@@ -6717,10 +6717,16 @@ dr_redirect_execution(dr_mcontext_t *mcontext)
     return false;
 }
 
+#if defined(AARCH64) && defined(LINUX)
 /* Whether dr_redirect_execution()'s pass through the dispatcher
  * (dispatch_enter_dynamorio(), d_r_dispatch(), dispatch_enter_fcache()) would act
- * on nothing before entering tag's fragment.  A lock that another thread holds
- * would make that pass wait, so it counts as something to act on.
+ * on nothing before looking up tag's fragment and entering it, apart from what
+ * fragment_reentry_lookup() checks.  A lock that another thread holds would make
+ * that pass wait, so it counts as something to act on.
+ *
+ * dr_redirect_execution() also raises DR_XFER_CLIENT_REDIRECT, which the direct
+ * entry does not, and that is not a reason to refuse: drmgr registers a kernel
+ * transfer event for every client that uses it, whether or not anything listens.
  */
 static bool
 redirect_is_quiet(dcontext_t *dcontext, app_pc tag)
@@ -6733,29 +6739,22 @@ redirect_is_quiet(dcontext_t *dcontext, app_pc tag)
         dcontext->client_data->to_do != NULL ||
         dcontext->client_data->invoke_another_syscall)
         return false;
-    if (should_wait_at_safe_spot(dcontext) || !vmm_heap_low_on_memory_quiet() ||
-        !fragment_reentry_is_quiet(dcontext))
+    if (should_wait_at_safe_spot(dcontext) || !vmm_heap_low_on_memory_quiet())
         return false;
-#ifdef UNIX
     if (!signal_reentry_is_quiet(dcontext))
         return false;
-#endif
-#ifdef AARCH64
     if (dcontext->icache_pending_end != NULL)
         return false;
-#endif
-#ifdef X86
-    if (debug_register_fire_on_addr(tag))
-        return false;
-#endif
     return !DYNAMO_OPTION(coarse_units) && !is_in_dynamo_dll(tag) &&
         tag != BACK_TO_NATIVE_AFTER_SYSCALL;
 }
+#endif
 
 DR_API
 byte *
 dr_redirect_entry(void *drcontext, app_pc pc)
 {
+#if defined(AARCH64) && defined(LINUX)
     dcontext_t *dcontext = (dcontext_t *)drcontext;
     fragment_t *f;
     cache_pc entry;
@@ -6766,28 +6765,31 @@ dr_redirect_entry(void *drcontext, app_pc pc)
     tag = canonicalize_pc_target(dcontext, pc);
     if (!redirect_is_quiet(dcontext, tag))
         return NULL;
-    f = fragment_lookup(dcontext, tag);
+    /* Checks this thread's flush state and looks the fragment up under one lock,
+     * without waiting for any.
+     */
+    f = fragment_reentry_lookup(dcontext, tag);
     if (f == NULL || TEST(FRAG_COARSE_GRAIN, f->flags) ||
         /* monitor_cache_enter() counts trace head executions. */
         (!DYNAMO_OPTION(disable_traces) && TEST(FRAG_IS_TRACE_HEAD, f->flags)))
         return NULL;
-#if defined(UNIX) && !defined(DGC_DIAGNOSTICS) && defined(X86)
-    if (INTERNAL_OPTION(mangle_app_seg) && TEST(FRAG_HAS_MOV_SEG, f->flags))
-        return NULL;
-#endif
     /* Leave the state that pass leaves for the cache. */
     dcontext->next_tag = tag;
     set_last_exit(dcontext, (linkstub_t *)get_client_linkstub());
     dcontext->last_fragment = linkstub_fragment(dcontext, dcontext->last_exit);
-    IF_UNIX(dcontext->asynch_target = tag;)
-#if defined(AARCH64) || defined(RISCV64)
+    dcontext->asynch_target = tag;
     /* Entry to the cache requires an indirect branch: the prefix restores it. */
     entry = FCACHE_PREFIX_ENTRY_PC(f);
-#else
-    entry = FCACHE_ENTRY_PC(f);
-#endif
     set_fcache_target(dcontext, entry);
+    /* From here to redirect_entry_enter, a signal that can only be queued is one
+     * for asynch_target's fragment: see signal_clean_call_return_at().
+     */
+    dcontext->redirect_entry_armed = true;
     return PC_AS_JMP_TGT(FRAG_ISA_MODE(f->flags), entry);
+#else
+    /* XXX: not implemented on other platforms: always the dispatcher. */
+    return NULL;
+#endif
 }
 
 DR_API
@@ -6795,24 +6797,28 @@ void
 dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where,
                               opnd_t entry)
 {
+#if defined(AARCH64) && defined(LINUX)
     dcontext_t *dcontext = (dcontext_t *)drcontext;
     CLIENT_ASSERT(drcontext != NULL,
                   "dr_insert_redirect_entry_jump(): drcontext cannot be NULL");
     CLIENT_ASSERT(opnd_is_memory_reference(entry),
                   "dr_insert_redirect_entry_jump(): entry must be in memory");
-#if defined(AARCH64)
     CLIENT_ASSERT(!opnd_uses_reg(entry, DR_REG_X0) && !opnd_uses_reg(entry, DR_REG_X1),
                   "dr_insert_redirect_entry_jump(): entry cannot use x0 or x1");
-    /* The fragment prefix restores x0 and x1, as after fcache_enter. */
+    /* The fragment prefix restores x0 and x1, as after fcache_enter, and so does
+     * fcache_return if redirect_entry_enter finds a signal pending.
+     */
     MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
     MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X1, TLS_REG1_SLOT));
     MINSERT(ilist, where, XINST_CREATE_load(dcontext, opnd_create_reg(DR_REG_X0), entry));
-    MINSERT(ilist, where, XINST_CREATE_jump_reg(dcontext, opnd_create_reg(DR_REG_X0)));
-#elif defined(X86)
-    MINSERT(ilist, where, INSTR_CREATE_jmp_ind(dcontext, entry));
+    instrlist_insert_mov_immed_ptrsz(
+        dcontext, (ptr_int_t)get_redirect_entry_enter(dcontext),
+        opnd_create_reg(DR_REG_X1), ilist, where, NULL, NULL);
+    MINSERT(ilist, where, XINST_CREATE_jump_reg(dcontext, opnd_create_reg(DR_REG_X1)));
 #else
-    /* FIXME i#1551, i#3544: NYI on ARM and RISCV64. */
-    CLIENT_ASSERT(false, "dr_insert_redirect_entry_jump(): not supported on this ISA");
+    /* dr_redirect_entry() returns no entry on other platforms. */
+    CLIENT_ASSERT(false,
+                  "dr_insert_redirect_entry_jump(): not supported on this platform");
 #endif
 }
 

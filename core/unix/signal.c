@@ -5624,8 +5624,23 @@ signal_clean_call_return_at(cache_pc pc)
      */
     if (dcontext->signals_pending <= 0 || info->interrupted != NULL)
         return;
-    f = fragment_pclookup(dcontext, pc, NULL);
-    ASSERT(f != NULL);
+#    ifdef AARCH64
+    if (dcontext->redirect_entry_armed) {
+        /* This clean call does not return to the fragment at pc, if pc is in one at
+         * all: it ends with a jump to asynch_target's fragment
+         * (dr_redirect_entry()).  Unlink that one, at its entry.  It may be gone
+         * by now: either way redirect_entry_enter sees the pending signal and
+         * leaves for the dispatcher.
+         */
+        f = fragment_lookup(dcontext, dcontext->asynch_target);
+        if (f != NULL)
+            pc = FCACHE_ENTRY_PC(f);
+    } else
+#    endif
+    {
+        f = fragment_pclookup(dcontext, pc, NULL);
+        ASSERT(f != NULL);
+    }
     if (f != NULL && !TEST(FRAG_COARSE_GRAIN, f->flags) &&
         unlink_fragment_for_signal(dcontext, f, pc)) {
         info->interrupted = f;
@@ -5957,6 +5972,17 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
     fragment_t *f = NULL;
     fragment_t wrapper;
     byte *pc = (byte *)sc->SC_XIP;
+#if defined(AARCH64) && defined(LINUX)
+    if (dcontext->redirect_entry_armed) {
+        /* dr_redirect_entry() has returned an entry and the thread has not yet
+         * reached redirect_entry_enter, so this is the end of that clean call
+         * (clean_call_restore, or clean_call_pending_signal): it is not on its way
+         * back to its call site, which need not be in a fragment, but to
+         * asynch_target's fragment.
+         */
+        return fragment_lookup(dcontext, dcontext->asynch_target);
+    }
+#endif
     if (in_clean_call_save(dcontext, pc) || in_clean_call_restore(dcontext, pc)) {
 #ifdef AARCHXX
         f = fragment_pclookup(dcontext, (cache_pc)sc->SC_LR, &wrapper);

@@ -1228,6 +1228,27 @@ d_r_read_lock(read_write_lock_t *rw)
     DEADLOCK_AVOIDANCE_LOCK(&rw->lock, true, LOCK_NOT_OWNABLE);
 }
 
+/* Takes the read lock unless a writer holds or is acquiring it.  Never waits:
+ * returns false instead, including when this thread is the writer.
+ */
+bool
+d_r_read_trylock(read_write_lock_t *rw)
+{
+    if (mutex_testlock(&rw->lock))
+        return false;
+    ATOMIC_INC(int, rw->num_readers);
+    if (!mutex_testlock(&rw->lock)) {
+        DEADLOCK_AVOIDANCE_LOCK(&rw->lock, true, LOCK_NOT_OWNABLE);
+        return true;
+    }
+    /* Raced with a writer, which may now be waiting for this reader to leave. */
+    if (INTERNAL_OPTION(spin_yield_rwlock))
+        ATOMIC_DEC(int, rw->num_readers);
+    else if (atomic_dec_becomes_zero(&rw->num_readers))
+        rwlock_notify_writer(rw); /* Spurious is ok: writers loop. */
+    return false;
+}
+
 void
 d_r_write_lock(read_write_lock_t *rw)
 {

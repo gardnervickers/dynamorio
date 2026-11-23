@@ -1,0 +1,19 @@
+state: direct entry
+state: registers, flags and SIMD preserved
+fragment to fragment: direct entry
+fragment to fragment: registers, flags and SIMD preserved
+no fragment: refused
+pending signal: refused
+pending signal: delivered
+kernel transfer event: direct entry
+kernel transfer event: not raised
+signal after the entry, routine: direct entry
+signal after the entry, routine: delivered in the loop
+signal after the entry, fragment to fragment: direct entry
+signal after the entry, fragment to fragment: delivered in the loop
+signal after the entry, blocking destination: direct entry
+signal after the entry, blocking destination: delivered before the system call
+pending flush: refused
+synchronizing thread: refused
+synchronizing thread: flush completed
+all done

@@ -221,6 +221,8 @@ dump_emitted_routines(dcontext_t *dcontext, file_t file, const char *code_descri
 #    if defined(AARCH64) && defined(LINUX)
             else if (last_pc == code->clean_call_pending_signal)
                 print_file(file, "clean_call_pending_signal:\n");
+            else if (last_pc == code->redirect_entry_enter)
+                print_file(file, "redirect_entry_enter:\n");
 #    endif
             last_pc = disassemble_with_bytes(dcontext, last_pc, file);
         } while (last_pc < emitted_pc);
@@ -491,6 +493,11 @@ shared_gencode_emit(generated_code_t *gencode _IF_X86_64(bool x86_mode))
         pc = emit_clean_call_pending_signal(GLOBAL_DCONTEXT, pc, gencode);
 #endif
     }
+#if defined(AARCH64) && defined(LINUX)
+    pc = check_size_and_cache_line(isa_mode, gencode, pc);
+    gencode->redirect_entry_enter = pc;
+    pc = emit_redirect_entry_enter(GLOBAL_DCONTEXT, pc, gencode);
+#endif
 
     ASSERT(pc < gencode->commit_end_pc);
     gencode->gen_end_pc = pc;
@@ -2075,6 +2082,15 @@ get_clean_call_pending_signal(dcontext_t *dcontext)
     generated_code_t *code = get_emitted_routines_code(GLOBAL_DCONTEXT);
     ASSERT(code != NULL && code->clean_call_pending_signal != NULL);
     return (cache_pc)code->clean_call_pending_signal;
+}
+
+cache_pc
+get_redirect_entry_enter(dcontext_t *dcontext)
+{
+    /* AArch64 has only shared gencode. */
+    generated_code_t *code = get_emitted_routines_code(GLOBAL_DCONTEXT);
+    ASSERT(code != NULL && code->redirect_entry_enter != NULL);
+    return (cache_pc)code->redirect_entry_enter;
 }
 #endif
 

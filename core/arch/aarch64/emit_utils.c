@@ -152,6 +152,77 @@ insert_mov_imm(uint *pc, reg_id_t dst, ptr_int_t val)
     return pc;
 }
 
+#ifdef LINUX
+/* The end of a clean call that resumes at a fragment found by dr_redirect_entry()
+ * instead of returning to its call site: see dr_insert_redirect_entry_jump(),
+ * which jumps here in cache context with the fragment's prefix entry in x0, x1
+ * scratch, and the app's x0 and x1 in their TLS slots, as an exit stub leaves
+ * them.  Like fcache_enter (i#2019), it checks for a signal that could only be
+ * queued since dr_redirect_entry() saw none, and then leaves for the dispatcher
+ * as a client redirect to dcontext->next_tag, as dr_redirect_execution() would.
+ * A signal that arrives in this routine after that check is one in gencode on
+ * the way into the cache: its handler unlinks dcontext->asynch_target's
+ * fragment (find_next_fragment_from_gencode()).  So from here on the thread is
+ * no longer marked as ending a clean call with this jump.
+ *
+ * Written as raw instructions, as the exit stubs are: gencode is emitted before
+ * the thread's TLS is set up, when every heap operation of an instruction list
+ * asks the kernel for the thread id.
+ */
+byte *
+emit_redirect_entry_enter(dcontext_t *dcontext, byte *pc, generated_code_t *code)
+{
+    uint *start = (uint *)vmcode_get_writable_addr(pc);
+    uint *wpc = start;
+    uint *cbz, *tbnz;
+    uint stolen = dr_reg_stolen - DR_REG_X0;
+    uint dcontext_offs = os_tls_offset(TLS_DCONTEXT_SLOT);
+    uint armed_offs = (uint)offsetof(dcontext_t, redirect_entry_armed);
+    uint pending_offs = (uint)offsetof(dcontext_t, signals_pending);
+    uint asynch_offs = (uint)offsetof(dcontext_t, asynch_target);
+    uint next_offs = (uint)offsetof(dcontext_t, next_tag);
+    /* The offsets below are from the dcontext itself. */
+    ASSERT(!TEST(SELFPROT_DCONTEXT, dynamo_options.protect_mask));
+    ASSERT(ALIGNED(dcontext_offs, 8) && dcontext_offs / 8 < (1 << 12));
+    ASSERT(ALIGNED(asynch_offs, 8) && asynch_offs / 8 < (1 << 12));
+    ASSERT(ALIGNED(next_offs, 8) && next_offs / 8 < (1 << 12));
+    ASSERT(pending_offs < (1 << 12) && armed_offs < (1 << 12));
+    /* ldr x1, [x(stolen), #dcontext] */
+    *wpc++ = 0xf9400000 | 1 | stolen << 5 | (dcontext_offs / 8) << 10;
+    /* strb wzr, [x1, #redirect_entry_armed] */
+    *wpc++ = 0x39000000 | 31 | 1 << 5 | armed_offs << 10;
+    /* ldrsb x1, [x1, #signals_pending] */
+    *wpc++ = 0x39800000 | 1 | 1 << 5 | pending_offs << 10;
+    /* Pending only if positive (negative is a signal being delivered):
+     *   cbz x1, enter
+     *   tbnz x1, #63, enter
+     */
+    cbz = wpc++;
+    tbnz = wpc++;
+    /* The fcache target took next_tag's place (set_fcache_target()): put the tag
+     * back, as dispatch_enter_fcache() does when fcache_enter finds a signal.
+     *   ldr x1, [x(stolen), #dcontext]
+     *   ldr x0, [x1, #asynch_target]
+     *   str x0, [x1, #next_tag]
+     */
+    *wpc++ = 0xf9400000 | 1 | stolen << 5 | (dcontext_offs / 8) << 10;
+    *wpc++ = 0xf9400000 | 0 | 1 << 5 | (asynch_offs / 8) << 10;
+    *wpc++ = 0xf9000000 | 0 | 1 << 5 | (next_offs / 8) << 10;
+    /* fcache_return takes the exit's linkstub in x0, and leaves next_tag as it is
+     * for an exit that is not a direct one.
+     */
+    wpc = insert_mov_imm(wpc, DR_REG_X0, (ptr_int_t)get_client_linkstub());
+    wpc = insert_mov_imm(wpc, DR_REG_X1, (ptr_int_t)code->fcache_return);
+    *wpc++ = BR_X1_INST;
+    /* enter: */
+    *cbz = 0xb4000000 | 1 | (uint)(wpc - cbz) << 5;
+    *tbnz = 0xb7f80000 | 1 | (uint)(wpc - tbnz) << 5;
+    /* br x0 */
+    *wpc++ = 0xd61f0000;
+    return pc + ((byte *)wpc - (byte *)start);
+}
+#endif
+
 /* Returns addr for the target_pc data slot of the given stub. The slot starts at the
  * 8-byte aligned region in the 12-byte slot reserved in the stub.
  */

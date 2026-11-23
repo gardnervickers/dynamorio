@@ -2624,6 +2624,8 @@ enum {
     LOOKUP_BB = 0x002,
     LOOKUP_PRIVATE = 0x004,
     LOOKUP_SHARED = 0x008,
+    /* Never wait for a shared table's lock: report no fragment instead. */
+    LOOKUP_NOWAIT = 0x010,
 };
 
 /* A lookup constrained by bb/trace and/or shared/private */
@@ -2689,7 +2691,10 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
             /* MUST look at shared trace table before shared bb table,
              * since a shared trace can shadow a shared trace head
              */
-            d_r_read_lock(&shared_trace->rwlock);
+            if (!TEST(LOOKUP_NOWAIT, lookup_flags))
+                d_r_read_lock(&shared_trace->rwlock);
+            else if (!d_r_read_trylock(&shared_trace->rwlock))
+                return NULL;
             f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, shared_trace);
             d_r_read_unlock(&shared_trace->rwlock);
             if (f->tag != NULL) {
@@ -2703,7 +2708,10 @@ fragment_lookup_type(dcontext_t *dcontext, app_pc tag, uint lookup_flags)
             /* MUST look at private trace table before shared bb table,
              * since a private trace can shadow a shared trace head
              */
-            d_r_read_lock(&shared_bb->rwlock);
+            if (!TEST(LOOKUP_NOWAIT, lookup_flags))
+                d_r_read_lock(&shared_bb->rwlock);
+            else if (!d_r_read_trylock(&shared_bb->rwlock))
+                return NULL;
             f = hashtable_fragment_lookup(dcontext, (ptr_uint_t)tag, shared_bb);
             d_r_read_unlock(&shared_bb->rwlock);
             if (f->tag != NULL) {
@@ -5765,33 +5773,59 @@ enter_nolinking(dcontext_t *dcontext, fragment_t *was_I_flushed, bool cache_tran
     return not_flushed;
 }
 
-/* Returns false iff was_I_flushed ends up being deleted */
-/* Whether enter_couldbelinking() and enter_nolinking() for a cache transition
- * would find nothing to do for this thread: no flush to wait for or act on, no
- * pending deletion it has yet to observe, no reset and no client flush request.
- * Takes no lock: a linking lock that another thread holds would make them wait,
- * so it counts as something to do.  See dr_redirect_entry().
+/* For dr_redirect_entry().  Returns tag's fragment if enter_couldbelinking() and
+ * enter_nolinking() for a cache transition would find nothing to do for this
+ * thread: no flush to wait for or act on, no pending deletion it has yet to
+ * observe, no reset, no cache unit flush and no client flush request.  Returns
+ * NULL otherwise, and whenever it would have to wait for a lock: it never blocks.
+ *
+ * This thread is not could-be-linking, so a flusher treats it as inside the
+ * cache: holding pt->linking_lock, it sets the fields read here and removes this
+ * thread's private fragments from pt's tables, which have no lock of their own
+ * (flush_fragments_synch_priv(), flush_fragments_thread_unlink()).  So the check
+ * and the lookup hold the linking lock, and a flusher that holds it is something
+ * to wait for.  The shared tables' read locks are only tried, for the same reason.
+ * A fragment that is flushed after the lock is released is unlinked but is not
+ * freed before this thread next leaves the cache, as for a flush that arrives
+ * just after a dispatcher pass has entered the cache.
  */
-bool
-fragment_reentry_is_quiet(dcontext_t *dcontext)
+fragment_t *
+fragment_reentry_lookup(dcontext_t *dcontext, app_pc tag)
 {
     per_thread_t *pt = (per_thread_t *)dcontext->fragment_field;
+    fragment_t *f = NULL;
     uint local_flushtime_global;
+    bool global_requests;
     if (RUNNING_WITHOUT_CODE_CACHE() || pt == NULL)
-        return false;
-    if (mutex_testlock(&pt->linking_lock) || pt->could_be_linking ||
-        pt->wait_for_unlink || pt->flush_queue_nonempty)
-        return false;
+        return NULL;
+    if (!d_r_mutex_trylock(&pt->linking_lock))
+        return NULL;
     ATOMIC_4BYTE_ALIGNED_READ(&flushtime_global, &local_flushtime_global);
-    if (DYNAMO_OPTION(shared_deletion) &&
-        pt->flushtime_last_update < local_flushtime_global)
-        return false;
-    if (reset_pending != 0 || fcache_is_flush_pending(dcontext) ||
-        dcontext->client_data->flush_list != NULL || client_flush_requests != NULL)
-        return false;
-    return true;
+    /* Other threads set these two under their own locks, which a dispatcher pass
+     * only takes once it has seen them set.
+     */
+    global_requests = atomic_aligned_read_int((volatile int *)&reset_pending) != 0;
+#ifdef X64
+    if (atomic_aligned_read_int64((volatile int64 *)&client_flush_requests) != 0)
+        global_requests = true;
+#else
+    if (atomic_aligned_read_int((volatile int *)&client_flush_requests) != 0)
+        global_requests = true;
+#endif
+    if (!pt->could_be_linking && !pt->wait_for_unlink && !pt->flush_queue_nonempty &&
+        (!DYNAMO_OPTION(shared_deletion) ||
+         pt->flushtime_last_update >= local_flushtime_global) &&
+        !global_requests && !fcache_is_flush_pending(dcontext) &&
+        dcontext->client_data->flush_list == NULL) {
+        f = fragment_lookup_type(dcontext, tag,
+                                 LOOKUP_TRACE | LOOKUP_BB | LOOKUP_PRIVATE |
+                                     LOOKUP_SHARED | LOOKUP_NOWAIT);
+    }
+    d_r_mutex_unlock(&pt->linking_lock);
+    return f;
 }
 
+/* Returns false iff was_I_flushed ends up being deleted */
 bool
 enter_couldbelinking(dcontext_t *dcontext, fragment_t *was_I_flushed,
                      bool cache_transition)

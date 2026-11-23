@@ -2716,6 +2716,10 @@ if (UNIX)
       # A client's instrumentation runs in an image fexecve'd from a
       # close-on-exec memfd, which spins without syscalls.
       tobuild_ci(client.a64_execveat client-interface/a64_execveat.c "" "" "")
+      # A clean call re-enters the code cache at a block's entry by itself:
+      # dr_redirect_entry().
+      tobuild_ci(client.redirect_entry client-interface/redirect_entry.c "" "" "")
+      link_with_pthread(client.redirect_entry)
     endif ()
     if (X64)
       tobuild_ci(client.mangle_suspend client-interface/mangle_suspend.c ""
