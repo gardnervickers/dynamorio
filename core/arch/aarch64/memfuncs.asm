@@ -41,31 +41,64 @@
 START_FILE
 #ifdef UNIX
 
-/* Private memcpy.
- * FIXME i#1569: We should optimize this as it can be on the critical path.
+/* Private memcpy: 16 bytes per iteration with ldp/stp, then 8, 4, 2 and 1-byte
+ * tails picked by the bits of the remaining count. General registers only, so
+ * the application's SIMD state is untouched, and position-independent with no
+ * calls, since it runs before DR relocates itself. Unaligned accesses are fine
+ * on normal memory. Never reads or writes outside [src, src+n) and [dst, dst+n).
+ * Copies strictly forwards, loading each chunk before storing it: d_r_memmove
+ * and lib/memmove.c call this for overlapping dst < src.
  */
         DECLARE_FUNC(memcpy)
 GLOBAL_LABEL(memcpy:)
         mov      x3, ARG1
-        cbz      ARG3, 2f
-1:      ldrb     w4, [ARG2], #1
-        strb     w4, [x3], #1
-        sub      ARG3, ARG3, #1
-        cbnz     ARG3, 1b
-2:      ret
+        cmp      ARG3, #16
+        b.lo     2f
+1:      ldp      x4, x5, [ARG2], #16
+        stp      x4, x5, [x3], #16
+        sub      ARG3, ARG3, #16
+        cmp      ARG3, #16
+        b.hs     1b
+2:      tbz      ARG3, #3, 3f
+        ldr      x4, [ARG2], #8
+        str      x4, [x3], #8
+3:      tbz      ARG3, #2, 4f
+        ldr      w4, [ARG2], #4
+        str      w4, [x3], #4
+4:      tbz      ARG3, #1, 5f
+        ldrh     w4, [ARG2], #2
+        strh     w4, [x3], #2
+5:      tbz      ARG3, #0, 6f
+        ldrb     w4, [ARG2]
+        strb     w4, [x3]
+6:      ret
         END_FUNC(memcpy)
 
-/* Private memset.
- * FIXME i#1569: we should optimize this as it can be on the critical path.
+/* Private memset: the low byte of the value replicated into a doubleword, then
+ * the same loop and tails as memcpy, with the same constraints.
  */
         DECLARE_FUNC(memset)
 GLOBAL_LABEL(memset:)
         mov      x3, ARG1
-        cbz      ARG3, 2f
-1:      strb     w1, [x3], #1
-        sub      ARG3, ARG3, #1
-        cbnz     ARG3, 1b
-2:      ret
+        and      x4, ARG2, #0xff
+        orr      x4, x4, x4, lsl #8
+        orr      x4, x4, x4, lsl #16
+        orr      x4, x4, x4, lsl #32
+        cmp      ARG3, #16
+        b.lo     2f
+1:      stp      x4, x4, [x3], #16
+        sub      ARG3, ARG3, #16
+        cmp      ARG3, #16
+        b.hs     1b
+2:      tbz      ARG3, #3, 3f
+        str      x4, [x3], #8
+3:      tbz      ARG3, #2, 4f
+        str      w4, [x3], #4
+4:      tbz      ARG3, #1, 5f
+        strh     w4, [x3], #2
+5:      tbz      ARG3, #0, 6f
+        strb     w4, [x3]
+6:      ret
         END_FUNC(memset)
 
 /* See x86.asm notes about needing these to avoid gcc invoking *_chk */
