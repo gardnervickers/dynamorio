@@ -147,6 +147,13 @@ exited_due_to_ni_syscall(dcontext_t *dcontext)
  * exit, whether normal or kernel-mediated via a trampoline context switch.
  * Having no stack state kept across cache executions avoids
  * self-protection issues with the dstack.
+ *
+ * N.B.: on AArch64 Linux, dr_redirect_entry() skips this pass when it would do
+ * nothing but look up a fragment and enter it.  redirect_is_quiet() (instrument.c)
+ * and fragment_reentry_lookup() (fragment.c) hold a copy of the conditions under
+ * which it acts.  A new reason for this pass, dispatch_enter_dynamorio(),
+ * dispatch_enter_fcache(), enter_couldbelinking() or enter_nolinking() to act
+ * before entering the cache must be added there too, or the direct entry skips it.
  */
 void
 d_r_dispatch(dcontext_t *dcontext)
@@ -374,7 +381,10 @@ dispatch_enter_fcache_stats(dcontext_t *dcontext, fragment_t *targetf)
 #endif /* DEBUG */
 }
 
-/* Executes a target fragment in the fragment cache */
+/* Executes a target fragment in the fragment cache.
+ * N.B.: a new reason to act here before entering must also make
+ * redirect_is_quiet() refuse: see d_r_dispatch().
+ */
 static bool
 dispatch_enter_fcache(dcontext_t *dcontext, fragment_t *targetf)
 {
@@ -768,6 +778,9 @@ set_next_tag_to_prior_syscall(dcontext_t *dcontext)
     ASSERT(is_syscall_at_pc(dcontext, dcontext->next_tag));
 }
 
+/* N.B.: a new reason to act here must also make redirect_is_quiet() refuse:
+ * see d_r_dispatch().
+ */
 static void
 dispatch_enter_dynamorio(dcontext_t *dcontext)
 {
