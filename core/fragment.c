@@ -5663,6 +5663,8 @@ process_client_flush_requests(dcontext_t *dcontext, dcontext_t *alloc_dcontext,
 
 /* Returns false iff was_I_flushed ends up being deleted
  * if cache_transition is true, assumes entering the cache now.
+ * N.B.: a new reason to act here on a cache transition must also make
+ * fragment_reentry_lookup() refuse: see d_r_dispatch().
  */
 bool
 enter_nolinking(dcontext_t *dcontext, fragment_t *was_I_flushed, bool cache_transition)
@@ -5825,7 +5827,10 @@ fragment_reentry_lookup(dcontext_t *dcontext, app_pc tag)
     return f;
 }
 
-/* Returns false iff was_I_flushed ends up being deleted */
+/* Returns false iff was_I_flushed ends up being deleted.
+ * N.B.: a new reason to act here on a cache transition must also make
+ * fragment_reentry_lookup() refuse: see d_r_dispatch().
+ */
 bool
 enter_couldbelinking(dcontext_t *dcontext, fragment_t *was_I_flushed,
                      bool cache_transition)
