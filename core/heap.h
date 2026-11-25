@@ -174,6 +174,8 @@ vmcode_get_executable_addr(byte *write_addr);
 
 void
 vmm_heap_handle_pending_low_on_memory_event_trigger();
+bool
+vmm_heap_low_on_memory_quiet(void);
 
 bool
 heap_check_option_compatibility(void);

@@ -6717,6 +6717,128 @@ dr_redirect_execution(dr_mcontext_t *mcontext)
     return false;
 }
 
+#if defined(AARCH64) && defined(LINUX)
+/* Whether dr_redirect_execution()'s pass through the dispatcher
+ * (dispatch_enter_dynamorio(), d_r_dispatch(), dispatch_enter_fcache()) would act
+ * on nothing before looking up tag's fragment and entering it, apart from what
+ * fragment_reentry_lookup() checks.  A lock that another thread holds would make
+ * that pass wait, so it counts as something to act on.
+ *
+ * dr_redirect_execution() also raises DR_XFER_CLIENT_REDIRECT, which the direct
+ * entry does not, and that is not a reason to refuse: drmgr registers a kernel
+ * transfer event for every client that uses it, whether or not anything listens.
+ */
+static bool
+redirect_is_quiet(dcontext_t *dcontext, app_pc tag)
+{
+    if (dcontext->whereami != DR_WHERE_FCACHE &&
+        dcontext->whereami != DR_WHERE_CLEAN_CALLEE)
+        return false;
+    if (get_at_syscall(dcontext) || is_building_trace(dcontext) || dcontext->go_native ||
+        dcontext->native_exec_postsyscall != NULL ||
+        dcontext->client_data->to_do != NULL ||
+        dcontext->client_data->invoke_another_syscall)
+        return false;
+    if (should_wait_at_safe_spot(dcontext) || !vmm_heap_low_on_memory_quiet())
+        return false;
+    if (!signal_reentry_is_quiet(dcontext))
+        return false;
+    if (dcontext->icache_pending_end != NULL)
+        return false;
+    return !DYNAMO_OPTION(coarse_units) && !is_in_dynamo_dll(tag) &&
+        tag != BACK_TO_NATIVE_AFTER_SYSCALL;
+}
+#endif
+
+DR_API
+byte *
+dr_redirect_entry(void *drcontext, app_pc pc)
+{
+#if defined(AARCH64) && defined(LINUX)
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    fragment_t *f;
+    cache_pc entry;
+    app_pc tag;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(dcontext != NULL && dcontext == get_thread_private_dcontext(),
+                  "dr_redirect_entry(): drcontext must be the current thread's");
+    /* Without the routine there is no way to use an entry. */
+    if (get_redirect_entry_routine_jump_target() == NULL)
+        return NULL;
+    tag = canonicalize_pc_target(dcontext, pc);
+    if (!redirect_is_quiet(dcontext, tag))
+        return NULL;
+    /* Checks this thread's flush state and looks the fragment up under one lock,
+     * without waiting for any.
+     */
+    f = fragment_reentry_lookup(dcontext, tag);
+    if (f == NULL || TEST(FRAG_COARSE_GRAIN, f->flags) ||
+        /* monitor_cache_enter() counts trace head executions. */
+        (!DYNAMO_OPTION(disable_traces) && TEST(FRAG_IS_TRACE_HEAD, f->flags)))
+        return NULL;
+    /* Leave the state that pass leaves for the cache. */
+    dcontext->next_tag = tag;
+    set_last_exit(dcontext, (linkstub_t *)get_client_linkstub());
+    dcontext->last_fragment = linkstub_fragment(dcontext, dcontext->last_exit);
+    dcontext->asynch_target = tag;
+    /* Entry to the cache requires an indirect branch: the prefix restores it. */
+    entry = FCACHE_PREFIX_ENTRY_PC(f);
+    set_fcache_target(dcontext, entry);
+    /* From here to the routine of dr_emit_redirect_entry_routine(), a signal that
+     * can only be queued is one for asynch_target's fragment: see
+     * signal_clean_call_return_at().
+     */
+    dcontext->redirect_entry_armed = true;
+    return PC_AS_JMP_TGT(FRAG_ISA_MODE(f->flags), entry);
+#else
+    /* XXX: not implemented on other platforms: always the dispatcher. */
+    return NULL;
+#endif
+}
+
+DR_API
+byte *
+dr_emit_redirect_entry_routine(void *drcontext, byte *pc, size_t size)
+{
+#if defined(AARCH64) && defined(LINUX)
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    CLIENT_ASSERT(!standalone_library, "API not supported in standalone mode");
+    CLIENT_ASSERT(drcontext != NULL,
+                  "dr_emit_redirect_entry_routine(): drcontext cannot be NULL");
+    return emit_redirect_entry_routine_at(dcontext, pc, size);
+#else
+    /* XXX: not implemented on other platforms: dr_redirect_entry() returns NULL. */
+    return NULL;
+#endif
+}
+
+DR_API
+void
+dr_insert_redirect_entry_jump(void *drcontext, instrlist_t *ilist, instr_t *where)
+{
+#if defined(AARCH64) && defined(LINUX)
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    cache_pc target = get_redirect_entry_routine_jump_target();
+    CLIENT_ASSERT(drcontext != NULL,
+                  "dr_insert_redirect_entry_jump(): drcontext cannot be NULL");
+    CLIENT_ASSERT(target != NULL,
+                  "dr_insert_redirect_entry_jump(): no dr_emit_redirect_entry_routine()");
+    /* The routine expects the app's x0 and x1 in their TLS slots, where the
+     * fragment prefix and fcache_return restore them from.
+     */
+    MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
+    MINSERT(ilist, where, instr_create_save_to_tls(dcontext, DR_REG_X1, TLS_REG1_SLOT));
+    instrlist_insert_mov_immed_ptrsz(dcontext, (ptr_int_t)target,
+                                     opnd_create_reg(DR_REG_X1), ilist, where, NULL,
+                                     NULL);
+    MINSERT(ilist, where, XINST_CREATE_jump_reg(dcontext, opnd_create_reg(DR_REG_X1)));
+#else
+    /* dr_redirect_entry() returns no entry on other platforms. */
+    CLIENT_ASSERT(false,
+                  "dr_insert_redirect_entry_jump(): not supported on this platform");
+#endif
+}
+
 DR_API
 byte *
 dr_redirect_native_target(void *drcontext)

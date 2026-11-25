@@ -1579,6 +1579,16 @@ reached_beyond_vmm(which_vmm_t which)
     }
 }
 
+/* Whether a dispatcher pass would neither trigger the low-on-memory event nor
+ * wait for its lock.  Takes no lock.
+ */
+bool
+vmm_heap_low_on_memory_quiet(void)
+{
+    return !atomic_read_bool(&low_on_memory_pending) &&
+        !mutex_testlock(&low_on_memory_pending_lock.lock);
+}
+
 void
 vmm_heap_handle_pending_low_on_memory_event_trigger()
 {

@@ -5592,6 +5592,17 @@ unlink_fragment_for_signal(dcontext_t *dcontext, fragment_t *f,
     return changed || shared;
 }
 
+/* Whether a dispatcher pass would find no signal work for this thread: none
+ * pending or being delivered, no fragment unlinked for one, and no nudge.
+ */
+bool
+signal_reentry_is_quiet(dcontext_t *dcontext)
+{
+    thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+    return info != NULL && info->interrupted == NULL && dcontext->signals_pending == 0 &&
+        dcontext->nudge_pending == NULL && dcontext->interrupted_for_nudge == NULL;
+}
+
 bool
 signal_holds_shared_fragment(dcontext_t *dcontext)
 {
@@ -5613,8 +5624,23 @@ signal_clean_call_return_at(cache_pc pc)
      */
     if (dcontext->signals_pending <= 0 || info->interrupted != NULL)
         return;
-    f = fragment_pclookup(dcontext, pc, NULL);
-    ASSERT(f != NULL);
+#    ifdef AARCH64
+    if (dcontext->redirect_entry_armed) {
+        /* This clean call does not return to the fragment at pc, if pc is in one at
+         * all: it ends with a jump to asynch_target's fragment
+         * (dr_redirect_entry()).  Unlink that one, at its entry.  It may be gone
+         * by now: either way the routine of dr_emit_redirect_entry_routine() sees
+         * the pending signal and leaves for the dispatcher.
+         */
+        f = fragment_lookup(dcontext, dcontext->asynch_target);
+        if (f != NULL)
+            pc = FCACHE_ENTRY_PC(f);
+    } else
+#    endif
+    {
+        f = fragment_pclookup(dcontext, pc, NULL);
+        ASSERT(f != NULL);
+    }
     if (f != NULL && !TEST(FRAG_COARSE_GRAIN, f->flags) &&
         unlink_fragment_for_signal(dcontext, f, pc)) {
         info->interrupted = f;
@@ -5946,6 +5972,19 @@ find_next_fragment_from_gencode(dcontext_t *dcontext, sigcontext_t *sc)
     fragment_t *f = NULL;
     fragment_t wrapper;
     byte *pc = (byte *)sc->SC_XIP;
+#if defined(AARCH64) && defined(LINUX)
+    if (dcontext->redirect_entry_armed) {
+        /* dr_redirect_entry() has returned an entry and the thread has not yet
+         * reached the store in the routine of dr_emit_redirect_entry_routine()
+         * that clears the mark, so this is the end of that clean call
+         * (clean_call_restore, or clean_call_pending_signal) or the start of the
+         * routine: it is not on its way back to its call site, which need not be in
+         * a fragment, but to asynch_target's fragment.  After that store, the
+         * routine is on its way there too, and asynch_target is found below.
+         */
+        return fragment_lookup(dcontext, dcontext->asynch_target);
+    }
+#endif
     if (in_clean_call_save(dcontext, pc) || in_clean_call_restore(dcontext, pc)) {
 #ifdef AARCHXX
         f = fragment_pclookup(dcontext, (cache_pc)sc->SC_LR, &wrapper);
@@ -6347,6 +6386,12 @@ record_pending_signal(dcontext_t *dcontext, int sig, kernel_ucontext_t *ucxt,
             LOG(THREAD, LOG_ASYNCH, 2, "\tnot certain can delay so handling now\n");
         }
     } else if (in_generated_routine(dcontext, pc) ||
+#if defined(AARCH64) && defined(LINUX)
+               /* The routine of dr_emit_redirect_entry_routine() enters the cache
+                * as gencode does, from the client's memory.
+                */
+               in_redirect_entry_routine(pc) ||
+#endif
                /* XXX: should also check fine stubs */
                safe_is_in_coarse_stubs(dcontext, pc, xsp)) {
         /* Assumption: dynamo errors have been caught already inside

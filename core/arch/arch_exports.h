@@ -517,6 +517,15 @@ bool
 is_indirect_branch_lookup_routine(dcontext_t *dcontext, cache_pc pc);
 bool
 in_generated_routine(dcontext_t *dcontext, cache_pc pc);
+#if defined(AARCH64) && defined(LINUX)
+/* See dr_emit_redirect_entry_routine(). */
+byte *
+emit_redirect_entry_routine_at(dcontext_t *dcontext, byte *pc, size_t size);
+cache_pc
+get_redirect_entry_routine_jump_target(void);
+bool
+in_redirect_entry_routine(cache_pc pc);
+#endif
 bool
 in_fcache_return(dcontext_t *dcontext, cache_pc pc);
 bool

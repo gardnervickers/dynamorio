@@ -698,6 +698,8 @@ rseq_module_executed(app_pc pc);
  */
 void signal_cache_exit(dcontext_t *dcontext);
 bool signal_holds_shared_fragment(dcontext_t *dcontext);
+bool
+signal_reentry_is_quiet(dcontext_t *dcontext);
 
 #if defined(LINUX) && (defined(X86) || defined(AARCH64))
 /* Called after a clean call's client code has returned, when a signal is pending,
