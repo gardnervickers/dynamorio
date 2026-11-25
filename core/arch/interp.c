@@ -4675,8 +4675,9 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
             bb->flags |= FRAG_CBR_FALLTHROUGH_SHORT;
     }
     /* we share all basic blocks except selfmod (since want no-synch quick deletion)
-     * or syscall-containing ones (to bound delay on threads exiting shared cache,
-     * for cache management, both consistency and capacity)
+     * or ones that execute a syscall in the cache (to bound delay on threads
+     * exiting shared cache, for cache management, both consistency and capacity),
+     * unless -shared_ignorable_syscall_bbs shares those too: see below.
      * bbs injected with hot patches are also not shared (see case 5272).
      */
     if (DYNAMO_OPTION(shared_bbs) && !TEST(FRAG_SELFMOD_SANDBOXED, bb->flags) &&
@@ -4688,12 +4689,23 @@ build_bb_ilist(dcontext_t *dcontext, build_bb_t *bb)
         /* If the fragment doesn't have a syscall or contains a
          * non-ignorable one -- meaning that the frag will exit the cache
          * to execute the syscall -- it can be shared.
-         * We don't support ignorable syscalls in shared fragments, as they
-         * don't set at_syscall and so are incompatible w/ -syscalls_synch_flush.
+         * On Linux, with -shared_ignorable_syscall_bbs, a block that executes an
+         * ignorable syscall in the cache is shared too.  Shared and private
+         * fragments never link, so such a private block costs two cache exits
+         * each time it runs, one in and one out.  It needs nothing per-thread:
+         * its signal barrier (mangle_syscall()) is patched and restored per
+         * claimant of a shared fragment (unlink_fragment_for_signal()), and a
+         * thread inside its syscall does not set at_syscall, so
+         * -syscalls_synch_flush counts it for shared deletion exactly as it does
+         * a thread inside a private block: a flush does not act on its behalf
+         * (flush_fragments_end_synch()), and it acknowledges the flush itself
+         * when the syscall returns and its block exits.  The fragment's memory
+         * is reclaimed only then.
          */
         if (!TEST(FRAG_HAS_SYSCALL, bb->flags) ||
             TEST(LINK_NI_SYSCALL_ALL, bb->exit_type) ||
-            TEST(LINK_SPECIAL_EXIT, bb->exit_type))
+            TEST(LINK_SPECIAL_EXIT, bb->exit_type)
+                IF_LINUX(|| DYNAMO_OPTION(shared_ignorable_syscall_bbs)))
             bb->flags |= FRAG_SHARED;
 #ifdef WINDOWS
         /* A fragment can be shared if it contains a syscall that will be

@@ -1,0 +1,5 @@
+synchall flush, no SA_RESTART: signal delivered once to the reader, read interrupted, registers preserved
+synchall flush, SA_RESTART: signal delivered once to the reader, read restarted and completed, registers preserved
+unlink flush, no SA_RESTART: signal delivered once to the reader, read interrupted, registers preserved
+unlink flush, SA_RESTART: signal delivered once to the reader, read restarted and completed, registers preserved
+all done

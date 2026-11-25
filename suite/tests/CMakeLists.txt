@@ -2720,6 +2720,19 @@ if (UNIX)
       # dr_redirect_entry().
       tobuild_ci(client.redirect_entry client-interface/redirect_entry.c "" "" "")
       link_with_pthread(client.redirect_entry)
+      # Its blocking destination is then a shared block.
+      torunonly_ci(client.redirect_entry.shared_syscall client.redirect_entry
+        client.redirect_entry.dll client-interface/redirect_entry.c
+        "" "-shared_ignorable_syscall_bbs" "")
+      # A thread blocked in a syscall that runs in the cache, whose block is
+      # flushed and which is then signaled: with that block shared, and private.
+      tobuild_ci(client.syscall_flush_signal
+        client-interface/syscall_flush_signal.c
+        "" "-enable_full_api -shared_ignorable_syscall_bbs" "")
+      link_with_pthread(client.syscall_flush_signal)
+      torunonly_ci(client.syscall_flush_signal.private client.syscall_flush_signal
+        client.syscall_flush_signal.dll client-interface/syscall_flush_signal.c
+        "" "-enable_full_api" "")
     endif ()
     if (X64)
       tobuild_ci(client.mangle_suspend client-interface/mangle_suspend.c ""
