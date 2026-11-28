@@ -1397,6 +1397,10 @@ emit_clean_call_restore(dcontext_t *dcontext, byte *pc, generated_code_t *code);
 #if defined(AARCH64) && defined(LINUX)
 byte *
 emit_clean_call_pending_signal(dcontext_t *dcontext, byte *pc, generated_code_t *code);
+/* The longest routine emit_redirect_entry_routine() writes. */
+#    define REDIRECT_ENTRY_ROUTINE_WORDS 19
+uint
+emit_redirect_entry_routine(dcontext_t *dcontext, uint *buf);
 #endif
 
 void

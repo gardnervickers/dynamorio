@@ -152,6 +152,86 @@ insert_mov_imm(uint *pc, reg_id_t dst, ptr_int_t val)
     return pc;
 }
 
+#ifdef LINUX
+/* Writes to buf the routine through which a clean call resumes at a fragment found
+ * by dr_redirect_entry() instead of returning to its call site, and returns its
+ * length in words (at most REDIRECT_ENTRY_ROUTINE_WORDS).  It runs in cache
+ * context with every app register in place: the clean call returns into it, or
+ * dr_insert_redirect_entry_jump() saves x0 and x1 and branches to its second
+ * instruction.  Like fcache_enter (i#2019), it checks for a signal that could only
+ * be queued since dr_redirect_entry() saw none, and then leaves for the dispatcher
+ * as a client redirect to the fragment's tag, as dr_redirect_execution() would.
+ * Otherwise it enters the fragment's prefix, which dr_redirect_entry() left as
+ * the fcache target (set_fcache_target(): in next_tag), with the app's x0 and x1
+ * in their TLS slots, as an exit stub leaves them.  A signal that arrives in it
+ * is handled as one in gencode on the way into the cache: its handler unlinks
+ * dcontext->asynch_target's fragment (find_next_fragment_from_gencode()).  So
+ * from its first store on, the thread is no longer marked as ending a clean call
+ * with this routine.
+ *
+ * The routine lives in memory the client owns, not in DR's generated code, whose
+ * size decides how many pages DR keeps committed for it.
+ */
+uint
+emit_redirect_entry_routine(dcontext_t *dcontext, uint *buf)
+{
+    uint *wpc = buf;
+    uint *cbz, *tbnz;
+    uint stolen = dr_reg_stolen - DR_REG_X0;
+    uint reg0_offs = os_tls_offset(TLS_REG0_SLOT);
+    uint dcontext_offs = os_tls_offset(TLS_DCONTEXT_SLOT);
+    uint armed_offs = (uint)offsetof(dcontext_t, redirect_entry_armed);
+    uint pending_offs = (uint)offsetof(dcontext_t, signals_pending);
+    uint asynch_offs = (uint)offsetof(dcontext_t, asynch_target);
+    uint next_offs = (uint)offsetof(dcontext_t, next_tag);
+    /* The offsets below are from the dcontext itself. */
+    ASSERT(!TEST(SELFPROT_DCONTEXT, dynamo_options.protect_mask));
+    ASSERT(os_tls_offset(TLS_REG1_SLOT) == reg0_offs + 8);
+    ASSERT(ALIGNED(reg0_offs, 8) && reg0_offs / 8 < (1 << 6));
+    ASSERT(ALIGNED(dcontext_offs, 8) && dcontext_offs / 8 < (1 << 12));
+    ASSERT(ALIGNED(asynch_offs, 8) && asynch_offs / 8 < (1 << 12));
+    ASSERT(ALIGNED(next_offs, 8) && next_offs / 8 < (1 << 12));
+    ASSERT(pending_offs < (1 << 12) && armed_offs < (1 << 12));
+    /* stp x0, x1, [x(stolen), #reg0] */
+    *wpc++ = 0xa9000000 | 0 | 1 << 10 | stolen << 5 | (reg0_offs / 8) << 15;
+    /* ldr x1, [x(stolen), #dcontext] */
+    *wpc++ = 0xf9400000 | 1 | stolen << 5 | (dcontext_offs / 8) << 10;
+    /* strb wzr, [x1, #redirect_entry_armed] */
+    *wpc++ = 0x39000000 | 31 | 1 << 5 | armed_offs << 10;
+    /* ldrsb x0, [x1, #signals_pending] */
+    *wpc++ = 0x39800000 | 0 | 1 << 5 | pending_offs << 10;
+    /* Pending only if positive (negative is a signal being delivered):
+     *   cbz x0, enter
+     *   tbnz x0, #63, enter
+     */
+    cbz = wpc++;
+    tbnz = wpc++;
+    /* The fcache target took next_tag's place: put the tag back, as
+     * dispatch_enter_fcache() does when fcache_enter finds a signal.
+     *   ldr x0, [x1, #asynch_target]
+     *   str x0, [x1, #next_tag]
+     */
+    *wpc++ = 0xf9400000 | 0 | 1 << 5 | (asynch_offs / 8) << 10;
+    *wpc++ = 0xf9000000 | 0 | 1 << 5 | (next_offs / 8) << 10;
+    /* fcache_return takes the exit's linkstub in x0, and leaves next_tag as it is
+     * for an exit that is not a direct one.
+     */
+    wpc = insert_mov_imm(wpc, DR_REG_X0, (ptr_int_t)get_client_linkstub());
+    wpc = insert_mov_imm(wpc, DR_REG_X1, (ptr_int_t)fcache_return_routine(dcontext));
+    *wpc++ = BR_X1_INST;
+    /* enter: */
+    *cbz = 0xb4000000 | 0 | (uint)(wpc - cbz) << 5;
+    *tbnz = 0xb7f80000 | 0 | (uint)(wpc - tbnz) << 5;
+    /* ldr x0, [x1, #next_tag]
+     * br x0
+     */
+    *wpc++ = 0xf9400000 | 0 | 1 << 5 | (next_offs / 8) << 10;
+    *wpc++ = 0xd61f0000;
+    ASSERT(wpc - buf <= REDIRECT_ENTRY_ROUTINE_WORDS);
+    return (uint)(wpc - buf);
+}
+#endif
+
 /* Returns addr for the target_pc data slot of the given stub. The slot starts at the
  * 8-byte aligned region in the 12-byte slot reserved in the stub.
  */
