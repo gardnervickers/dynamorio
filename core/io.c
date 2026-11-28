@@ -1100,7 +1100,196 @@ our_memset_vs_libc(void)
     print_file(STDERR, "our_memset_time: " UINT64_FORMAT_STRING "\n", our_memset_time);
     print_file(STDERR, "libc_memset_time: " UINT64_FORMAT_STRING "\n", libc_memset_time);
 }
-#    endif /* UNIX */
+
+#        ifdef AARCH64
+/* The AArch64 memcpy and memset (arch/aarch64/memfuncs.asm) copy 16 bytes per
+ * iteration and then 8, 4, 2 and 1-byte tails. These call the drmemfuncs symbols
+ * through volatile pointers, so the compiler can neither inline them nor use its
+ * builtins, and check every size up to and past the loop's edges at every
+ * alignment, the bytes around the destination, page-boundary ends, and forward
+ * overlap.
+ */
+typedef void *(*dr_memcpy_t)(void *dst, const void *src, size_t n);
+typedef void *(*dr_memset_t)(void *dst, int val, size_t n);
+static dr_memcpy_t volatile dr_memcpy_fn = memcpy;
+static dr_memset_t volatile dr_memset_fn = memset;
+
+#            define MEMFUNCS_GUARD 0xa5
+#            define MEMFUNCS_PAD 32
+/* The size of an AArch64 signal context with SVE, which DR copies around. */
+#            define MEMFUNCS_BIG 2496
+#            define MEMFUNCS_MAX_SMALL 130
+
+static byte memfuncs_src[MEMFUNCS_BIG + 2 * MEMFUNCS_PAD + 16 + 17]
+    __attribute__((aligned(16)));
+static byte memfuncs_dst[MEMFUNCS_BIG + 2 * MEMFUNCS_PAD + 16 + 17]
+    __attribute__((aligned(16)));
+
+static byte
+memfuncs_pattern(size_t i)
+{
+    return (byte)(i * 131 + 7);
+}
+
+/* 0 to MEMFUNCS_MAX_SMALL, then MEMFUNCS_BIG, then 0 to end the walk. */
+static size_t
+memfuncs_next_size(size_t n)
+{
+    return n < MEMFUNCS_MAX_SMALL ? n + 1 : (n == MEMFUNCS_MAX_SMALL ? MEMFUNCS_BIG : 0);
+}
+
+/* [0, PAD + 16 + n + PAD) of the destination buffer holds the copy at
+ * `PAD + dst_align` and the guard byte everywhere else.
+ */
+static void
+check_drmemcpy(size_t n, size_t src_align, size_t dst_align)
+{
+    size_t span = 2 * MEMFUNCS_PAD + 16 + n, i;
+    byte *src = memfuncs_src + MEMFUNCS_PAD + src_align;
+    byte *dst = memfuncs_dst + MEMFUNCS_PAD + dst_align;
+    void *ret;
+    for (i = 0; i < span; i++) {
+        memfuncs_src[i] = memfuncs_pattern(i);
+        memfuncs_dst[i] = MEMFUNCS_GUARD;
+    }
+    ret = dr_memcpy_fn(dst, src, n);
+    EXPECT(ret == dst, true);
+    for (i = 0; i < span; i++) {
+        byte *at = memfuncs_dst + i;
+        if (at >= dst && at < dst + n)
+            EXPECT(*at, src[at - dst]);
+        else
+            EXPECT(*at, MEMFUNCS_GUARD);
+        EXPECT(memfuncs_src[i], memfuncs_pattern(i));
+    }
+}
+
+static void
+check_drmemset(size_t n, size_t align, int val)
+{
+    size_t span = 2 * MEMFUNCS_PAD + 16 + n, i;
+    byte *dst = memfuncs_dst + MEMFUNCS_PAD + align;
+    void *ret;
+    for (i = 0; i < span; i++)
+        memfuncs_dst[i] = MEMFUNCS_GUARD;
+    ret = dr_memset_fn(dst, val, n);
+    EXPECT(ret == dst, true);
+    for (i = 0; i < span; i++) {
+        byte *at = memfuncs_dst + i;
+        byte want = (at >= dst && at < dst + n) ? (byte)val : MEMFUNCS_GUARD;
+        EXPECT(*at, want);
+    }
+}
+
+/* d_r_memmove and lib/memmove.c call memcpy for overlapping dst < src, which
+ * must then give memmove's result.
+ */
+static void
+check_drmemcpy_forward_overlap(size_t n, size_t dst_align, size_t distance,
+                               bool through_memmove)
+{
+    size_t span = 2 * MEMFUNCS_PAD + 16 + 17 + n, i;
+    byte *dst = memfuncs_dst + MEMFUNCS_PAD + dst_align;
+    byte *src = dst + distance;
+    void *ret;
+    for (i = 0; i < span; i++)
+        memfuncs_dst[i] = memfuncs_pattern(i);
+    if (through_memmove)
+        ret = d_r_memmove(dst, src, n);
+    else
+        ret = dr_memcpy_fn(dst, src, n);
+    EXPECT(ret == dst, true);
+    for (i = 0; i < span; i++) {
+        byte *at = memfuncs_dst + i;
+        if (at >= dst && at < dst + n)
+            EXPECT(*at, memfuncs_pattern(i + distance));
+        else
+            EXPECT(*at, memfuncs_pattern(i));
+    }
+}
+
+static void
+expect_bytes(const byte *got, const byte *want, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        EXPECT(got[i], want[i]);
+}
+
+static void
+expect_memset(const byte *got, byte val, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        EXPECT(got[i], val);
+}
+
+/* Ends against an inaccessible page: any access past either end faults. */
+static void
+test_drmemfuncs_page_ends(void)
+{
+    heap_error_code_t error;
+    size_t size = 3 * PAGE_SIZE, i, n = 0;
+    byte *src_map = os_heap_reserve(NULL, size, &error, false);
+    byte *dst_map = os_heap_reserve(NULL, size, &error, false);
+    byte *src, *dst;
+    EXPECT(src_map != NULL && dst_map != NULL, true);
+    EXPECT(os_heap_commit(src_map + PAGE_SIZE, PAGE_SIZE, MEMPROT_READ | MEMPROT_WRITE,
+                          &error),
+           true);
+    EXPECT(os_heap_commit(dst_map + PAGE_SIZE, PAGE_SIZE, MEMPROT_READ | MEMPROT_WRITE,
+                          &error),
+           true);
+    src = src_map + PAGE_SIZE;
+    dst = dst_map + PAGE_SIZE;
+    for (i = 0; i < PAGE_SIZE; i++)
+        src[i] = memfuncs_pattern(i);
+    do {
+        byte *src_end = src + PAGE_SIZE - n, *dst_end = dst + PAGE_SIZE - n;
+        dr_memcpy_fn(dst_end, src_end, n);
+        expect_bytes(dst_end, src_end, n);
+        dr_memcpy_fn(dst, src, n);
+        expect_bytes(dst, src, n);
+        dr_memcpy_fn(dst, src_end, n);
+        expect_bytes(dst, src_end, n);
+        dr_memcpy_fn(dst_end, src, n);
+        expect_bytes(dst_end, src, n);
+        dr_memset_fn(dst_end, 0x5a, n);
+        expect_memset(dst_end, 0x5a, n);
+        dr_memset_fn(dst, 0x3c, n);
+        expect_memset(dst, 0x3c, n);
+        n = memfuncs_next_size(n);
+    } while (n != 0);
+    os_heap_free(src_map, size, &error);
+    os_heap_free(dst_map, size, &error);
+}
+
+static void
+test_drmemfuncs_aarch64(void)
+{
+    static const int values[] = { 0,    1,          0x7f, 0x80, MEMFUNCS_GUARD + 1,
+                                  0xff, 0x12345678, -2 };
+    size_t n = 0, a, b, v;
+    /* These are DR's own routines, not libc's. */
+    EXPECT((void *)dr_memcpy_fn != dlsym(RTLD_NEXT, "memcpy"), true);
+    EXPECT((void *)dr_memset_fn != dlsym(RTLD_NEXT, "memset"), true);
+    do {
+        for (a = 0; a < 16; a++) {
+            for (b = 0; b < 16; b++)
+                check_drmemcpy(n, a, b);
+            for (v = 0; v < BUFFER_SIZE_ELEMENTS(values); v++)
+                check_drmemset(n, a, values[v]);
+            for (b = 1; b <= 17; b++) {
+                check_drmemcpy_forward_overlap(n, a, b, false);
+                check_drmemcpy_forward_overlap(n, a, b, true);
+            }
+        }
+        n = memfuncs_next_size(n);
+    } while (n != 0);
+    test_drmemfuncs_page_ends();
+}
+#        endif /* AARCH64 */
+#    endif     /* UNIX */
 
 static void
 test_integer(void)
@@ -1248,6 +1437,9 @@ unit_test_io(void)
     /* memset tests */
     test_our_memset();
     our_memset_vs_libc();
+#        ifdef AARCH64
+    test_drmemfuncs_aarch64();
+#        endif
 #    endif /* UNIX */
 
     /* XXX: add more tests */
